@@ -1,0 +1,7 @@
+[package]
+name = "linalg-sandbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratex-parser = "0.1.13"
