@@ -1,5 +1,6 @@
 pub mod to_tex;
 pub mod from_tex;
+pub mod normalize;
 
 use std::rc::Rc;
 
@@ -90,6 +91,7 @@ pub struct LogicChain<Metadata> {
 }
 pub enum RawExpr<Metadata> {
     Variable(Variable),
+    NatLiteral(u64),
     Monop(Monop, Expr<Metadata>),
     Binop(Binop, Expr<Metadata>, Expr<Metadata>),
     Triop(Triop, Expr<Metadata>, Expr<Metadata>, Expr<Metadata>),
