@@ -96,5 +96,5 @@ pub enum RawExpr<Metadata> {
     Binop(Binop, Expr<Metadata>, Expr<Metadata>),
     Triop(Triop, Expr<Metadata>, Expr<Metadata>, Expr<Metadata>),
     Finop(Finop, Vec<Expr<Metadata>>),
-    Seqop(Finop, SeqopRange<Metadata>, Expr<Metadata>),
+    Seqop(SeqOp, SeqopRange<Metadata>, Expr<Metadata>),
 }

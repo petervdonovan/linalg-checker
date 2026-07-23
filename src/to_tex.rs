@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Binop, Expr, Finop, Monop, SeqOp, Triop};
+use crate::{Binop, Expr, Finop, Monop, SeqOp, Triop, Variable};
 
 impl<Metadata> fmt::Display for AsLatex<Metadata> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -14,60 +14,86 @@ pub struct AsLatex<Metadata> {
 
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
     match &e.raw {
-        crate::RawExpr::Variable(variable) => {
-            let mut name = variable.name.clone();
-
-            for annotation in &variable.annotations {
-                name = match annotation {
-                    crate::Annotation::Hat => format!(r"\hat{{{name}}}"),
-                    crate::Annotation::Tilde => format!(r"\tilde{{{name}}}"),
-                    crate::Annotation::Arrow => format!(r"\vec{{{name}}}"),
-                    crate::Annotation::Prime => name,
-                };
-            }
-
-            write!(f, "{name}")?;
-            if !variable.non_numeric_subscript.is_empty() {
-                write!(f, "_{{{}}}", variable.non_numeric_subscript)?;
-            }
-            for annotation in &variable.annotations {
-                if matches!(annotation, crate::Annotation::Prime) {
-                    write!(f, r"^{{\prime}}")?;
-                }
-            }
-            Ok(())
-        }
+        crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
-        crate::RawExpr::Monop(op, e) => monop(f, op, |f| expr(f, e)),
-        crate::RawExpr::Binop(op, e0, e1) => binop(f, op, |f| expr(f, e0), |f| expr(f, e1)),
+        crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
+            grouped_expr(f, e, matches!(op, Monop::Neg | Monop::Inverse) && is_sum(e))
+        }),
+        crate::RawExpr::Binop(op, e0, e1) => binop(
+            f,
+            op,
+            |f| {
+                grouped_expr(
+                    f,
+                    e0,
+                    matches!(op, Binop::Power) && needs_power_base_grouping(e0),
+                )
+            },
+            |f| expr(f, e1),
+        ),
         crate::RawExpr::Triop(op, e0, e1, e2) => {
             triop(f, op, |f| expr(f, e0), |f| expr(f, e1), |f| expr(f, e2))
         }
-        crate::RawExpr::Finop(op, exprs) => finop(f, op, |f| {
-            for (index, expression) in exprs.iter().enumerate() {
-                if index > 0 {
-                    write!(f, "{}", finop_separator(op))?;
-                }
-                expr(f, expression)?;
-            }
-            Ok(())
-        }),
-        crate::RawExpr::Seqop(op, range, body) => {
-            let seq_op = match op {
-                Finop::Plus => SeqOp::Sum,
-                Finop::Times => SeqOp::Prod,
-                _ => return expr(f, body),
-            };
-            seqop(
-                f,
-                &seq_op,
-                &range.index_variable.name,
-                |f| expr(f, &range.from),
-                |f| expr(f, &range.to),
-                |f| expr(f, body),
-            )
+        crate::RawExpr::Finop(op, exprs) => finop(f, op, exprs.iter()),
+        crate::RawExpr::Seqop(op, range, body) => seqop(
+            f,
+            op,
+            &range.index_variable.name,
+            |f| expr(f, &range.from),
+            |f| expr(f, &range.to),
+            |f| expr(f, body),
+        ),
+    }
+}
+
+fn grouped_expr<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    e: &Expr<Metadata>,
+    grouped: bool,
+) -> fmt::Result {
+    if grouped {
+        write!(f, r"\left(")?;
+    }
+    expr(f, e)?;
+    if grouped {
+        write!(f, r"\right)")?;
+    }
+    Ok(())
+}
+
+fn is_sum<Metadata>(e: &Expr<Metadata>) -> bool {
+    matches!(&e.raw, crate::RawExpr::Finop(Finop::Plus, _))
+}
+
+fn needs_power_base_grouping<Metadata>(e: &Expr<Metadata>) -> bool {
+    matches!(
+        &e.raw,
+        crate::RawExpr::Monop(Monop::Neg, _) | crate::RawExpr::Finop(Finop::Plus | Finop::Times, _)
+    )
+}
+
+fn variable(f: &mut fmt::Formatter<'_>, v: &Variable) -> fmt::Result {
+    let mut name = v.name.clone();
+
+    for annotation in &v.annotations {
+        name = match annotation {
+            crate::Annotation::Hat => format!(r"\hat{{{name}}}"),
+            crate::Annotation::Tilde => format!(r"\tilde{{{name}}}"),
+            crate::Annotation::Arrow => format!(r"\vec{{{name}}}"),
+            crate::Annotation::Prime => name,
+        };
+    }
+
+    write!(f, "{name}")?;
+    if !v.non_numeric_subscript.is_empty() {
+        write!(f, "_{{{}}}", v.non_numeric_subscript)?;
+    }
+    for annotation in &v.annotations {
+        if matches!(annotation, crate::Annotation::Prime) {
+            write!(f, r"^{{\prime}}")?;
         }
     }
+    Ok(())
 }
 
 fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
@@ -160,17 +186,35 @@ fn triop<
     }
 }
 
-fn finop<F: FnMut(&mut fmt::Formatter<'_>) -> fmt::Result>(
-    f: &mut fmt::Formatter<'_>,
-    op: &Finop,
-    mut exprs: F,
-) -> fmt::Result {
+fn finop<'a, Metadata: 'a, I>(f: &mut fmt::Formatter<'_>, op: &Finop, exprs: I) -> fmt::Result
+where
+    I: IntoIterator<Item = &'a Expr<Metadata>>,
+{
     match op {
         Finop::Max => write!(f, r"\max(")?,
         Finop::Min => write!(f, r"\min(")?,
         _ => {}
     }
-    exprs(f)?;
+
+    for (index, expression) in exprs.into_iter().enumerate() {
+        if let (Finop::Plus, crate::RawExpr::Monop(Monop::Neg, inner)) = (op, &expression.raw) {
+            if index > 0 {
+                write!(f, " - ")?;
+                grouped_expr(f, inner, is_sum(inner))?;
+                continue;
+            }
+        }
+
+        if index > 0 {
+            write!(f, "{}", finop_separator(op))?;
+        }
+        grouped_expr(
+            f,
+            expression,
+            matches!(op, Finop::Times) && is_sum(expression),
+        )?;
+    }
+
     match op {
         Finop::Max | Finop::Min => write!(f, ")"),
         _ => Ok(()),
@@ -204,7 +248,7 @@ fn seqop<
 fn finop_separator(op: &Finop) -> &'static str {
     match op {
         Finop::Plus => " + ",
-        Finop::Times => r" \cdot ",
+        Finop::Times => " ",
         Finop::LogicChain => r" \implies ",
         Finop::CmpChain => " = ",
         Finop::Max | Finop::Min => ", ",
@@ -218,8 +262,8 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        to_tex::AsLatex, Annotation, Binop, Finop, MetaExpr, Monop, RawExpr, SeqopRange, Triop,
-        Variable,
+        Annotation, Binop, Finop, MetaExpr, Monop, RawExpr, SeqOp, SeqopRange, Triop, Variable,
+        to_tex::AsLatex,
     };
 
     fn expr(raw: RawExpr<()>) -> Rc<MetaExpr<()>> {
@@ -336,11 +380,12 @@ mod tests {
     #[test]
     fn test_finite_operators() {
         let values = vec![expr(RawExpr::NatLiteral(1)), expr(RawExpr::NatLiteral(2))];
+        let factors = vec![variable_expr("x"), variable_expr("y")];
 
-        expect!["1 + 2\n1 \\cdot 2\n\\max(1, 2)\n\\min(1, 2)"].assert_eq(&format!(
+        expect!["1 + 2\nx y\n\\max(1, 2)\n\\min(1, 2)"].assert_eq(&format!(
             "{}\n{}\n{}\n{}",
             as_latex(RawExpr::Finop(Finop::Plus, values.clone())),
-            as_latex(RawExpr::Finop(Finop::Times, values.clone())),
+            as_latex(RawExpr::Finop(Finop::Times, factors)),
             as_latex(RawExpr::Finop(Finop::Max, values.clone())),
             as_latex(RawExpr::Finop(Finop::Min, values)),
         ));
@@ -362,8 +407,8 @@ mod tests {
 
         expect!["\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i"].assert_eq(&format!(
             "{}\n{}",
-            as_latex(sequence(Finop::Plus)),
-            as_latex(sequence(Finop::Times)),
+            as_latex(sequence(SeqOp::Sum)),
+            as_latex(sequence(SeqOp::Prod)),
         ));
     }
 
@@ -377,7 +422,7 @@ mod tests {
         };
 
         expect![
-            "\\left(x + y\\right) \\cdot z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}"
+            "\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}"
         ]
         .assert_eq(&format!(
             "{}\n{}\n{}\n{}",
@@ -397,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_associative_operators_do_not_add_grouping() {
-        expect!["x + y + z\nx \\cdot y \\cdot z"].assert_eq(&format!(
+        expect!["x + y + z\nx y z"].assert_eq(&format!(
             "{}\n{}",
             as_latex(RawExpr::Finop(
                 Finop::Plus,
@@ -459,5 +504,52 @@ mod tests {
             non_numeric_subscript: String::new(),
             annotations: Vec::new(),
         }
+    }
+    #[test]
+    fn test_cmp_chain() {
+        expect!["b + b + a = 2 b + a = b + a + b"].assert_eq(&as_latex(RawExpr::Finop(
+            Finop::CmpChain,
+            vec![
+                expr(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![variable_expr("b"), variable_expr("b"), variable_expr("a")],
+                )),
+                expr(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![
+                        expr(RawExpr::Finop(
+                            Finop::Times,
+                            vec![expr(RawExpr::NatLiteral(2)), variable_expr("b")],
+                        )),
+                        variable_expr("a"),
+                    ],
+                )),
+                expr(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![variable_expr("b"), variable_expr("a"), variable_expr("b")],
+                )),
+            ],
+        )))
+    }
+
+    #[test]
+    fn test_logic_chain() {
+        expect!["a = b \\implies b = a \\implies a = a"].assert_eq(&as_latex(RawExpr::Finop(
+            Finop::LogicChain,
+            vec![
+                expr(RawExpr::Finop(
+                    Finop::CmpChain,
+                    vec![variable_expr("a"), variable_expr("b")],
+                )),
+                expr(RawExpr::Finop(
+                    Finop::CmpChain,
+                    vec![variable_expr("b"), variable_expr("a")],
+                )),
+                expr(RawExpr::Finop(
+                    Finop::CmpChain,
+                    vec![variable_expr("a"), variable_expr("a")],
+                )),
+            ],
+        )))
     }
 }
