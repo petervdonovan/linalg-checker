@@ -3,7 +3,8 @@ use std::{error::Error, fmt, rc::Rc};
 use ratex_parser::{ParseNode, parse_node::AtomFamily};
 
 use crate::{
-    Annotation, Binop, Expr, Finop, MetaExpr, Monop, RawExpr, SeqOp, SeqopRange, Triop, Variable,
+    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, MetaExpr, Monop, RawExpr,
+    SeqOp, SeqopRange, Triop, Variable,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,13 +60,52 @@ impl<'a> Cursor<'a> {
         if self.nodes.is_empty() {
             return Err(FromTexError::EmptyExpression);
         }
-        let expression = self.parse_addition()?;
+        self.skip_ignorable();
+        let expression = self.parse_logic()?;
+        self.skip_ignorable();
         if self.position != self.nodes.len() {
             return Err(FromTexError::TrailingNodes {
                 index: self.position,
             });
         }
         Ok(expression)
+    }
+
+    fn parse_logic(&mut self) -> Result<Expr<()>, FromTexError> {
+        let start = self.parse_comparison()?;
+        let mut assertions = Vec::new();
+
+        loop {
+            self.skip_ignorable();
+            let Some(op) = self.current_logic_operator() else {
+                break;
+            };
+            self.position += 1;
+            self.skip_ignorable();
+            assertions.push((op, self.parse_comparison()?));
+        }
+
+        if assertions.is_empty() {
+            Ok(start)
+        } else {
+            Ok(node(RawExpr::LogicChain(LogicChain { start, assertions })))
+        }
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expr<()>, FromTexError> {
+        let start = self.parse_addition()?;
+        let mut assertions = Vec::new();
+
+        while let Some(op) = self.current_comparison_operator() {
+            self.position += 1;
+            assertions.push((op, self.parse_addition()?));
+        }
+
+        if assertions.is_empty() {
+            Ok(start)
+        } else {
+            Ok(node(RawExpr::CmpChain(CmpChain { start, assertions })))
+        }
     }
 
     fn parse_addition(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -128,7 +168,7 @@ impl<'a> Cursor<'a> {
 
         if let Some((op, range)) = parse_sequence_head(current)? {
             self.position += 1;
-            let body = self.parse_prefix()?;
+            let body = self.parse_multiplication()?;
             return Ok(node(RawExpr::Seqop(op, range, body)));
         }
 
@@ -315,6 +355,34 @@ impl<'a> Cursor<'a> {
         match self.nodes.get(self.position) {
             Some(ParseNode::Atom { text, .. }) => Some(text),
             _ => None,
+        }
+    }
+
+    fn current_comparison_operator(&self) -> Option<Cmp> {
+        match self.current_atom_text()? {
+            "=" => Some(Cmp::Eq),
+            "<" => Some(Cmp::Lt),
+            ">" => Some(Cmp::Gt),
+            r"\le" | r"\leq" => Some(Cmp::Le),
+            r"\ge" | r"\geq" => Some(Cmp::Ge),
+            _ => None,
+        }
+    }
+
+    fn current_logic_operator(&self) -> Option<Logic> {
+        match self.current_atom_text()? {
+            r"\Longrightarrow" | r"\implies" => Some(Logic::Imp),
+            r"\Longleftrightarrow" | r"\iff" => Some(Logic::Iff),
+            _ => None,
+        }
+    }
+
+    fn skip_ignorable(&mut self) {
+        while matches!(
+            self.nodes.get(self.position),
+            Some(ParseNode::Kern { .. } | ParseNode::SpacingNode { .. })
+        ) {
+            self.position += 1;
         }
     }
 
@@ -696,24 +764,54 @@ mod tests {
     #[test]
     fn parses_precedence_and_subtraction() {
         expect![
-            "x + y z\n\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\nx - y"
+            "x + y z\n\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\nx - y\nx \\left(-y\\right)"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             round_trip("x + y z").unwrap(),
             round_trip(r"\left(x + y\right) z").unwrap(),
             round_trip(r"\left(x + y\right)^{2}").unwrap(),
             round_trip(r"-\left(x + y\right)").unwrap(),
             round_trip("x - y").unwrap(),
+            round_trip(r"x \left(-y\right)").unwrap(),
         ));
     }
 
     #[test]
+    fn parses_comparison_and_logic_chains() {
+        expect!["a = b < c > d \\le e \\ge f\nP \\implies Q \\iff R\na + b < c d \\implies P"]
+            .assert_eq(&format!(
+                "{}\n{}\n{}",
+                round_trip(r"a = b < c > d \le e \ge f").unwrap(),
+                round_trip(r"P \implies Q \iff R").unwrap(),
+                round_trip(r"a + b < c d \implies P").unwrap(),
+            ));
+    }
+
+    #[test]
     fn parses_sequence_operators() {
-        expect!["\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i"].assert_eq(&format!(
-            "{}\n{}",
+        expect![
+            "\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i\n\\sum_{i=1}^{3}\\left(x + y\\right)\n\\sum_{i=1}^{3}\\left(x = y\\right)\n\\sum_{i=1}^{3}\\left(P \\implies Q\\right)\n\\sum_{i=1}^{3}x y"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             round_trip(r"\sum_{i=1}^{3}i").unwrap(),
             round_trip(r"\prod_{i=1}^{3}i").unwrap(),
+            round_trip(r"\sum_{i=1}^{3}\left(x + y\right)").unwrap(),
+            round_trip(r"\sum_{i=1}^{3}\left(x = y\right)").unwrap(),
+            round_trip(r"\sum_{i=1}^{3}\left(P \implies Q\right)").unwrap(),
+            round_trip(r"\sum_{i=1}^{3}x y").unwrap(),
+        ));
+
+        let parsed = parse(r"\sum_{i=1}^{3}x y").unwrap();
+        let sequence = super::expr(&parsed).unwrap();
+        assert!(matches!(
+            &sequence.raw,
+            crate::RawExpr::Seqop(
+                _,
+                _,
+                body
+            ) if matches!(&body.raw, crate::RawExpr::Finop(crate::Finop::Times, factors) if factors.len() == 2)
         ));
     }
 

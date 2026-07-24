@@ -61,8 +61,6 @@ pub enum Finop {
     Times,
     Max,
     Min,
-    LogicChain,
-    CmpChain,
 }
 
 pub enum SeqOp {
@@ -89,12 +87,25 @@ pub struct LogicChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Logic, Expr<Metadata>)>,
 }
+pub struct Matrix<Metadata> {
+    pub rows: usize,
+    pub columns: usize,
+    pub elements: Vec<Expr<Metadata>>,
+}
+impl<Metadata> Matrix<Metadata> {
+    fn at(&self, i: usize, j: usize) -> Expr<Metadata> {
+        self.elements[i * self.columns + j].clone()
+    }
+}
 pub enum RawExpr<Metadata> {
     Variable(Variable),
     NatLiteral(u64),
+    Matrix(Matrix<Metadata>),
     Monop(Monop, Expr<Metadata>),
     Binop(Binop, Expr<Metadata>, Expr<Metadata>),
     Triop(Triop, Expr<Metadata>, Expr<Metadata>, Expr<Metadata>),
     Finop(Finop, Vec<Expr<Metadata>>),
+    CmpChain(CmpChain<Metadata>),
+    LogicChain(LogicChain<Metadata>),
     Seqop(SeqOp, SeqopRange<Metadata>, Expr<Metadata>),
 }

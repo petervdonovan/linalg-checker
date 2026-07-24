@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Binop, Expr, Finop, Monop, SeqOp, Triop, Variable};
+use crate::{Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Monop, SeqOp, Triop, Variable};
 
 impl<Metadata> fmt::Display for AsLatex<Metadata> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -17,7 +17,12 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
         crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
-            grouped_expr(f, e, matches!(op, Monop::Neg | Monop::Inverse) && is_sum(e))
+            let grouped = match op {
+                Monop::Neg => precedence(e) <= Precedence::Addition,
+                Monop::Inverse => precedence(e) < Precedence::Power,
+                _ => false,
+            };
+            grouped_expr(f, e, grouped)
         }),
         crate::RawExpr::Binop(op, e0, e1) => binop(
             f,
@@ -26,7 +31,7 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
                 grouped_expr(
                     f,
                     e0,
-                    matches!(op, Binop::Power) && needs_power_base_grouping(e0),
+                    matches!(op, Binop::Power) && precedence(e0) < Precedence::Power,
                 )
             },
             |f| expr(f, e1),
@@ -35,13 +40,15 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
             triop(f, op, |f| expr(f, e0), |f| expr(f, e1), |f| expr(f, e2))
         }
         crate::RawExpr::Finop(op, exprs) => finop(f, op, exprs.iter()),
+        crate::RawExpr::CmpChain(chain) => cmp_chain(f, chain),
+        crate::RawExpr::LogicChain(chain) => logic_chain(f, chain),
         crate::RawExpr::Seqop(op, range, body) => seqop(
             f,
             op,
             &range.index_variable.name,
             |f| expr(f, &range.from),
             |f| expr(f, &range.to),
-            |f| expr(f, body),
+            |f| grouped_expr(f, body, precedence(body) <= Precedence::Addition),
         ),
     }
 }
@@ -61,15 +68,29 @@ fn grouped_expr<Metadata>(
     Ok(())
 }
 
-fn is_sum<Metadata>(e: &Expr<Metadata>) -> bool {
-    matches!(&e.raw, crate::RawExpr::Finop(Finop::Plus, _))
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Precedence {
+    Logic,
+    Comparison,
+    Addition,
+    Multiplication,
+    Prefix,
+    Power,
+    Atom,
 }
 
-fn needs_power_base_grouping<Metadata>(e: &Expr<Metadata>) -> bool {
-    matches!(
-        &e.raw,
-        crate::RawExpr::Monop(Monop::Neg, _) | crate::RawExpr::Finop(Finop::Plus | Finop::Times, _)
-    )
+fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
+    match &e.raw {
+        crate::RawExpr::LogicChain(_) => Precedence::Logic,
+        crate::RawExpr::CmpChain(_) => Precedence::Comparison,
+        crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
+        crate::RawExpr::Finop(Finop::Times, _) => Precedence::Multiplication,
+        crate::RawExpr::Monop(Monop::Neg, _) => Precedence::Prefix,
+        crate::RawExpr::Monop(Monop::Inverse, _) | crate::RawExpr::Binop(Binop::Power, _, _) => {
+            Precedence::Power
+        }
+        _ => Precedence::Atom,
+    }
 }
 
 fn variable(f: &mut fmt::Formatter<'_>, v: &Variable) -> fmt::Result {
@@ -197,12 +218,12 @@ where
     }
 
     for (index, expression) in exprs.into_iter().enumerate() {
-        if let (Finop::Plus, crate::RawExpr::Monop(Monop::Neg, inner)) = (op, &expression.raw) {
-            if index > 0 {
-                write!(f, " - ")?;
-                grouped_expr(f, inner, is_sum(inner))?;
-                continue;
-            }
+        if let (Finop::Plus, crate::RawExpr::Monop(Monop::Neg, inner)) = (op, &expression.raw)
+            && index > 0
+        {
+            write!(f, " - ")?;
+            grouped_expr(f, inner, precedence(inner) <= Precedence::Addition)?;
+            continue;
         }
 
         if index > 0 {
@@ -211,13 +232,62 @@ where
         grouped_expr(
             f,
             expression,
-            matches!(op, Finop::Times) && is_sum(expression),
+            matches!(op, Finop::Times)
+                && (precedence(expression) < Precedence::Multiplication
+                    || matches!(&expression.raw, crate::RawExpr::Monop(Monop::Neg, _))),
         )?;
     }
 
     match op {
         Finop::Max | Finop::Min => write!(f, ")"),
         _ => Ok(()),
+    }
+}
+
+fn cmp_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &CmpChain<Metadata>) -> fmt::Result {
+    grouped_expr(
+        f,
+        &chain.start,
+        precedence(&chain.start) <= Precedence::Comparison,
+    )?;
+    for (op, expression) in &chain.assertions {
+        write!(f, " {} ", cmp_symbol(op))?;
+        grouped_expr(
+            f,
+            expression,
+            precedence(expression) <= Precedence::Comparison,
+        )?;
+    }
+    Ok(())
+}
+
+fn logic_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &LogicChain<Metadata>) -> fmt::Result {
+    grouped_expr(
+        f,
+        &chain.start,
+        precedence(&chain.start) <= Precedence::Logic,
+    )?;
+    for (op, expression) in &chain.assertions {
+        write!(f, " {} ", logic_symbol(op))?;
+        grouped_expr(f, expression, precedence(expression) <= Precedence::Logic)?;
+    }
+    Ok(())
+}
+
+fn cmp_symbol(op: &Cmp) -> &'static str {
+    match op {
+        Cmp::Eq => "=",
+        Cmp::Lt => "<",
+        Cmp::Gt => ">",
+        Cmp::Le => r"\le",
+        Cmp::Ge => r"\ge",
+    }
+}
+
+fn logic_symbol(op: &Logic) -> &'static str {
+    match op {
+        Logic::Iff => r"\iff",
+        Logic::Imp => r"\implies",
     }
 }
 
@@ -249,8 +319,6 @@ fn finop_separator(op: &Finop) -> &'static str {
     match op {
         Finop::Plus => " + ",
         Finop::Times => " ",
-        Finop::LogicChain => r" \implies ",
-        Finop::CmpChain => " = ",
         Finop::Max | Finop::Min => ", ",
     }
 }
@@ -262,8 +330,8 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        Annotation, Binop, Finop, MetaExpr, Monop, RawExpr, SeqOp, SeqopRange, Triop, Variable,
-        to_tex::AsLatex,
+        Annotation, Binop, Cmp, CmpChain, Finop, Logic, LogicChain, MetaExpr, Monop, RawExpr,
+        SeqOp, SeqopRange, Triop, Variable, to_tex::AsLatex,
     };
 
     fn expr(raw: RawExpr<()>) -> Rc<MetaExpr<()>> {
@@ -413,6 +481,44 @@ mod tests {
     }
 
     #[test]
+    fn test_sequence_body_grouping() {
+        let sequence = |body| {
+            RawExpr::Seqop(
+                SeqOp::Sum,
+                SeqopRange {
+                    index_variable: variable("i"),
+                    from: expr(RawExpr::NatLiteral(1)),
+                    to: expr(RawExpr::NatLiteral(3)),
+                },
+                body,
+            )
+        };
+
+        expect![
+            "\\sum_{i=1}^{3}\\left(x + y\\right)\n\\sum_{i=1}^{3}\\left(x = y\\right)\n\\sum_{i=1}^{3}\\left(P \\implies Q\\right)\n\\sum_{i=1}^{3}x y"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}",
+            as_latex(sequence(expr(RawExpr::Finop(
+                Finop::Plus,
+                vec![variable_expr("x"), variable_expr("y")],
+            )))),
+            as_latex(sequence(expr(RawExpr::CmpChain(CmpChain {
+                start: variable_expr("x"),
+                assertions: vec![(Cmp::Eq, variable_expr("y"))],
+            })))),
+            as_latex(sequence(expr(RawExpr::LogicChain(LogicChain {
+                start: variable_expr("P"),
+                assertions: vec![(Logic::Imp, variable_expr("Q"))],
+            })))),
+            as_latex(sequence(expr(RawExpr::Finop(
+                Finop::Times,
+                vec![variable_expr("x"), variable_expr("y")],
+            )))),
+        ));
+    }
+
+    #[test]
     fn test_grouping_for_ambiguous_operands() {
         let sum = || {
             expr(RawExpr::Finop(
@@ -422,10 +528,10 @@ mod tests {
         };
 
         expect![
-            "\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}"
+            "\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}\nx \\left(-y\\right)"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             as_latex(RawExpr::Finop(
                 Finop::Times,
                 vec![sum(), variable_expr("z")],
@@ -437,6 +543,13 @@ mod tests {
             )),
             as_latex(RawExpr::Monop(Monop::Neg, sum())),
             as_latex(RawExpr::Monop(Monop::Inverse, sum())),
+            as_latex(RawExpr::Finop(
+                Finop::Times,
+                vec![
+                    variable_expr("x"),
+                    expr(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
+                ],
+            )),
         ));
     }
 
@@ -507,49 +620,59 @@ mod tests {
     }
     #[test]
     fn test_cmp_chain() {
-        expect!["b + b + a = 2 b + a = b + a + b"].assert_eq(&as_latex(RawExpr::Finop(
-            Finop::CmpChain,
-            vec![
-                expr(RawExpr::Finop(
-                    Finop::Plus,
-                    vec![variable_expr("b"), variable_expr("b"), variable_expr("a")],
-                )),
-                expr(RawExpr::Finop(
-                    Finop::Plus,
-                    vec![
-                        expr(RawExpr::Finop(
-                            Finop::Times,
-                            vec![expr(RawExpr::NatLiteral(2)), variable_expr("b")],
-                        )),
-                        variable_expr("a"),
+        expect!["b + b + a = 2 b + a = b + a + b\na = b < c > d \\le e \\ge f"].assert_eq(
+            &format!(
+                "{}\n{}",
+                as_latex(RawExpr::CmpChain(CmpChain {
+                    start: expr(RawExpr::Finop(
+                        Finop::Plus,
+                        vec![variable_expr("b"), variable_expr("b"), variable_expr("a")],
+                    )),
+                    assertions: vec![
+                        (
+                            Cmp::Eq,
+                            expr(RawExpr::Finop(
+                                Finop::Plus,
+                                vec![
+                                    expr(RawExpr::Finop(
+                                        Finop::Times,
+                                        vec![expr(RawExpr::NatLiteral(2)), variable_expr("b")],
+                                    )),
+                                    variable_expr("a"),
+                                ],
+                            )),
+                        ),
+                        (
+                            Cmp::Eq,
+                            expr(RawExpr::Finop(
+                                Finop::Plus,
+                                vec![variable_expr("b"), variable_expr("a"), variable_expr("b")],
+                            )),
+                        ),
                     ],
-                )),
-                expr(RawExpr::Finop(
-                    Finop::Plus,
-                    vec![variable_expr("b"), variable_expr("a"), variable_expr("b")],
-                )),
-            ],
-        )))
+                })),
+                as_latex(RawExpr::CmpChain(CmpChain {
+                    start: variable_expr("a"),
+                    assertions: vec![
+                        (Cmp::Eq, variable_expr("b")),
+                        (Cmp::Lt, variable_expr("c")),
+                        (Cmp::Gt, variable_expr("d")),
+                        (Cmp::Le, variable_expr("e")),
+                        (Cmp::Ge, variable_expr("f")),
+                    ],
+                })),
+            ),
+        );
     }
 
     #[test]
     fn test_logic_chain() {
-        expect!["a = b \\implies b = a \\implies a = a"].assert_eq(&as_latex(RawExpr::Finop(
-            Finop::LogicChain,
-            vec![
-                expr(RawExpr::Finop(
-                    Finop::CmpChain,
-                    vec![variable_expr("a"), variable_expr("b")],
-                )),
-                expr(RawExpr::Finop(
-                    Finop::CmpChain,
-                    vec![variable_expr("b"), variable_expr("a")],
-                )),
-                expr(RawExpr::Finop(
-                    Finop::CmpChain,
-                    vec![variable_expr("a"), variable_expr("a")],
-                )),
+        expect!["P \\implies Q \\iff R"].assert_eq(&as_latex(RawExpr::LogicChain(LogicChain {
+            start: variable_expr("P"),
+            assertions: vec![
+                (Logic::Imp, variable_expr("Q")),
+                (Logic::Iff, variable_expr("R")),
             ],
-        )))
+        })))
     }
 }
