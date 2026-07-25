@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::{Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Monop, SeqOp, Triop, Variable};
+use crate::{
+    Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, SeqOp, Triop, Variable,
+};
 
 impl<Metadata> fmt::Display for AsLatex<Metadata> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -16,6 +18,7 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
     match &e.raw {
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
+        crate::RawExpr::Matrix(value) => matrix(f, value),
         crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
             let grouped = match op {
                 Monop::Neg => precedence(e) <= Precedence::Addition,
@@ -51,6 +54,36 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
             |f| grouped_expr(f, body, precedence(body) <= Precedence::Addition),
         ),
     }
+}
+
+fn matrix<Metadata>(f: &mut fmt::Formatter<'_>, matrix: &Matrix<Expr<Metadata>>) -> fmt::Result {
+    let expected_elements = matrix
+        .rows
+        .checked_mul(matrix.cols)
+        .expect("matrix dimensions overflow usize");
+    assert_eq!(
+        matrix.elements.len(),
+        expected_elements,
+        "matrix element count does not match its dimensions"
+    );
+    assert!(
+        (matrix.rows == 0) == (matrix.cols == 0),
+        "matrix dimensions must both be zero or both be nonzero"
+    );
+
+    write!(f, r"\begin{{bmatrix}}")?;
+    for row in 0..matrix.rows {
+        if row > 0 {
+            write!(f, r" \\ ")?;
+        }
+        for column in 0..matrix.cols {
+            if column > 0 {
+                write!(f, " & ")?;
+            }
+            expr(f, &matrix.at(row, column))?;
+        }
+    }
+    write!(f, r"\end{{bmatrix}}")
 }
 
 fn grouped_expr<Metadata>(
@@ -330,12 +363,12 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        Annotation, Binop, Cmp, CmpChain, Finop, Logic, LogicChain, MetaExpr, Monop, RawExpr,
-        SeqOp, SeqopRange, Triop, Variable, to_tex::AsLatex,
+        Annotation, Binop, Cmp, CmpChain, Finop, Logic, LogicChain, Matrix, MetaExpr, Monop,
+        RawExpr, SeqOp, SeqopRange, Triop, Variable, to_tex::AsLatex,
     };
 
     fn expr(raw: RawExpr<()>) -> Rc<MetaExpr<()>> {
-        Rc::new(MetaExpr { meta: (), raw })
+        MetaExpr::new(raw)
     }
 
     fn as_latex(raw: RawExpr<()>) -> String {
@@ -345,6 +378,78 @@ mod tests {
     #[test]
     fn test_nat_literal() {
         expect!["42"].assert_eq(&as_latex(RawExpr::NatLiteral(42)));
+    }
+
+    #[test]
+    fn test_matrix() {
+        let matrix = || Matrix {
+            rows: 2,
+            cols: 2,
+            elements: vec![
+                expr(RawExpr::NatLiteral(1)),
+                expr(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![variable_expr("x"), variable_expr("y")],
+                )),
+                expr(RawExpr::Binop(
+                    Binop::Div,
+                    expr(RawExpr::NatLiteral(1)),
+                    expr(RawExpr::NatLiteral(2)),
+                )),
+                expr(RawExpr::Binop(
+                    Binop::Power,
+                    variable_expr("z"),
+                    expr(RawExpr::NatLiteral(2)),
+                )),
+            ],
+        };
+
+        expect![
+            "\\begin{bmatrix}1 & x + y \\\\ \\frac{1}{2} & z^{2}\\end{bmatrix}\nx \\begin{bmatrix}1 & x + y \\\\ \\frac{1}{2} & z^{2}\\end{bmatrix}\n\\begin{bmatrix}1 & x + y \\\\ \\frac{1}{2} & z^{2}\\end{bmatrix}^{2}"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}",
+            as_latex(RawExpr::Matrix(matrix())),
+            as_latex(RawExpr::Finop(
+                Finop::Times,
+                vec![variable_expr("x"), expr(RawExpr::Matrix(matrix()))],
+            )),
+            as_latex(RawExpr::Binop(
+                Binop::Power,
+                expr(RawExpr::Matrix(matrix())),
+                expr(RawExpr::NatLiteral(2)),
+            )),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix element count does not match its dimensions")]
+    fn test_matrix_rejects_bad_element_count() {
+        as_latex(RawExpr::Matrix(Matrix {
+            rows: 2,
+            cols: 2,
+            elements: vec![expr(RawExpr::NatLiteral(1))],
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix dimensions overflow usize")]
+    fn test_matrix_rejects_overflowing_dimensions() {
+        as_latex(RawExpr::Matrix(Matrix {
+            rows: usize::MAX,
+            cols: 2,
+            elements: Vec::new(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix dimensions must both be zero or both be nonzero")]
+    fn test_matrix_rejects_one_zero_dimension() {
+        as_latex(RawExpr::Matrix(Matrix {
+            rows: 0,
+            cols: 2,
+            elements: Vec::new(),
+        }));
     }
 
     #[test]
@@ -380,17 +485,17 @@ mod tests {
             "{}\n{}\n{}",
             as_latex(RawExpr::Binop(
                 Binop::Power,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
                 expr(RawExpr::NatLiteral(2)),
             )),
             as_latex(RawExpr::Binop(
                 Binop::InnerProd,
-                expr(RawExpr::Variable(variable("x"))),
-                expr(RawExpr::Variable(variable("y"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
+                expr(RawExpr::Variable(Variable::new("y"))),
             )),
             as_latex(RawExpr::Binop(
                 Binop::SingleSubscript,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
                 expr(RawExpr::NatLiteral(1)),
             )),
         ));
@@ -402,26 +507,26 @@ mod tests {
             "{}\n{}\n{}\n{}",
             as_latex(RawExpr::Monop(
                 Monop::Trace,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Det,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Neg,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Inverse,
-                expr(RawExpr::Variable(variable("x"))),
+                expr(RawExpr::Variable(Variable::new("x"))),
             )),
         ));
     }
 
     #[test]
     fn test_norm_operators() {
-        let x = || expr(RawExpr::Variable(variable("x")));
+        let x = || expr(RawExpr::Variable(Variable::new("x")));
 
         expect![
             "\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}"
@@ -439,7 +544,7 @@ mod tests {
     fn test_double_subscript() {
         expect!["A_{1,2}"].assert_eq(&as_latex(RawExpr::Triop(
             Triop::DoubleSubscript,
-            expr(RawExpr::Variable(variable("A"))),
+            expr(RawExpr::Variable(Variable::new("A"))),
             expr(RawExpr::NatLiteral(1)),
             expr(RawExpr::NatLiteral(2)),
         )));
@@ -465,11 +570,11 @@ mod tests {
             RawExpr::Seqop(
                 op,
                 SeqopRange {
-                    index_variable: variable("i"),
+                    index_variable: Variable::new("i"),
                     from: expr(RawExpr::NatLiteral(1)),
                     to: expr(RawExpr::NatLiteral(3)),
                 },
-                expr(RawExpr::Variable(variable("i"))),
+                expr(RawExpr::Variable(Variable::new("i"))),
             )
         };
 
@@ -486,7 +591,7 @@ mod tests {
             RawExpr::Seqop(
                 SeqOp::Sum,
                 SeqopRange {
-                    index_variable: variable("i"),
+                    index_variable: Variable::new("i"),
                     from: expr(RawExpr::NatLiteral(1)),
                     to: expr(RawExpr::NatLiteral(3)),
                 },
@@ -608,15 +713,7 @@ mod tests {
     }
 
     fn variable_expr(name: &str) -> Rc<MetaExpr<()>> {
-        expr(RawExpr::Variable(variable(name)))
-    }
-
-    fn variable(name: &str) -> Variable {
-        Variable {
-            name: name.to_owned(),
-            non_numeric_subscript: String::new(),
-            annotations: Vec::new(),
-        }
+        expr(RawExpr::Variable(Variable::new(name)))
     }
     #[test]
     fn test_cmp_chain() {

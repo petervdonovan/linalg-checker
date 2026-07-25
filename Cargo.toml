@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 expect-test = "1.5.1"
 ratex-parser = "0.1.13"
+z3 = "0.20.2"
