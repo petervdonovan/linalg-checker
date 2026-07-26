@@ -1,10 +1,10 @@
-use std::{error::Error, fmt, rc::Rc};
+use std::{error::Error, fmt};
 
 use ratex_parser::{ParseNode, parse_node::AtomFamily};
 
 use crate::{
-    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, MetaExpr, Monop,
-    RawExpr, SeqOp, SeqopRange, Triop, Variable,
+    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
+    SeqOp, SeqopRange, Triop, Variable,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl<'a> Cursor<'a> {
         if assertions.is_empty() {
             Ok(start)
         } else {
-            Ok(MetaExpr::new(RawExpr::LogicChain(LogicChain {
+            Ok(Expr::new(RawExpr::LogicChain(LogicChain {
                 start,
                 assertions,
             })))
@@ -107,10 +107,7 @@ impl<'a> Cursor<'a> {
         if assertions.is_empty() {
             Ok(start)
         } else {
-            Ok(MetaExpr::new(RawExpr::CmpChain(CmpChain {
-                start,
-                assertions,
-            })))
+            Ok(Expr::new(RawExpr::CmpChain(CmpChain { start, assertions })))
         }
     }
 
@@ -127,7 +124,7 @@ impl<'a> Cursor<'a> {
             self.position += 1;
             let mut term = self.parse_multiplication()?;
             if is_subtraction {
-                term = MetaExpr::new(RawExpr::Monop(Monop::Neg, term));
+                term = Expr::new(RawExpr::Monop(Monop::Neg, term));
             }
             push_associative(&mut terms, term, FinopKind::Plus);
         }
@@ -135,7 +132,7 @@ impl<'a> Cursor<'a> {
         if terms.len() == 1 {
             Ok(terms.pop().unwrap())
         } else {
-            Ok(MetaExpr::new(RawExpr::Finop(Finop::Plus, terms)))
+            Ok(Expr::new(RawExpr::Finop(Finop::Plus, terms)))
         }
     }
 
@@ -152,17 +149,14 @@ impl<'a> Cursor<'a> {
         if factors.len() == 1 {
             Ok(factors.pop().unwrap())
         } else {
-            Ok(MetaExpr::new(RawExpr::Finop(Finop::Times, factors)))
+            Ok(Expr::new(RawExpr::Finop(Finop::Times, factors)))
         }
     }
 
     fn parse_prefix(&mut self) -> Result<Expr<()>, FromTexError> {
         if self.current_atom_text() == Some("-") {
             self.position += 1;
-            return Ok(MetaExpr::new(RawExpr::Monop(
-                Monop::Neg,
-                self.parse_prefix()?,
-            )));
+            return Ok(Expr::new(RawExpr::Monop(Monop::Neg, self.parse_prefix()?)));
         }
         self.parse_primary()
     }
@@ -178,7 +172,7 @@ impl<'a> Cursor<'a> {
         if let Some((op, range)) = parse_sequence_head(current)? {
             self.position += 1;
             let body = self.parse_multiplication()?;
-            return Ok(MetaExpr::new(RawExpr::Seqop(op, range, body)));
+            return Ok(Expr::new(RawExpr::Seqop(op, range, body)));
         }
 
         match current {
@@ -211,7 +205,7 @@ impl<'a> Cursor<'a> {
                 ..
             } => {
                 self.position += 1;
-                Ok(MetaExpr::new(RawExpr::Binop(
+                Ok(Expr::new(RawExpr::Binop(
                     Binop::Div,
                     parse_group(numer)?,
                     parse_group(denom)?,
@@ -233,7 +227,7 @@ impl<'a> Cursor<'a> {
                 };
                 self.position += 1;
                 let argument = self.take_parenthesized()?;
-                Ok(MetaExpr::new(RawExpr::Monop(op, expr(argument)?)))
+                Ok(Expr::new(RawExpr::Monop(op, expr(argument)?)))
             }
             ParseNode::Op {
                 name: Some(name), ..
@@ -253,7 +247,7 @@ impl<'a> Cursor<'a> {
                     });
                 }
                 let expressions = parts.into_iter().map(expr).collect::<Result<Vec<_>, _>>()?;
-                Ok(MetaExpr::new(RawExpr::Finop(op, expressions)))
+                Ok(Expr::new(RawExpr::Finop(op, expressions)))
             }
             ParseNode::Atom {
                 family: AtomFamily::Open,
@@ -289,7 +283,7 @@ impl<'a> Cursor<'a> {
             index: start,
             message: "natural-number literal does not fit in u64".to_owned(),
         })?;
-        Ok(MetaExpr::new(RawExpr::NatLiteral(value)))
+        Ok(Expr::new(RawExpr::NatLiteral(value)))
     }
 
     fn parse_variable_name(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -297,7 +291,7 @@ impl<'a> Cursor<'a> {
             unreachable!("parse_variable_name is only called for MathOrd nodes")
         };
         self.position += 1;
-        Ok(MetaExpr::new(RawExpr::Variable(Variable {
+        Ok(Expr::new(RawExpr::Variable(Variable {
             name: name.clone(),
             non_numeric_subscript: String::new(),
             annotations: Vec::new(),
@@ -326,7 +320,7 @@ impl<'a> Cursor<'a> {
                         message: "inner product requires two arguments".to_owned(),
                     });
                 }
-                return Ok(MetaExpr::new(RawExpr::Binop(
+                return Ok(Expr::new(RawExpr::Binop(
                     Binop::InnerProd,
                     expr(parts[0])?,
                     expr(parts[1])?,
@@ -461,7 +455,7 @@ fn parse_bmatrix(body: &[ParseNode]) -> Result<Expr<()>, FromTexError> {
         .flatten()
         .map(parse_matrix_cell)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(MetaExpr::new(RawExpr::Matrix(Matrix {
+    Ok(Expr::new(RawExpr::Matrix(Matrix {
         rows: rows.len(),
         cols: columns,
         elements,
@@ -530,7 +524,7 @@ fn parse_sup_sub(
             index: 0,
             message: "norm is missing its subscript".to_owned(),
         })?)?;
-        return Ok(MetaExpr::new(RawExpr::Monop(op, expr(body)?)));
+        return Ok(Expr::new(RawExpr::Monop(op, expr(body)?)));
     }
 
     let mut expression = parse_group(base)?;
@@ -539,7 +533,7 @@ fn parse_sup_sub(
         let body = group_body(subscript);
         let parts = split_top_level(body, ",");
         if parts.len() == 2 {
-            expression = MetaExpr::new(RawExpr::Triop(
+            expression = Expr::new(RawExpr::Triop(
                 Triop::DoubleSubscript,
                 expression,
                 expr(parts[0])?,
@@ -551,14 +545,14 @@ fn parse_sup_sub(
             if let Ok(variable) = variable_mut(&mut expression, "subscript") {
                 variable.non_numeric_subscript = name;
             } else {
-                expression = MetaExpr::new(RawExpr::Binop(
+                expression = Expr::new(RawExpr::Binop(
                     Binop::SingleSubscript,
                     expression,
                     expr(body)?,
                 ));
             }
         } else {
-            expression = MetaExpr::new(RawExpr::Binop(
+            expression = Expr::new(RawExpr::Binop(
                 Binop::SingleSubscript,
                 expression,
                 expr(body)?,
@@ -573,9 +567,9 @@ fn parse_sup_sub(
                 .annotations
                 .push(Annotation::Prime);
         } else if is_minus_one(body) {
-            expression = MetaExpr::new(RawExpr::Monop(Monop::Inverse, expression));
+            expression = Expr::new(RawExpr::Monop(Monop::Inverse, expression));
         } else {
-            expression = MetaExpr::new(RawExpr::Binop(Binop::Power, expression, expr(body)?));
+            expression = Expr::new(RawExpr::Binop(Binop::Power, expression, expr(body)?));
         }
     }
 
@@ -715,7 +709,8 @@ fn variable_mut<'a>(
     expression: &'a mut Expr<()>,
     context: &'static str,
 ) -> Result<&'a mut Variable, FromTexError> {
-    match &mut Rc::get_mut(expression)
+    match &mut expression
+        .get_mut()
         .expect("newly parsed expressions are not shared")
         .raw
     {

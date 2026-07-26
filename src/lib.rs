@@ -5,7 +5,7 @@ pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
 
-use std::rc::Rc;
+use std::{ops::Deref, rc::Rc};
 
 pub enum Type {
     Bool,
@@ -39,7 +39,7 @@ pub enum Annotation {
     Arrow,
     Prime,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum Cmp {
     Eq,
     Lt,
@@ -47,11 +47,12 @@ pub enum Cmp {
     Le,
     Ge,
 }
+#[derive(PartialEq, Eq, Hash)]
 pub enum Logic {
     Iff,
     Imp,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum Monop {
     Trace,
     Det,
@@ -63,7 +64,7 @@ pub enum Monop {
     NormFrob,
     // Dim,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum Binop {
     // plus and times are associative, hence finops not binops
     Div,
@@ -73,11 +74,11 @@ pub enum Binop {
     // In,
     SingleSubscript,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum Triop {
     DoubleSubscript,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum Finop {
     // Span,
     Plus, // normalize by associativity
@@ -85,41 +86,70 @@ pub enum Finop {
     Max,
     Min,
 }
-
+#[derive(PartialEq, Eq, Hash)]
 pub enum SeqOp {
     Sum,
     Prod,
 }
+#[derive(PartialEq, Eq, Hash)]
+pub struct Expr<Metadata>(Rc<MetaExpr<Metadata>>);
 
-type Expr<Metadata> = Rc<MetaExpr<Metadata>>;
+impl<Metadata> Clone for Expr<Metadata> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
 
+impl<Metadata> Deref for Expr<Metadata> {
+    type Target = MetaExpr<Metadata>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<Metadata> Expr<Metadata> {
+    pub fn with_metadata(meta: Metadata, raw: RawExpr<Metadata>) -> Self {
+        Self(Rc::new(MetaExpr { meta, raw }))
+    }
+
+    pub fn get_mut(&mut self) -> Option<&mut MetaExpr<Metadata>> {
+        Rc::get_mut(&mut self.0)
+    }
+
+    pub fn without_metadata(&self) -> Expr<()> {
+        todo!()
+    }
+}
+
+impl<Metadata: Default> Expr<Metadata> {
+    pub fn new(raw: RawExpr<Metadata>) -> Self {
+        Self::with_metadata(Metadata::default(), raw)
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
 pub struct MetaExpr<Metadata> {
     pub meta: Metadata,
     pub raw: RawExpr<Metadata>,
 }
-
-impl<Metadata: Default> MetaExpr<Metadata> {
-    pub fn new(raw: RawExpr<Metadata>) -> Rc<Self> {
-        Rc::new(Self {
-            meta: Metadata::default(),
-            raw,
-        })
-    }
-}
-
+#[derive(PartialEq, Eq, Hash)]
 pub struct SeqopRange<Metadata> {
     pub index_variable: Variable,
     pub from: Expr<Metadata>,
     pub to: Expr<Metadata>,
 }
+#[derive(PartialEq, Eq, Hash)]
 pub struct CmpChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Cmp, Expr<Metadata>)>,
 }
+#[derive(PartialEq, Eq, Hash)]
 pub struct LogicChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Logic, Expr<Metadata>)>,
 }
+#[derive(PartialEq, Eq, Hash)]
 pub struct Matrix<Cell> {
     pub rows: usize,
     pub cols: usize,
@@ -153,6 +183,7 @@ where
         }
     }
 }
+#[derive(PartialEq, Eq, Hash)]
 pub enum RawExpr<Metadata> {
     Variable(Variable),
     NatLiteral(u64),
@@ -164,4 +195,17 @@ pub enum RawExpr<Metadata> {
     CmpChain(CmpChain<Metadata>),
     LogicChain(LogicChain<Metadata>),
     Seqop(SeqOp, SeqopRange<Metadata>, Expr<Metadata>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Expr, RawExpr};
+
+    struct MetadataWithoutClone;
+
+    #[test]
+    fn cloning_expr_does_not_require_cloneable_metadata() {
+        let expression = Expr::with_metadata(MetadataWithoutClone, RawExpr::NatLiteral(1));
+        let _clone = expression.clone();
+    }
 }

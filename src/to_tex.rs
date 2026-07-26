@@ -14,6 +14,12 @@ pub struct AsLatex<Metadata> {
     e: Expr<Metadata>,
 }
 
+impl<Metadata> Expr<Metadata> {
+    pub fn as_latex(&self) -> AsLatex<Metadata> {
+        AsLatex { e: self.clone() }
+    }
+}
+
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
     match &e.raw {
         crate::RawExpr::Variable(v) => variable(f, v),
@@ -358,21 +364,15 @@ fn finop_separator(op: &Finop) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
     use expect_test::expect;
 
     use crate::{
-        Annotation, Binop, Cmp, CmpChain, Finop, Logic, LogicChain, Matrix, MetaExpr, Monop,
-        RawExpr, SeqOp, SeqopRange, Triop, Variable, to_tex::AsLatex,
+        Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
+        SeqOp, SeqopRange, Triop, Variable,
     };
 
-    fn expr(raw: RawExpr<()>) -> Rc<MetaExpr<()>> {
-        MetaExpr::new(raw)
-    }
-
     fn as_latex(raw: RawExpr<()>) -> String {
-        AsLatex { e: expr(raw) }.to_string()
+        Expr::new(raw).as_latex().to_string()
     }
 
     #[test]
@@ -386,20 +386,20 @@ mod tests {
             rows: 2,
             cols: 2,
             elements: vec![
-                expr(RawExpr::NatLiteral(1)),
-                expr(RawExpr::Finop(
+                Expr::new(RawExpr::NatLiteral(1)),
+                Expr::new(RawExpr::Finop(
                     Finop::Plus,
                     vec![variable_expr("x"), variable_expr("y")],
                 )),
-                expr(RawExpr::Binop(
+                Expr::new(RawExpr::Binop(
                     Binop::Div,
-                    expr(RawExpr::NatLiteral(1)),
-                    expr(RawExpr::NatLiteral(2)),
+                    Expr::new(RawExpr::NatLiteral(1)),
+                    Expr::new(RawExpr::NatLiteral(2)),
                 )),
-                expr(RawExpr::Binop(
+                Expr::new(RawExpr::Binop(
                     Binop::Power,
                     variable_expr("z"),
-                    expr(RawExpr::NatLiteral(2)),
+                    Expr::new(RawExpr::NatLiteral(2)),
                 )),
             ],
         };
@@ -412,12 +412,12 @@ mod tests {
             as_latex(RawExpr::Matrix(matrix())),
             as_latex(RawExpr::Finop(
                 Finop::Times,
-                vec![variable_expr("x"), expr(RawExpr::Matrix(matrix()))],
+                vec![variable_expr("x"), Expr::new(RawExpr::Matrix(matrix()))],
             )),
             as_latex(RawExpr::Binop(
                 Binop::Power,
-                expr(RawExpr::Matrix(matrix())),
-                expr(RawExpr::NatLiteral(2)),
+                Expr::new(RawExpr::Matrix(matrix())),
+                Expr::new(RawExpr::NatLiteral(2)),
             )),
         ));
     }
@@ -428,7 +428,7 @@ mod tests {
         as_latex(RawExpr::Matrix(Matrix {
             rows: 2,
             cols: 2,
-            elements: vec![expr(RawExpr::NatLiteral(1))],
+            elements: vec![Expr::new(RawExpr::NatLiteral(1))],
         }));
     }
 
@@ -474,8 +474,8 @@ mod tests {
     fn test_div() {
         expect!["\\frac{1}{0}"].assert_eq(&as_latex(RawExpr::Binop(
             Binop::Div,
-            expr(RawExpr::NatLiteral(1)),
-            expr(RawExpr::NatLiteral(0)),
+            Expr::new(RawExpr::NatLiteral(1)),
+            Expr::new(RawExpr::NatLiteral(0)),
         )))
     }
 
@@ -485,18 +485,18 @@ mod tests {
             "{}\n{}\n{}",
             as_latex(RawExpr::Binop(
                 Binop::Power,
-                expr(RawExpr::Variable(Variable::new("x"))),
-                expr(RawExpr::NatLiteral(2)),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::NatLiteral(2)),
             )),
             as_latex(RawExpr::Binop(
                 Binop::InnerProd,
-                expr(RawExpr::Variable(Variable::new("x"))),
-                expr(RawExpr::Variable(Variable::new("y"))),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Variable(Variable::new("y"))),
             )),
             as_latex(RawExpr::Binop(
                 Binop::SingleSubscript,
-                expr(RawExpr::Variable(Variable::new("x"))),
-                expr(RawExpr::NatLiteral(1)),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::NatLiteral(1)),
             )),
         ));
     }
@@ -507,26 +507,26 @@ mod tests {
             "{}\n{}\n{}\n{}",
             as_latex(RawExpr::Monop(
                 Monop::Trace,
-                expr(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Det,
-                expr(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Neg,
-                expr(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
             )),
             as_latex(RawExpr::Monop(
                 Monop::Inverse,
-                expr(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
             )),
         ));
     }
 
     #[test]
     fn test_norm_operators() {
-        let x = || expr(RawExpr::Variable(Variable::new("x")));
+        let x = || Expr::new(RawExpr::Variable(Variable::new("x")));
 
         expect![
             "\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}"
@@ -544,15 +544,18 @@ mod tests {
     fn test_double_subscript() {
         expect!["A_{1,2}"].assert_eq(&as_latex(RawExpr::Triop(
             Triop::DoubleSubscript,
-            expr(RawExpr::Variable(Variable::new("A"))),
-            expr(RawExpr::NatLiteral(1)),
-            expr(RawExpr::NatLiteral(2)),
+            Expr::new(RawExpr::Variable(Variable::new("A"))),
+            Expr::new(RawExpr::NatLiteral(1)),
+            Expr::new(RawExpr::NatLiteral(2)),
         )));
     }
 
     #[test]
     fn test_finite_operators() {
-        let values = vec![expr(RawExpr::NatLiteral(1)), expr(RawExpr::NatLiteral(2))];
+        let values = vec![
+            Expr::new(RawExpr::NatLiteral(1)),
+            Expr::new(RawExpr::NatLiteral(2)),
+        ];
         let factors = vec![variable_expr("x"), variable_expr("y")];
 
         expect!["1 + 2\nx y\n\\max(1, 2)\n\\min(1, 2)"].assert_eq(&format!(
@@ -571,10 +574,10 @@ mod tests {
                 op,
                 SeqopRange {
                     index_variable: Variable::new("i"),
-                    from: expr(RawExpr::NatLiteral(1)),
-                    to: expr(RawExpr::NatLiteral(3)),
+                    from: Expr::new(RawExpr::NatLiteral(1)),
+                    to: Expr::new(RawExpr::NatLiteral(3)),
                 },
-                expr(RawExpr::Variable(Variable::new("i"))),
+                Expr::new(RawExpr::Variable(Variable::new("i"))),
             )
         };
 
@@ -592,8 +595,8 @@ mod tests {
                 SeqOp::Sum,
                 SeqopRange {
                     index_variable: Variable::new("i"),
-                    from: expr(RawExpr::NatLiteral(1)),
-                    to: expr(RawExpr::NatLiteral(3)),
+                    from: Expr::new(RawExpr::NatLiteral(1)),
+                    to: Expr::new(RawExpr::NatLiteral(3)),
                 },
                 body,
             )
@@ -604,19 +607,19 @@ mod tests {
         ]
         .assert_eq(&format!(
             "{}\n{}\n{}\n{}",
-            as_latex(sequence(expr(RawExpr::Finop(
+            as_latex(sequence(Expr::new(RawExpr::Finop(
                 Finop::Plus,
                 vec![variable_expr("x"), variable_expr("y")],
             )))),
-            as_latex(sequence(expr(RawExpr::CmpChain(CmpChain {
+            as_latex(sequence(Expr::new(RawExpr::CmpChain(CmpChain {
                 start: variable_expr("x"),
                 assertions: vec![(Cmp::Eq, variable_expr("y"))],
             })))),
-            as_latex(sequence(expr(RawExpr::LogicChain(LogicChain {
+            as_latex(sequence(Expr::new(RawExpr::LogicChain(LogicChain {
                 start: variable_expr("P"),
                 assertions: vec![(Logic::Imp, variable_expr("Q"))],
             })))),
-            as_latex(sequence(expr(RawExpr::Finop(
+            as_latex(sequence(Expr::new(RawExpr::Finop(
                 Finop::Times,
                 vec![variable_expr("x"), variable_expr("y")],
             )))),
@@ -626,7 +629,7 @@ mod tests {
     #[test]
     fn test_grouping_for_ambiguous_operands() {
         let sum = || {
-            expr(RawExpr::Finop(
+            Expr::new(RawExpr::Finop(
                 Finop::Plus,
                 vec![variable_expr("x"), variable_expr("y")],
             ))
@@ -644,7 +647,7 @@ mod tests {
             as_latex(RawExpr::Binop(
                 Binop::Power,
                 sum(),
-                expr(RawExpr::NatLiteral(2)),
+                Expr::new(RawExpr::NatLiteral(2)),
             )),
             as_latex(RawExpr::Monop(Monop::Neg, sum())),
             as_latex(RawExpr::Monop(Monop::Inverse, sum())),
@@ -652,7 +655,7 @@ mod tests {
                 Finop::Times,
                 vec![
                     variable_expr("x"),
-                    expr(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
+                    Expr::new(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
                 ],
             )),
         ));
@@ -666,7 +669,7 @@ mod tests {
                 Finop::Plus,
                 vec![
                     variable_expr("x"),
-                    expr(RawExpr::Finop(
+                    Expr::new(RawExpr::Finop(
                         Finop::Plus,
                         vec![variable_expr("y"), variable_expr("z")],
                     )),
@@ -676,7 +679,7 @@ mod tests {
                 Finop::Times,
                 vec![
                     variable_expr("x"),
-                    expr(RawExpr::Finop(
+                    Expr::new(RawExpr::Finop(
                         Finop::Times,
                         vec![variable_expr("y"), variable_expr("z")],
                     )),
@@ -693,16 +696,16 @@ mod tests {
                 Finop::Plus,
                 vec![
                     variable_expr("x"),
-                    expr(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
+                    Expr::new(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
                 ],
             )),
             as_latex(RawExpr::Finop(
                 Finop::Plus,
                 vec![
                     variable_expr("x"),
-                    expr(RawExpr::Monop(
+                    Expr::new(RawExpr::Monop(
                         Monop::Neg,
-                        expr(RawExpr::Finop(
+                        Expr::new(RawExpr::Finop(
                             Finop::Plus,
                             vec![variable_expr("y"), variable_expr("z")],
                         )),
@@ -712,8 +715,8 @@ mod tests {
         ));
     }
 
-    fn variable_expr(name: &str) -> Rc<MetaExpr<()>> {
-        expr(RawExpr::Variable(Variable::new(name)))
+    fn variable_expr(name: &str) -> Expr<()> {
+        Expr::new(RawExpr::Variable(Variable::new(name)))
     }
     #[test]
     fn test_cmp_chain() {
@@ -721,19 +724,19 @@ mod tests {
             &format!(
                 "{}\n{}",
                 as_latex(RawExpr::CmpChain(CmpChain {
-                    start: expr(RawExpr::Finop(
+                    start: Expr::new(RawExpr::Finop(
                         Finop::Plus,
                         vec![variable_expr("b"), variable_expr("b"), variable_expr("a")],
                     )),
                     assertions: vec![
                         (
                             Cmp::Eq,
-                            expr(RawExpr::Finop(
+                            Expr::new(RawExpr::Finop(
                                 Finop::Plus,
                                 vec![
-                                    expr(RawExpr::Finop(
+                                    Expr::new(RawExpr::Finop(
                                         Finop::Times,
-                                        vec![expr(RawExpr::NatLiteral(2)), variable_expr("b")],
+                                        vec![Expr::new(RawExpr::NatLiteral(2)), variable_expr("b")],
                                     )),
                                     variable_expr("a"),
                                 ],
@@ -741,7 +744,7 @@ mod tests {
                         ),
                         (
                             Cmp::Eq,
-                            expr(RawExpr::Finop(
+                            Expr::new(RawExpr::Finop(
                                 Finop::Plus,
                                 vec![variable_expr("b"), variable_expr("a"), variable_expr("b")],
                             )),

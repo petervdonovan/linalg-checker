@@ -113,15 +113,16 @@ impl Div for Z3Object {
 }
 
 #[derive(Default)]
-pub struct TypeEnvironment {
+pub struct Environment {
     pub types: HashMap<Variable, Type>,
+    pub equalities: HashMap<Expr<()>, u64>,
 }
 
-pub fn to_z3<Metadata>(γ: TypeEnvironment, e: Expr<Metadata>) -> Z3Object {
+pub fn to_z3<Metadata>(γ: Environment, e: Expr<Metadata>) -> Z3Object {
     lower(&γ, &e)
 }
 
-fn lower<Metadata>(γ: &TypeEnvironment, e: &Expr<Metadata>) -> Z3Object {
+fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
     match &e.raw {
         RawExpr::Variable(variable) => {
             let τ = γ
@@ -158,7 +159,7 @@ fn lower<Metadata>(γ: &TypeEnvironment, e: &Expr<Metadata>) -> Z3Object {
 }
 
 fn lower_finite<Metadata>(
-    γ: &TypeEnvironment,
+    γ: &Environment,
     expressions: &[Expr<Metadata>],
     operation: fn(Z3Object, Z3Object) -> Z3Object,
     name: &str,
@@ -187,11 +188,11 @@ mod tests {
     use z3::SortKind;
 
     use crate::{
-        Binop, Expr, Finop, MetaExpr, Monop, RawExpr, Type, Variable,
-        to_z3::{TypeEnvironment, Z3Object, to_z3},
+        Binop, Expr, Finop, Monop, RawExpr, Type, Variable,
+        to_z3::{Environment, Z3Object, to_z3},
     };
 
-    fn scalar(environment: TypeEnvironment, expression: Expr<()>) -> z3::ast::Dynamic {
+    fn scalar(environment: Environment, expression: Expr<()>) -> z3::ast::Dynamic {
         match to_z3(environment, expression) {
             Z3Object::Z3(expression) => expression,
             Z3Object::Matrix(_) => panic!("expected a scalar Z3 expression"),
@@ -207,12 +208,13 @@ mod tests {
             ("x", Type::Real, SortKind::Real),
         ] {
             let variable = Variable::new(name);
-            let environment = TypeEnvironment {
+            let environment = Environment {
                 types: [(variable.clone(), τ)].into_iter().collect(),
+                equalities: [].into_iter().collect(),
             };
 
             assert_eq!(
-                scalar(environment, MetaExpr::new(RawExpr::Variable(variable))).sort_kind(),
+                scalar(environment, Expr::new(RawExpr::Variable(variable))).sort_kind(),
                 expected_sort,
             );
         }
@@ -221,11 +223,7 @@ mod tests {
     #[test]
     fn test_natural_literal() {
         expect!["42"].assert_eq(
-            &scalar(
-                TypeEnvironment::default(),
-                MetaExpr::new(RawExpr::NatLiteral(42)),
-            )
-            .to_string(),
+            &scalar(Environment::default(), Expr::new(RawExpr::NatLiteral(42))).to_string(),
         );
     }
 
@@ -233,10 +231,10 @@ mod tests {
     fn test_negation() {
         expect!["(- 7)"].assert_eq(
             &scalar(
-                TypeEnvironment::default(),
-                MetaExpr::new(RawExpr::Monop(
+                Environment::default(),
+                Expr::new(RawExpr::Monop(
                     Monop::Neg,
-                    MetaExpr::new(RawExpr::NatLiteral(7)),
+                    Expr::new(RawExpr::NatLiteral(7)),
                 )),
             )
             .to_string(),
@@ -245,44 +243,45 @@ mod tests {
 
     #[test]
     fn test_addition_and_multiplication() {
-        let product = MetaExpr::new(RawExpr::Finop(
+        let product = Expr::new(RawExpr::Finop(
             Finop::Times,
             vec![
-                MetaExpr::new(RawExpr::NatLiteral(3)),
-                MetaExpr::new(RawExpr::NatLiteral(4)),
+                Expr::new(RawExpr::NatLiteral(3)),
+                Expr::new(RawExpr::NatLiteral(4)),
             ],
         ));
-        let sum = MetaExpr::new(RawExpr::Finop(
+        let sum = Expr::new(RawExpr::Finop(
             Finop::Plus,
-            vec![MetaExpr::new(RawExpr::NatLiteral(2)), product],
+            vec![Expr::new(RawExpr::NatLiteral(2)), product],
         ));
 
-        expect!["(+ 2 (* 3 4))"].assert_eq(&scalar(TypeEnvironment::default(), sum).to_string());
+        expect!["(+ 2 (* 3 4))"].assert_eq(&scalar(Environment::default(), sum).to_string());
     }
 
     #[test]
     fn test_division() {
-        let quotient = MetaExpr::new(RawExpr::Binop(
+        let quotient = Expr::new(RawExpr::Binop(
             Binop::Div,
-            MetaExpr::new(RawExpr::NatLiteral(8)),
-            MetaExpr::new(RawExpr::NatLiteral(2)),
+            Expr::new(RawExpr::NatLiteral(8)),
+            Expr::new(RawExpr::NatLiteral(2)),
         ));
 
-        expect!["(div 8 2)"].assert_eq(&scalar(TypeEnvironment::default(), quotient).to_string());
+        expect!["(div 8 2)"].assert_eq(&scalar(Environment::default(), quotient).to_string());
     }
 
     #[test]
     fn test_mixed_numeric_operations_promote_to_real() {
         let x = Variable::new("x");
-        let environment = || TypeEnvironment {
+        let environment = || Environment {
             types: [(x.clone(), Type::Real)].into_iter().collect(),
+            equalities: [].into_iter().collect(),
         };
-        let real = || MetaExpr::new(RawExpr::Variable(x.clone()));
-        let integer = || MetaExpr::new(RawExpr::NatLiteral(2));
+        let real = || Expr::new(RawExpr::Variable(x.clone()));
+        let integer = || Expr::new(RawExpr::NatLiteral(2));
 
-        let addition = MetaExpr::new(RawExpr::Finop(Finop::Plus, vec![real(), integer()]));
-        let multiplication = MetaExpr::new(RawExpr::Finop(Finop::Times, vec![integer(), real()]));
-        let division = MetaExpr::new(RawExpr::Binop(Binop::Div, real(), integer()));
+        let addition = Expr::new(RawExpr::Finop(Finop::Plus, vec![real(), integer()]));
+        let multiplication = Expr::new(RawExpr::Finop(Finop::Times, vec![integer(), real()]));
+        let division = Expr::new(RawExpr::Binop(Binop::Div, real(), integer()));
 
         expect!["(+ x (to_real 2))"].assert_eq(&scalar(environment(), addition).to_string());
         expect!["(* (to_real 2) x)"].assert_eq(&scalar(environment(), multiplication).to_string());
