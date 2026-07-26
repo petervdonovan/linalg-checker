@@ -140,6 +140,16 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
         RawExpr::NatLiteral(value) => Z3Object::Z3(Int::from_u64(*value).into()),
         RawExpr::Monop(Monop::Neg, inner) => -lower(γ, inner),
         RawExpr::Binop(Binop::Div, left, right) => lower(γ, left) / lower(γ, right),
+        RawExpr::Binop(Binop::Power, base, exponent) => {
+            let exponent = γ
+                .equalities
+                .get(&exponent.without_metadata())
+                .copied()
+                .unwrap_or_else(|| {
+                    panic!("power exponent is missing from the equality environment")
+                });
+            lower_power(γ, base, exponent)
+        }
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
         }
@@ -156,6 +166,26 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
         | RawExpr::Finop(_, _)
         | RawExpr::Seqop(_, _, _) => panic!("expression is not supported by to_z3"),
     }
+}
+
+fn lower_power<Metadata>(γ: &Environment, base: &Expr<Metadata>, exponent: u64) -> Z3Object {
+    let lowered_base = lower(γ, base);
+    if exponent == 0 {
+        return match lowered_base {
+            Z3Object::Z3(expression) if expression.as_int().is_some() => {
+                Z3Object::Z3(Int::from_u64(1).into())
+            }
+            Z3Object::Z3(expression) if expression.as_real().is_some() => {
+                Z3Object::Z3(Real::from_int(&Int::from_u64(1)).into())
+            }
+            Z3Object::Z3(_) => panic!("zero power requires a numeric scalar base"),
+            Z3Object::Matrix(_) => {
+                panic!("zero power of a matrix requires dimension information")
+            }
+        };
+    }
+
+    (1..exponent).fold(lowered_base, |power, _| power * lower(γ, base))
 }
 
 fn lower_finite<Metadata>(
@@ -286,5 +316,58 @@ mod tests {
         expect!["(+ x (to_real 2))"].assert_eq(&scalar(environment(), addition).to_string());
         expect!["(* (to_real 2) x)"].assert_eq(&scalar(environment(), multiplication).to_string());
         expect!["(/ x (to_real 2))"].assert_eq(&scalar(environment(), division).to_string());
+    }
+
+    #[test]
+    fn test_power_uses_known_exponent_equality() {
+        let x = Variable::new("x");
+        let n = Variable::new("n");
+        let base = || Expr::new(RawExpr::Variable(x.clone()));
+        let exponent = || Expr::with_metadata("exponent", RawExpr::Variable(n.clone()));
+        let power = || {
+            Expr::new(RawExpr::Binop(
+                Binop::Power,
+                base(),
+                exponent().without_metadata(),
+            ))
+        };
+        let environment = |value| Environment {
+            types: [(x.clone(), Type::Int)].into_iter().collect(),
+            equalities: [(exponent().without_metadata(), value)]
+                .into_iter()
+                .collect(),
+        };
+
+        expect!["(* x x x)"].assert_eq(&scalar(environment(3), power()).to_string());
+        expect!["x"].assert_eq(&scalar(environment(1), power()).to_string());
+    }
+
+    #[test]
+    fn test_zero_power_uses_scalar_identity() {
+        let x = Variable::new("x");
+        let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let power: Expr<()> = Expr::new(RawExpr::Binop(
+            Binop::Power,
+            Expr::new(RawExpr::Variable(x.clone())),
+            exponent.clone(),
+        ));
+        let environment = Environment {
+            types: [(x, Type::Real)].into_iter().collect(),
+            equalities: [(exponent, 0)].into_iter().collect(),
+        };
+
+        expect!["(to_real 1)"].assert_eq(&scalar(environment, power).to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "power exponent is missing from the equality environment")]
+    fn test_power_requires_known_exponent_equality() {
+        let power: Expr<()> = Expr::new(RawExpr::Binop(
+            Binop::Power,
+            Expr::new(RawExpr::NatLiteral(2)),
+            Expr::new(RawExpr::Variable(Variable::new("n"))),
+        ));
+
+        to_z3(Environment::default(), power);
     }
 }

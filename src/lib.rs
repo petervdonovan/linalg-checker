@@ -39,7 +39,7 @@ pub enum Annotation {
     Arrow,
     Prime,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cmp {
     Eq,
     Lt,
@@ -47,12 +47,12 @@ pub enum Cmp {
     Le,
     Ge,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Logic {
     Iff,
     Imp,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Monop {
     Trace,
     Det,
@@ -64,7 +64,7 @@ pub enum Monop {
     NormFrob,
     // Dim,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Binop {
     // plus and times are associative, hence finops not binops
     Div,
@@ -74,11 +74,11 @@ pub enum Binop {
     // In,
     SingleSubscript,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Triop {
     DoubleSubscript,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Finop {
     // Span,
     Plus, // normalize by associativity
@@ -86,7 +86,7 @@ pub enum Finop {
     Max,
     Min,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SeqOp {
     Sum,
     Prod,
@@ -118,7 +118,55 @@ impl<Metadata> Expr<Metadata> {
     }
 
     pub fn without_metadata(&self) -> Expr<()> {
-        todo!()
+        let raw = match &self.raw {
+            RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
+            RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
+            RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix.elements.iter().map(Expr::without_metadata).collect(),
+            }),
+            RawExpr::Monop(op, expression) => RawExpr::Monop(*op, expression.without_metadata()),
+            RawExpr::Binop(op, left, right) => {
+                RawExpr::Binop(*op, left.without_metadata(), right.without_metadata())
+            }
+            RawExpr::Triop(op, first, second, third) => RawExpr::Triop(
+                *op,
+                first.without_metadata(),
+                second.without_metadata(),
+                third.without_metadata(),
+            ),
+            RawExpr::Finop(op, expressions) => RawExpr::Finop(
+                *op,
+                expressions.iter().map(Expr::without_metadata).collect(),
+            ),
+            RawExpr::CmpChain(chain) => RawExpr::CmpChain(CmpChain {
+                start: chain.start.without_metadata(),
+                assertions: chain
+                    .assertions
+                    .iter()
+                    .map(|(op, expression)| (*op, expression.without_metadata()))
+                    .collect(),
+            }),
+            RawExpr::LogicChain(chain) => RawExpr::LogicChain(LogicChain {
+                start: chain.start.without_metadata(),
+                assertions: chain
+                    .assertions
+                    .iter()
+                    .map(|(op, expression)| (*op, expression.without_metadata()))
+                    .collect(),
+            }),
+            RawExpr::Seqop(op, range, body) => RawExpr::Seqop(
+                *op,
+                SeqopRange {
+                    index_variable: range.index_variable.clone(),
+                    from: range.from.without_metadata(),
+                    to: range.to.without_metadata(),
+                },
+                body.without_metadata(),
+            ),
+        };
+        Expr::new(raw)
     }
 }
 
@@ -199,7 +247,7 @@ pub enum RawExpr<Metadata> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, RawExpr};
+    use super::{Expr, Finop, RawExpr, Variable};
 
     struct MetadataWithoutClone;
 
@@ -207,5 +255,32 @@ mod tests {
     fn cloning_expr_does_not_require_cloneable_metadata() {
         let expression = Expr::with_metadata(MetadataWithoutClone, RawExpr::NatLiteral(1));
         let _clone = expression.clone();
+    }
+
+    #[test]
+    fn without_metadata_recursively_erases_metadata() {
+        fn expression(metadata: u8) -> Expr<u8> {
+            Expr::with_metadata(
+                metadata,
+                RawExpr::Finop(
+                    Finop::Plus,
+                    vec![
+                        Expr::with_metadata(metadata, RawExpr::Variable(Variable::new("x"))),
+                        Expr::with_metadata(
+                            metadata,
+                            RawExpr::Finop(
+                                Finop::Times,
+                                vec![
+                                    Expr::with_metadata(metadata, RawExpr::NatLiteral(2)),
+                                    Expr::with_metadata(metadata, RawExpr::NatLiteral(3)),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            )
+        }
+
+        assert!(expression(1).without_metadata() == expression(2).without_metadata());
     }
 }
