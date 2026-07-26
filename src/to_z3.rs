@@ -1,13 +1,21 @@
 use std::{
-    collections::HashMap,
     fmt::Display,
     iter::Sum,
     ops::{Add, Div, Mul, Neg},
 };
 
-use z3::ast::{Bool, Int, Real};
+use z3::{
+    Solver,
+    ast::{Bool, Int, Real},
+};
 
-use crate::{Binop, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable};
+use crate::{Binop, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
+
+impl Environment {
+    pub fn render_model(&self, solver: &Solver) -> impl std::iter::Iterator<Item = Expr<()>> {
+        std::iter::empty::<Expr<()>>() // todo: return a sequence of equalities between variables in the environment and expressions
+    }
+}
 
 #[derive(Clone)]
 pub enum Z3Object {
@@ -160,12 +168,6 @@ fn single_cell(mut matrix: Matrix<Z3Object>) -> Z3Object {
         "matrix division is only supported for 1x1 matrices"
     );
     matrix.elements.pop().unwrap()
-}
-
-#[derive(Default)]
-pub struct Environment {
-    pub types: HashMap<Variable, Type>,
-    pub equalities: HashMap<Expr<()>, u64>,
 }
 
 pub fn to_z3<Metadata>(γ: Environment, e: Expr<Metadata>) -> Z3Object {

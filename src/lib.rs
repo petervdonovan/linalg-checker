@@ -1,11 +1,12 @@
 #![allow(mixed_script_confusables)]
 
+pub mod find_model;
 pub mod from_tex;
 pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
 
-use std::{ops::Deref, rc::Rc};
+use std::{collections::HashMap, ops::Deref, rc::Rc};
 
 pub enum Type {
     Bool,
@@ -13,6 +14,12 @@ pub enum Type {
     Int,
     Real,
     Matrix(u64, u64),
+}
+
+#[derive(Default)]
+pub struct Environment {
+    pub types: HashMap<Variable, Type>,
+    pub equalities: HashMap<Expr<()>, u64>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
