@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::Display,
+    iter::Sum,
     ops::{Add, Div, Mul, Neg},
 };
 
@@ -8,6 +9,7 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::{Binop, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable};
 
+#[derive(Clone)]
 pub enum Z3Object {
     Matrix(Matrix<Z3Object>),
     Z3(z3::ast::Dynamic),
@@ -27,7 +29,11 @@ impl Neg for Z3Object {
                     panic!("negation requires a numeric scalar")
                 }
             }
-            Self::Matrix(_) => panic!("matrix negation is not supported"),
+            Self::Matrix(matrix) => Self::Matrix(Matrix {
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix.elements.into_iter().map(Neg::neg).collect(),
+            }),
         }
     }
 }
@@ -50,7 +56,22 @@ impl Add for Z3Object {
                     panic!("addition requires numeric scalars")
                 }
             }
-            (Self::Matrix(_), Self::Matrix(_)) => panic!("matrix addition is not supported"),
+            (Self::Matrix(left), Self::Matrix(right)) => {
+                assert!(
+                    left.rows == right.rows && left.cols == right.cols,
+                    "matrix addition requires equal dimensions"
+                );
+                Self::Matrix(Matrix {
+                    rows: left.rows,
+                    cols: left.cols,
+                    elements: left
+                        .elements
+                        .into_iter()
+                        .zip(right.elements)
+                        .map(|(left, right)| left + right)
+                        .collect(),
+                })
+            }
             (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => {
                 panic!("scalar-matrix addition is not supported")
             }
@@ -76,12 +97,25 @@ impl Mul for Z3Object {
                     panic!("multiplication requires numeric scalars")
                 }
             }
-            (Self::Matrix(_), Self::Matrix(_)) => {
-                panic!("matrix multiplication is not supported")
-            }
-            (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => {
-                panic!("scalar-matrix multiplication is not supported")
-            }
+            (Self::Matrix(left), Self::Matrix(right)) => Self::Matrix(left * right),
+            (Self::Matrix(matrix), scalar @ Self::Z3(_)) => Self::Matrix(Matrix {
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix
+                    .elements
+                    .into_iter()
+                    .map(|element| element * scalar.clone())
+                    .collect(),
+            }),
+            (scalar @ Self::Z3(_), Self::Matrix(matrix)) => Self::Matrix(Matrix {
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix
+                    .elements
+                    .into_iter()
+                    .map(|element| scalar.clone() * element)
+                    .collect(),
+            }),
         }
     }
 }
@@ -104,12 +138,28 @@ impl Div for Z3Object {
                     panic!("division requires numeric scalars")
                 }
             }
-            (Self::Matrix(_), Self::Matrix(_)) => panic!("matrix division is not supported"),
-            (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => {
-                panic!("scalar-matrix division is not supported")
-            }
+            (Self::Matrix(left), Self::Matrix(right)) => single_cell(left) / single_cell(right),
+            (Self::Matrix(left), right @ Self::Z3(_)) => single_cell(left) / right,
+            (left @ Self::Z3(_), Self::Matrix(right)) => left / single_cell(right),
         }
     }
+}
+
+impl Sum for Z3Object {
+    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
+        let first = iter
+            .next()
+            .unwrap_or_else(|| panic!("matrix dot product requires at least one term"));
+        iter.fold(first, Add::add)
+    }
+}
+
+fn single_cell(mut matrix: Matrix<Z3Object>) -> Z3Object {
+    assert!(
+        matrix.rows == 1 && matrix.cols == 1 && matrix.elements.len() == 1,
+        "matrix division is only supported for 1x1 matrices"
+    );
+    matrix.elements.pop().unwrap()
 }
 
 #[derive(Default)]
@@ -129,13 +179,34 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                 .types
                 .get(variable)
                 .unwrap_or_else(|| panic!("variable is missing from the type environment"));
-            let expression = match τ {
-                Type::Bool => Bool::new_const(variable.name.clone()).into(),
-                Type::Nat | Type::Int => Int::new_const(variable.name.clone()).into(),
-                Type::Real => Real::new_const(variable.name.clone()).into(),
-                Type::Matrix => panic!("matrix variables are not supported"),
-            };
-            Z3Object::Z3(expression)
+            match τ {
+                Type::Bool => Z3Object::Z3(Bool::new_const(variable.name.clone()).into()),
+                Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(variable.name.clone()).into()),
+                Type::Real => Z3Object::Z3(Real::new_const(variable.name.clone()).into()),
+                Type::Matrix(rows, cols) => {
+                    let rows =
+                        usize::try_from(*rows).expect("matrix row count does not fit in usize");
+                    let cols =
+                        usize::try_from(*cols).expect("matrix column count does not fit in usize");
+                    let capacity = rows
+                        .checked_mul(cols)
+                        .expect("matrix dimensions overflow usize");
+                    let mut elements = Vec::with_capacity(capacity);
+                    for row in 1..=rows {
+                        for col in 1..=cols {
+                            elements.push(Z3Object::Z3(
+                                Real::new_const(format!("{}_{{{row},{col}}}", variable.name))
+                                    .into(),
+                            ));
+                        }
+                    }
+                    Z3Object::Matrix(Matrix {
+                        rows,
+                        cols,
+                        elements,
+                    })
+                }
+            }
         }
         RawExpr::NatLiteral(value) => Z3Object::Z3(Int::from_u64(*value).into()),
         RawExpr::Monop(Monop::Neg, inner) => -lower(γ, inner),
@@ -156,7 +227,25 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
         RawExpr::Finop(Finop::Times, expressions) => {
             lower_finite(γ, expressions, Mul::mul, "multiplication")
         }
-        RawExpr::Matrix(_) => panic!("matrix expressions are not supported"),
+        RawExpr::Matrix(matrix) => {
+            let expected_elements = matrix
+                .rows
+                .checked_mul(matrix.cols)
+                .expect("matrix dimensions overflow usize");
+            assert!(
+                matrix.elements.len() == expected_elements,
+                "matrix element count does not match its dimensions"
+            );
+            Z3Object::Matrix(Matrix {
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix
+                    .elements
+                    .iter()
+                    .map(|expression| lower(γ, expression))
+                    .collect(),
+            })
+        }
         RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => {
             panic!("comparison and logic chains are not supported")
         }
@@ -170,6 +259,12 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
 
 fn lower_power<Metadata>(γ: &Environment, base: &Expr<Metadata>, exponent: u64) -> Z3Object {
     let lowered_base = lower(γ, base);
+    if let Z3Object::Matrix(matrix) = &lowered_base {
+        assert!(
+            matrix.rows == matrix.cols,
+            "matrix power requires a square matrix"
+        );
+    }
     if exponent == 0 {
         return match lowered_base {
             Z3Object::Z3(expression) if expression.as_int().is_some() => {
@@ -179,13 +274,41 @@ fn lower_power<Metadata>(γ: &Environment, base: &Expr<Metadata>, exponent: u64)
                 Z3Object::Z3(Real::from_int(&Int::from_u64(1)).into())
             }
             Z3Object::Z3(_) => panic!("zero power requires a numeric scalar base"),
-            Z3Object::Matrix(_) => {
-                panic!("zero power of a matrix requires dimension information")
-            }
+            Z3Object::Matrix(matrix) => Z3Object::Matrix(matrix_identity(&matrix)),
         };
     }
 
     (1..exponent).fold(lowered_base, |power, _| power * lower(γ, base))
+}
+
+fn matrix_identity(matrix: &Matrix<Z3Object>) -> Matrix<Z3Object> {
+    let real = matrix.elements.iter().any(|element| match element {
+        Z3Object::Z3(expression) if expression.as_int().is_some() => false,
+        Z3Object::Z3(expression) if expression.as_real().is_some() => true,
+        Z3Object::Z3(_) => panic!("matrix identity requires numeric scalar cells"),
+        Z3Object::Matrix(_) => panic!("matrix identity does not support nested matrices"),
+    });
+    let mut elements = Vec::with_capacity(
+        matrix
+            .rows
+            .checked_mul(matrix.cols)
+            .expect("matrix dimensions overflow usize"),
+    );
+    for row in 0..matrix.rows {
+        for col in 0..matrix.cols {
+            let value = u64::from(row == col);
+            if real {
+                elements.push(Z3Object::Z3(Real::from_int(&Int::from_u64(value)).into()));
+            } else {
+                elements.push(Z3Object::Z3(Int::from_u64(value).into()));
+            }
+        }
+    }
+    Matrix {
+        rows: matrix.rows,
+        cols: matrix.cols,
+        elements,
+    }
 }
 
 fn lower_finite<Metadata>(
@@ -214,11 +337,13 @@ impl Display for Z3Object {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use expect_test::expect;
     use z3::SortKind;
 
     use crate::{
-        Binop, Expr, Finop, Monop, RawExpr, Type, Variable,
+        Binop, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable,
         to_z3::{Environment, Z3Object, to_z3},
     };
 
@@ -227,6 +352,17 @@ mod tests {
             Z3Object::Z3(expression) => expression,
             Z3Object::Matrix(_) => panic!("expected a scalar Z3 expression"),
         }
+    }
+
+    fn matrix(environment: Environment, expression: Expr<()>) -> Matrix<Z3Object> {
+        match to_z3(environment, expression) {
+            Z3Object::Matrix(matrix) => matrix,
+            Z3Object::Z3(_) => panic!("expected a matrix Z3 expression"),
+        }
+    }
+
+    fn matrix_strings(matrix: &Matrix<Z3Object>) -> Vec<String> {
+        matrix.elements.iter().map(ToString::to_string).collect()
     }
 
     #[test]
@@ -369,5 +505,292 @@ mod tests {
         ));
 
         to_z3(Environment::default(), power);
+    }
+
+    #[test]
+    fn test_matrix_variable_and_literal_lowering() {
+        let a = Variable::new("A");
+        let lowered = matrix(
+            Environment {
+                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::new(RawExpr::Variable(a)),
+        );
+        assert_eq!((lowered.rows, lowered.cols), (2, 2));
+        assert_eq!(
+            matrix_strings(&lowered),
+            vec!["|A_{1,1}|", "|A_{1,2}|", "|A_{2,1}|", "|A_{2,2}|"]
+        );
+        assert!(lowered.elements.iter().all(
+            |element| matches!(element, Z3Object::Z3(expression) if expression.as_real().is_some())
+        ));
+
+        let literal = matrix(
+            Environment::default(),
+            Expr::new(RawExpr::Matrix(Matrix {
+                rows: 1,
+                cols: 2,
+                elements: vec![
+                    Expr::new(RawExpr::NatLiteral(1)),
+                    Expr::new(RawExpr::NatLiteral(2)),
+                ],
+            })),
+        );
+        assert_eq!(matrix_strings(&literal), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_matrix_negation_addition_and_scaling() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        let environment = || Environment {
+            types: [
+                (a.clone(), Type::Matrix(1, 2)),
+                (b.clone(), Type::Matrix(1, 2)),
+            ]
+            .into_iter()
+            .collect(),
+            equalities: HashMap::new(),
+        };
+        let variable = |variable| Expr::new(RawExpr::Variable(variable));
+
+        let negated = matrix(
+            environment(),
+            Expr::new(RawExpr::Monop(Monop::Neg, variable(a.clone()))),
+        );
+        assert_eq!(
+            matrix_strings(&negated),
+            vec!["(- |A_{1,1}|)", "(- |A_{1,2}|)"]
+        );
+
+        let added = matrix(
+            environment(),
+            Expr::new(RawExpr::Finop(
+                Finop::Plus,
+                vec![variable(a.clone()), variable(b.clone())],
+            )),
+        );
+        assert_eq!(
+            matrix_strings(&added),
+            vec!["(+ |A_{1,1}| |B_{1,1}|)", "(+ |A_{1,2}| |B_{1,2}|)"]
+        );
+
+        let scaled = matrix(
+            environment(),
+            Expr::<()>::new(RawExpr::Finop(
+                Finop::Times,
+                vec![Expr::new(RawExpr::NatLiteral(2)), variable(a)],
+            )),
+        );
+        assert_eq!(
+            matrix_strings(&scaled),
+            vec!["(* (to_real 2) |A_{1,1}|)", "(* (to_real 2) |A_{1,2}|)"]
+        );
+    }
+
+    #[test]
+    fn test_matrix_multiplication() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        let product = matrix(
+            Environment {
+                types: [
+                    (a.clone(), Type::Matrix(2, 2)),
+                    (b.clone(), Type::Matrix(2, 1)),
+                ]
+                .into_iter()
+                .collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::Finop(
+                Finop::Times,
+                vec![
+                    Expr::new(RawExpr::Variable(a)),
+                    Expr::new(RawExpr::Variable(b)),
+                ],
+            )),
+        );
+
+        assert_eq!((product.rows, product.cols), (2, 1));
+        assert_eq!(
+            matrix_strings(&product),
+            vec![
+                "(+ (* |A_{1,1}| |B_{1,1}|) (* |A_{1,2}| |B_{2,1}|))",
+                "(+ (* |A_{2,1}| |B_{1,1}|) (* |A_{2,2}| |B_{2,1}|))"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_one_by_one_matrix_division() {
+        let a = Variable::new("A");
+        let quotient = scalar(
+            Environment {
+                types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::new(RawExpr::Binop(
+                Binop::Div,
+                Expr::new(RawExpr::Variable(a)),
+                Expr::new(RawExpr::NatLiteral(2)),
+            )),
+        );
+
+        expect!["(/ |A_{1,1}| (to_real 2))"].assert_eq(&quotient.to_string());
+    }
+
+    #[test]
+    fn test_matrix_zero_power_is_identity() {
+        let a = Variable::new("A");
+        let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let identity = matrix(
+            Environment {
+                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                equalities: [(exponent.clone(), 0)].into_iter().collect(),
+            },
+            Expr::new(RawExpr::Binop(
+                Binop::Power,
+                Expr::new(RawExpr::Variable(a)),
+                exponent,
+            )),
+        );
+
+        assert_eq!(
+            matrix_strings(&identity),
+            vec!["(to_real 1)", "(to_real 0)", "(to_real 0)", "(to_real 1)"]
+        );
+
+        let exponent = Expr::new(RawExpr::Variable(Variable::new("k")));
+        let integer_identity = matrix(
+            Environment {
+                types: HashMap::new(),
+                equalities: [(exponent.clone(), 0)].into_iter().collect(),
+            },
+            Expr::new(RawExpr::Binop(
+                Binop::Power,
+                Expr::new(RawExpr::Matrix(Matrix {
+                    rows: 2,
+                    cols: 2,
+                    elements: vec![
+                        Expr::new(RawExpr::NatLiteral(1)),
+                        Expr::new(RawExpr::NatLiteral(2)),
+                        Expr::new(RawExpr::NatLiteral(3)),
+                        Expr::new(RawExpr::NatLiteral(4)),
+                    ],
+                })),
+                exponent,
+            )),
+        );
+        assert_eq!(matrix_strings(&integer_identity), vec!["1", "0", "0", "1"]);
+    }
+
+    #[test]
+    fn test_positive_matrix_power_uses_matrix_multiplication() {
+        let a = Variable::new("A");
+        let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let squared = matrix(
+            Environment {
+                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                equalities: [(exponent.clone(), 2)].into_iter().collect(),
+            },
+            Expr::new(RawExpr::Binop(
+                Binop::Power,
+                Expr::new(RawExpr::Variable(a)),
+                exponent,
+            )),
+        );
+
+        assert_eq!((squared.rows, squared.cols), (2, 2));
+        assert_eq!(
+            matrix_strings(&squared)[0],
+            "(+ (* |A_{1,1}| |A_{1,1}|) (* |A_{1,2}| |A_{2,1}|))"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix power requires a square matrix")]
+    fn test_non_square_matrix_power_panics() {
+        let a = Variable::new("A");
+        let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
+        to_z3(
+            Environment {
+                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                equalities: [(exponent.clone(), 1)].into_iter().collect(),
+            },
+            Expr::new(RawExpr::Binop(
+                Binop::Power,
+                Expr::new(RawExpr::Variable(a)),
+                exponent,
+            )),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix multiplication requires compatible dimensions")]
+    fn test_invalid_matrix_multiplication_panics() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        let product: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Times,
+            vec![
+                Expr::new(RawExpr::Variable(a.clone())),
+                Expr::new(RawExpr::Variable(b.clone())),
+            ],
+        ));
+        to_z3(
+            Environment {
+                types: [
+                    (a.clone(), Type::Matrix(2, 2)),
+                    (b.clone(), Type::Matrix(1, 2)),
+                ]
+                .into_iter()
+                .collect(),
+                equalities: HashMap::new(),
+            },
+            product,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix addition requires equal dimensions")]
+    fn test_mismatched_matrix_addition_panics() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        to_z3(
+            Environment {
+                types: [
+                    (a.clone(), Type::Matrix(1, 2)),
+                    (b.clone(), Type::Matrix(2, 1)),
+                ]
+                .into_iter()
+                .collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::Finop(
+                Finop::Plus,
+                vec![
+                    Expr::new(RawExpr::Variable(a)),
+                    Expr::new(RawExpr::Variable(b)),
+                ],
+            )),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix division is only supported for 1x1 matrices")]
+    fn test_larger_matrix_division_panics() {
+        let a = Variable::new("A");
+        to_z3(
+            Environment {
+                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::Binop(
+                Binop::Div,
+                Expr::new(RawExpr::Variable(a)),
+                Expr::new(RawExpr::NatLiteral(2)),
+            )),
+        );
     }
 }

@@ -12,7 +12,7 @@ pub enum Type {
     Nat,
     Int,
     Real,
-    Matrix,
+    Matrix(u64, u64),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -197,7 +197,7 @@ pub struct LogicChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Logic, Expr<Metadata>)>,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Matrix<Cell> {
     pub rows: usize,
     pub cols: usize,
@@ -218,7 +218,10 @@ where
         let rows = self.rows;
         let cols = rhs.cols;
         let mut elements = Vec::new();
-        assert!(self.cols == rhs.rows);
+        assert!(
+            self.cols == rhs.rows,
+            "matrix multiplication requires compatible dimensions"
+        );
         for i in 0..rows {
             for j in 0..cols {
                 elements.push((0..self.cols).map(|k| self.at(i, k) * rhs.at(k, j)).sum());
