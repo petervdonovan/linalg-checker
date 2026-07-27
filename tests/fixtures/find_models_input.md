@@ -42,6 +42,49 @@ Not solved yet
 
 Not solved yet
 
+# Unconstrained scalar
+
+## Environment
+
+- $x \in \mathbb{R}$
+
+## Sentences
+
+- $x = x$
+
+## Conclusion
+
+Not solved yet
+
+# Rectangular matrix scaling
+
+## Environment
+
+- $A \in \mathbb{R}^{2 \times 3}$
+
+## Sentences
+
+- $2 A = \begin{bmatrix}2 & 4 & 6 \\ 8 & 10 & 12\end{bmatrix}$
+
+## Conclusion
+
+Not solved yet
+
+# Matrix factorization
+
+## Environment
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $A B = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+
+## Conclusion
+
+Not solved yet
+
 # Inconsistent
 
 ## Environment
