@@ -23,6 +23,7 @@ impl<Metadata> Expr<Metadata> {
 
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
     match &e.raw {
+        crate::RawExpr::Hole => write!(f, r"\square"),
         crate::RawExpr::Type(ty) => type_expr(f, ty),
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
@@ -408,6 +409,11 @@ mod tests {
     #[test]
     fn test_nat_literal() {
         expect!["42"].assert_eq(&as_latex(RawExpr::NatLiteral(42)));
+    }
+
+    #[test]
+    fn test_hole() {
+        expect![r"\square"].assert_eq(&as_latex(RawExpr::Hole));
     }
 
     #[test]

@@ -129,6 +129,7 @@ impl<Metadata> Expr<Metadata> {
 
     pub fn without_metadata(&self) -> Expr<()> {
         let raw = match &self.raw {
+            RawExpr::Hole => RawExpr::Hole,
             RawExpr::Type(ty) => RawExpr::Type(*ty),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
@@ -247,6 +248,7 @@ where
 }
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
+    Hole,
     Type(Type),
     Variable(Variable),
     NatLiteral(u64),
@@ -270,6 +272,14 @@ mod tests {
     fn cloning_expr_does_not_require_cloneable_metadata() {
         let expression = Expr::with_metadata(MetadataWithoutClone, RawExpr::NatLiteral(1));
         let _clone = expression.clone();
+    }
+
+    #[test]
+    fn without_metadata_preserves_holes() {
+        assert!(matches!(
+            Expr::with_metadata(1, RawExpr::Hole).without_metadata().raw,
+            RawExpr::Hole
+        ));
     }
 
     #[test]

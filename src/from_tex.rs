@@ -196,6 +196,10 @@ impl<'a> Cursor<'a> {
         }
 
         match current {
+            ParseNode::TextOrd { text, .. } if text == r"\square" => {
+                self.position += 1;
+                Ok(Expr::new(RawExpr::Hole))
+            }
             ParseNode::TextOrd { text, .. }
                 if text.chars().all(|character| character.is_ascii_digit()) =>
             {
@@ -419,7 +423,7 @@ impl<'a> Cursor<'a> {
         match self.nodes.get(self.position) {
             Some(ParseNode::MathOrd { .. }) => true,
             Some(ParseNode::TextOrd { text, .. }) => {
-                text.chars().all(|character| character.is_ascii_digit())
+                text == r"\square" || text.chars().all(|character| character.is_ascii_digit())
             }
             Some(
                 ParseNode::OrdGroup { .. }
@@ -855,6 +859,11 @@ mod tests {
             round_trip(r"\tilde{x}").unwrap(),
             round_trip(r"\vec{x}").unwrap(),
         ));
+    }
+
+    #[test]
+    fn parses_holes() {
+        expect![r"\square"].assert_eq(&round_trip(r"\square").unwrap());
     }
 
     #[test]

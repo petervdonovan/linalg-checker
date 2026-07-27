@@ -227,6 +227,7 @@ pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
 
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
     match &e.raw {
+        RawExpr::Hole => panic!("holes are not supported by to_z3"),
         RawExpr::Type(_) => panic!("type expressions are not supported by to_z3"),
         RawExpr::Variable(variable) => {
             let τ = γ
@@ -471,6 +472,12 @@ mod tests {
         expect!["42"].assert_eq(
             &scalar(Environment::default(), Expr::new(RawExpr::NatLiteral(42))).to_string(),
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "holes are not supported by to_z3")]
+    fn test_hole_is_not_lowered() {
+        to_z3(Environment::default(), Expr::<()>::new(RawExpr::Hole));
     }
 
     #[test]
