@@ -1,7 +1,8 @@
 use std::fmt;
 
 use crate::{
-    Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, SeqOp, Triop, Variable,
+    Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, SeqOp, Triop, Type,
+    Variable,
 };
 
 impl<Metadata> fmt::Display for AsLatex<Metadata> {
@@ -22,6 +23,7 @@ impl<Metadata> Expr<Metadata> {
 
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
     match &e.raw {
+        crate::RawExpr::Type(ty) => type_expr(f, ty),
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
         crate::RawExpr::Matrix(value) => matrix(f, value),
@@ -40,10 +42,18 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
                 grouped_expr(
                     f,
                     e0,
-                    matches!(op, Binop::Power) && precedence(e0) < Precedence::Power,
+                    (matches!(op, Binop::Power) && precedence(e0) < Precedence::Power)
+                        || (matches!(op, Binop::ElementOf)
+                            && precedence(e0) <= Precedence::Comparison),
                 )
             },
-            |f| expr(f, e1),
+            |f| {
+                grouped_expr(
+                    f,
+                    e1,
+                    matches!(op, Binop::ElementOf) && precedence(e1) <= Precedence::Comparison,
+                )
+            },
         ),
         crate::RawExpr::Triop(op, e0, e1, e2) => {
             triop(f, op, |f| expr(f, e0), |f| expr(f, e1), |f| expr(f, e2))
@@ -121,7 +131,9 @@ enum Precedence {
 fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     match &e.raw {
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
-        crate::RawExpr::CmpChain(_) => Precedence::Comparison,
+        crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf, _, _) => {
+            Precedence::Comparison
+        }
         crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
         crate::RawExpr::Finop(Finop::Times, _) => Precedence::Multiplication,
         crate::RawExpr::Monop(Monop::Neg, _) => Precedence::Prefix,
@@ -129,6 +141,19 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
             Precedence::Power
         }
         _ => Precedence::Atom,
+    }
+}
+
+fn type_expr(f: &mut fmt::Formatter<'_>, ty: &Type) -> fmt::Result {
+    match ty {
+        Type::Bool => write!(f, r"\mathbb{{B}}"),
+        Type::Nat => write!(f, r"\mathbb{{N}}"),
+        Type::Int => write!(f, r"\mathbb{{Z}}"),
+        Type::Real | Type::Matrix(1, 1) => write!(f, r"\mathbb{{R}}"),
+        Type::Matrix(rows, 1) => write!(f, r"\mathbb{{R}}^{{{rows}}}"),
+        Type::Matrix(rows, cols) => {
+            write!(f, r"\mathbb{{R}}^{{{rows} \times {cols}}}")
+        }
     }
 }
 
@@ -213,6 +238,11 @@ fn binop<
             write!(f, ", ")?;
             e1(f)?;
             write!(f, r" \rangle")
+        }
+        Binop::ElementOf => {
+            e0(f)?;
+            write!(f, r" \in ")?;
+            e1(f)
         }
         Binop::SingleSubscript => {
             e0(f)?;
@@ -368,7 +398,7 @@ mod tests {
 
     use crate::{
         Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-        SeqOp, SeqopRange, Triop, Variable,
+        SeqOp, SeqopRange, Triop, Type, Variable,
     };
 
     fn as_latex(raw: RawExpr<()>) -> String {
@@ -378,6 +408,31 @@ mod tests {
     #[test]
     fn test_nat_literal() {
         expect!["42"].assert_eq(&as_latex(RawExpr::NatLiteral(42)));
+    }
+
+    #[test]
+    fn test_types_and_membership() {
+        let rendered_types = [
+            Type::Bool,
+            Type::Nat,
+            Type::Int,
+            Type::Real,
+            Type::Matrix(3, 1),
+            Type::Matrix(3, 4),
+            Type::Matrix(1, 1),
+        ]
+        .map(|ty| as_latex(RawExpr::Type(ty)))
+        .join("\n");
+        expect![
+            "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\n\\mathbb{R}"
+        ]
+        .assert_eq(&rendered_types);
+
+        expect!["A \\in \\mathbb{R}^{2 \\times 3}"].assert_eq(&as_latex(RawExpr::Binop(
+            Binop::ElementOf,
+            variable_expr("A"),
+            Expr::new(RawExpr::Type(Type::Matrix(2, 3))),
+        )));
     }
 
     #[test]

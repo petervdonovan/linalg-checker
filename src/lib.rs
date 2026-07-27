@@ -8,6 +8,7 @@ pub mod to_z3;
 
 use std::{collections::HashMap, ops::Deref, rc::Rc};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
     Bool,
     Nat,
@@ -16,13 +17,15 @@ pub enum Type {
     Matrix(u64, u64),
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct Environment {
     pub types: HashMap<Variable, Type>,
     pub equalities: HashMap<Expr<()>, u64>,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+type Model = Vec<Expr<()>>;
+
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Debug)]
 pub struct Variable {
     pub name: String,
     pub non_numeric_subscript: String,
@@ -39,14 +42,14 @@ impl Variable {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum Annotation {
     Hat,
     Tilde,
     Arrow,
     Prime,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Cmp {
     Eq,
     Lt,
@@ -54,12 +57,12 @@ pub enum Cmp {
     Le,
     Ge,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Logic {
     Iff,
     Imp,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Monop {
     Trace,
     Det,
@@ -71,21 +74,21 @@ pub enum Monop {
     NormFrob,
     // Dim,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Binop {
     // plus and times are associative, hence finops not binops
     Div,
     Power,
     // dotprod omitted
     InnerProd,
-    // In,
+    ElementOf,
     SingleSubscript,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Triop {
     DoubleSubscript,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Finop {
     // Span,
     Plus, // normalize by associativity
@@ -93,12 +96,12 @@ pub enum Finop {
     Max,
     Min,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum SeqOp {
     Sum,
     Prod,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Expr<Metadata>(Rc<MetaExpr<Metadata>>);
 
 impl<Metadata> Clone for Expr<Metadata> {
@@ -126,6 +129,7 @@ impl<Metadata> Expr<Metadata> {
 
     pub fn without_metadata(&self) -> Expr<()> {
         let raw = match &self.raw {
+            RawExpr::Type(ty) => RawExpr::Type(*ty),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
             RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
@@ -183,28 +187,28 @@ impl<Metadata: Default> Expr<Metadata> {
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct MetaExpr<Metadata> {
     pub meta: Metadata,
     pub raw: RawExpr<Metadata>,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct SeqopRange<Metadata> {
     pub index_variable: Variable,
     pub from: Expr<Metadata>,
     pub to: Expr<Metadata>,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CmpChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Cmp, Expr<Metadata>)>,
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct LogicChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Logic, Expr<Metadata>)>,
 }
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Matrix<Cell> {
     pub rows: usize,
     pub cols: usize,
@@ -241,8 +245,9 @@ where
         }
     }
 }
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
+    Type(Type),
     Variable(Variable),
     NatLiteral(u64),
     Matrix(Matrix<Expr<Metadata>>),

@@ -9,11 +9,11 @@ use z3::{
     ast::{Bool, Int, Real},
 };
 
-use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
+use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Model, Monop, RawExpr, Type};
 
 impl Environment {
-    pub fn render_model(&self, solver: &Solver) -> impl std::iter::Iterator<Item = Expr<()>> {
-        std::iter::empty::<Expr<()>>() // todo: return a sequence of equalities between variables in the environment and expressions
+    pub fn models(&self, solver: &Solver) -> impl std::iter::Iterator<Item = Model> {
+        std::iter::empty::<Model>() // todo: return a sequence of equalities between variables in the environment and expressions
     }
 }
 
@@ -236,6 +236,7 @@ pub fn to_z3<Metadata>(γ: Environment, e: Expr<Metadata>) -> Z3Object {
 
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
     match &e.raw {
+        RawExpr::Type(_) => panic!("type expressions are not supported by to_z3"),
         RawExpr::Variable(variable) => {
             let τ = γ
                 .types
@@ -282,6 +283,9 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                     panic!("power exponent is missing from the equality environment")
                 });
             lower_power(γ, base, exponent)
+        }
+        RawExpr::Binop(Binop::ElementOf, _, _) => {
+            panic!("element-of expressions are not supported by to_z3")
         }
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
@@ -471,6 +475,28 @@ mod tests {
     fn test_natural_literal() {
         expect!["42"].assert_eq(
             &scalar(Environment::default(), Expr::new(RawExpr::NatLiteral(42))).to_string(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "type expressions are not supported by to_z3")]
+    fn test_type_expression_is_not_lowered() {
+        to_z3(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Type(Type::Real)),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "element-of expressions are not supported by to_z3")]
+    fn test_element_of_is_not_lowered() {
+        to_z3(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Binop(
+                Binop::ElementOf,
+                Expr::new(RawExpr::Variable(Variable::new("x"))),
+                Expr::new(RawExpr::Type(Type::Real)),
+            )),
         );
     }
 

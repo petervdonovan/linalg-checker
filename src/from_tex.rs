@@ -4,7 +4,7 @@ use ratex_parser::{ParseNode, parse_node::AtomFamily};
 
 use crate::{
     Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-    SeqOp, SeqopRange, Triop, Variable,
+    SeqOp, SeqopRange, Triop, Type, Variable,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +97,22 @@ impl<'a> Cursor<'a> {
 
     fn parse_comparison(&mut self) -> Result<Expr<()>, FromTexError> {
         let start = self.parse_addition()?;
+        self.skip_ignorable();
+        if self.current_atom_text() == Some(r"\in") {
+            self.position += 1;
+            self.skip_ignorable();
+            let right = self.parse_addition()?;
+            self.skip_ignorable();
+            if self.current_comparison_operator().is_some()
+                || self.current_atom_text() == Some(r"\in")
+            {
+                return Err(FromTexError::Malformed {
+                    index: self.position,
+                    message: "membership cannot be chained".to_owned(),
+                });
+            }
+            return Ok(Expr::new(RawExpr::Binop(Binop::ElementOf, start, right)));
+        }
         let mut assertions = Vec::new();
 
         while let Some(op) = self.current_comparison_operator() {
@@ -173,6 +189,10 @@ impl<'a> Cursor<'a> {
             self.position += 1;
             let body = self.parse_multiplication()?;
             return Ok(Expr::new(RawExpr::Seqop(op, range, body)));
+        }
+        if let Some(ty) = parse_type(current)? {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::Type(ty)));
         }
 
         match current {
@@ -407,6 +427,7 @@ impl<'a> Cursor<'a> {
                 | ParseNode::GenFrac { .. }
                 | ParseNode::Accent { .. }
                 | ParseNode::SupSub { .. }
+                | ParseNode::Font { .. }
                 | ParseNode::OperatorName { .. }
                 | ParseNode::Op { .. },
             ) => true,
@@ -424,6 +445,70 @@ impl<'a> Cursor<'a> {
             index: self.position,
             syntax,
         }
+    }
+}
+
+fn parse_type(node: &ParseNode) -> Result<Option<Type>, FromTexError> {
+    match node {
+        ParseNode::Font { font, .. } if font == "mathbb" => {
+            Ok(type_base(node).map(|ty| match ty {
+                Type::Matrix(_, _) => unreachable!(),
+                ty => ty,
+            }))
+        }
+        ParseNode::SupSub {
+            base: Some(base),
+            sup: Some(sup),
+            sub: None,
+            ..
+        } if type_base(base) == Some(Type::Real) => {
+            let dimensions = group_body(sup);
+            let parts = split_top_level(dimensions, r"\times");
+            let dimension = |nodes: &[ParseNode]| -> Result<u64, FromTexError> {
+                let text = collect_text(
+                    &nodes
+                        .iter()
+                        .filter(|node| {
+                            !matches!(node, ParseNode::Kern { .. } | ParseNode::SpacingNode { .. })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+                .ok_or_else(|| FromTexError::Malformed {
+                    index: 0,
+                    message: "type dimension must be a natural-number literal".to_owned(),
+                })?;
+                text.parse().map_err(|_| FromTexError::Malformed {
+                    index: 0,
+                    message: "type dimension does not fit in u64".to_owned(),
+                })
+            };
+            match parts.as_slice() {
+                [size] => Ok(Some(Type::Matrix(dimension(size)?, 1))),
+                [rows, cols] => Ok(Some(Type::Matrix(dimension(rows)?, dimension(cols)?))),
+                _ => Err(FromTexError::Malformed {
+                    index: 0,
+                    message: "matrix type requires one or two dimensions".to_owned(),
+                }),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn type_base(node: &ParseNode) -> Option<Type> {
+    let ParseNode::Font { font, body, .. } = node else {
+        return None;
+    };
+    if font != "mathbb" {
+        return None;
+    }
+    match collect_text(group_body(body)).as_deref()? {
+        "B" => Some(Type::Bool),
+        "N" => Some(Type::Nat),
+        "Z" => Some(Type::Int),
+        "R" => Some(Type::Real),
+        _ => None,
     }
 }
 
@@ -745,7 +830,7 @@ mod tests {
     use ratex_parser::parse;
 
     use super::FromTexError;
-    use crate::Expr;
+    use crate::{Binop, Expr, RawExpr, Type};
 
     struct Latex(Expr<()>);
 
@@ -769,6 +854,42 @@ mod tests {
             round_trip(r"\hat{x}_{i}^{\prime}").unwrap(),
             round_trip(r"\tilde{x}").unwrap(),
             round_trip(r"\vec{x}").unwrap(),
+        ));
+    }
+
+    #[test]
+    fn parses_types_and_membership_atomically() {
+        expect![
+            "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\nA \\in \\mathbb{R}^{2 \\times 3}"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            round_trip(r"\mathbb{B}").unwrap(),
+            round_trip(r"\mathbb{N}").unwrap(),
+            round_trip(r"\mathbb{Z}").unwrap(),
+            round_trip(r"\mathbb{R}").unwrap(),
+            round_trip(r"\mathbb{R}^{3}").unwrap(),
+            round_trip(r"\mathbb{R}^{3 \times 4}").unwrap(),
+            round_trip(r"A \in \mathbb{R}^{2 \times 3}").unwrap(),
+        ));
+
+        let parsed = parse(r"A \in \mathbb{R}^{2 \times 3}").unwrap();
+        let expression = super::expr(&parsed).unwrap();
+        assert!(matches!(
+            &expression.raw,
+            RawExpr::Binop(Binop::ElementOf, left, right)
+                if matches!(left.raw, RawExpr::Variable(_))
+                    && matches!(right.raw, RawExpr::Type(Type::Matrix(2, 3)))
+        ));
+    }
+
+    #[test]
+    fn one_by_one_matrix_type_canonicalizes_to_real() {
+        let expression: Expr<()> = Expr::new(RawExpr::Type(Type::Matrix(1, 1)));
+        let parsed = parse(&expression.as_latex().to_string()).unwrap();
+        assert!(matches!(
+            super::expr(&parsed).unwrap().raw,
+            RawExpr::Type(Type::Real)
         ));
     }
 
@@ -935,6 +1056,18 @@ mod tests {
         assert!(matches!(
             super::expr(&wrong_matrix_delimiter),
             Err(FromTexError::Unsupported { .. })
+        ));
+
+        let symbolic_type_dimension = parse(r"\mathbb{R}^{n}").unwrap();
+        assert!(matches!(
+            super::expr(&symbolic_type_dimension),
+            Err(FromTexError::Malformed { .. })
+        ));
+
+        let too_many_type_dimensions = parse(r"\mathbb{R}^{2 \times 3 \times 4}").unwrap();
+        assert!(matches!(
+            super::expr(&too_many_type_dimensions),
+            Err(FromTexError::Malformed { .. })
         ));
     }
 }
