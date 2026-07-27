@@ -6,8 +6,11 @@ pub struct TestCase {
     pub name: String,
     pub sentences: Vec<Expr<()>>,
     pub environment: Environment,
+    // pub models: Vec<
 }
 pub struct TestCases(pub Vec<TestCase>);
+
+impl TestCase {}
 
 impl Display for TestCase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -9,7 +9,7 @@ use z3::{
     ast::{Bool, Int, Real},
 };
 
-use crate::{Binop, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
+use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
 
 impl Environment {
     pub fn render_model(&self, solver: &Solver) -> impl std::iter::Iterator<Item = Expr<()>> {
@@ -170,6 +170,66 @@ fn single_cell(mut matrix: Matrix<Z3Object>) -> Z3Object {
     matrix.elements.pop().unwrap()
 }
 
+fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Bool {
+    match (left, right) {
+        (Z3Object::Z3(left), Z3Object::Z3(right)) => {
+            if left.as_bool().is_some() || right.as_bool().is_some() {
+                panic!("boolean scalars cannot be compared")
+            } else if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
+                compare_int(left, comparison, right)
+            } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
+                compare_real(left, comparison, right)
+            } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
+                compare_real(Real::from_int(&left), comparison, right)
+            } else if let (Some(left), Some(right)) = (left.as_real(), right.as_int()) {
+                compare_real(left, comparison, Real::from_int(&right))
+            } else {
+                panic!("comparison requires numeric scalars")
+            }
+        }
+        (Z3Object::Matrix(left), Z3Object::Matrix(right)) => {
+            assert!(
+                matches!(comparison, Cmp::Eq),
+                "matrix ordering comparisons are not supported"
+            );
+            assert!(
+                left.rows == right.rows && left.cols == right.cols,
+                "matrix equality requires equal dimensions"
+            );
+            let comparisons: Vec<_> = left
+                .elements
+                .into_iter()
+                .zip(right.elements)
+                .map(|(left, right)| compare(left, Cmp::Eq, right))
+                .collect();
+            Bool::and(&comparisons)
+        }
+        (Z3Object::Matrix(_), Z3Object::Z3(_)) | (Z3Object::Z3(_), Z3Object::Matrix(_)) => {
+            panic!("scalar-matrix comparisons are not supported")
+        }
+    }
+}
+
+fn compare_int(left: Int, comparison: Cmp, right: Int) -> Bool {
+    match comparison {
+        Cmp::Eq => left.eq(right),
+        Cmp::Lt => left.lt(right),
+        Cmp::Gt => left.gt(right),
+        Cmp::Le => left.le(right),
+        Cmp::Ge => left.ge(right),
+    }
+}
+
+fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
+    match comparison {
+        Cmp::Eq => left.eq(right),
+        Cmp::Lt => left.lt(right),
+        Cmp::Gt => left.gt(right),
+        Cmp::Le => left.le(right),
+        Cmp::Ge => left.ge(right),
+    }
+}
+
 pub fn to_z3<Metadata>(γ: Environment, e: Expr<Metadata>) -> Z3Object {
     lower(&γ, &e)
 }
@@ -248,15 +308,34 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                     .collect(),
             })
         }
-        RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => {
-            panic!("comparison and logic chains are not supported")
-        }
+        RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
+        RawExpr::LogicChain(_) => panic!("logic chains are not supported"),
         RawExpr::Monop(_, _)
         | RawExpr::Binop(_, _, _)
         | RawExpr::Triop(_, _, _, _)
         | RawExpr::Finop(_, _)
         | RawExpr::Seqop(_, _, _) => panic!("expression is not supported by to_z3"),
     }
+}
+
+fn lower_cmp_chain<Metadata>(γ: &Environment, chain: &CmpChain<Metadata>) -> Z3Object {
+    assert!(
+        !chain.assertions.is_empty(),
+        "comparison chain requires at least one assertion"
+    );
+    let mut previous = lower(γ, &chain.start);
+    let mut comparisons = Vec::with_capacity(chain.assertions.len());
+    for (comparison, current) in &chain.assertions {
+        let current = lower(γ, current);
+        comparisons.push(compare(previous, *comparison, current.clone()));
+        previous = current;
+    }
+    let result = if comparisons.len() == 1 {
+        comparisons.pop().unwrap()
+    } else {
+        Bool::and(&comparisons)
+    };
+    Z3Object::Z3(result.into())
 }
 
 fn lower_power<Metadata>(γ: &Environment, base: &Expr<Metadata>, exponent: u64) -> Z3Object {
@@ -345,7 +424,7 @@ mod tests {
     use z3::SortKind;
 
     use crate::{
-        Binop, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable,
+        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable,
         to_z3::{Environment, Z3Object, to_z3},
     };
 
@@ -793,6 +872,161 @@ mod tests {
                 Expr::new(RawExpr::Variable(a)),
                 Expr::new(RawExpr::NatLiteral(2)),
             )),
+        );
+    }
+
+    #[test]
+    fn test_comparison_chain_uses_written_order() {
+        let variables: Vec<_> = ["a", "b", "c", "d", "e", "f"]
+            .into_iter()
+            .map(Variable::new)
+            .collect();
+        let expression =
+            |index: usize| -> Expr<()> { Expr::new(RawExpr::Variable(variables[index].clone())) };
+        let chain = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: expression(0),
+            assertions: vec![
+                (Cmp::Eq, expression(1)),
+                (Cmp::Lt, expression(2)),
+                (Cmp::Gt, expression(3)),
+                (Cmp::Le, expression(4)),
+                (Cmp::Ge, expression(5)),
+            ],
+        }));
+        let environment = Environment {
+            types: variables
+                .into_iter()
+                .map(|variable| (variable, Type::Int))
+                .collect(),
+            equalities: HashMap::new(),
+        };
+
+        expect!["(and (= a b) (< b c) (> c d) (<= d e) (>= e f))"]
+            .assert_eq(&scalar(environment, chain).to_string());
+    }
+
+    #[test]
+    fn test_comparison_promotes_integer_to_real() {
+        let x = Variable::new("x");
+        let chain = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: Expr::new(RawExpr::NatLiteral(2)),
+            assertions: vec![(Cmp::Lt, Expr::new(RawExpr::Variable(x.clone())))],
+        }));
+        let environment = Environment {
+            types: [(x, Type::Real)].into_iter().collect(),
+            equalities: HashMap::new(),
+        };
+
+        expect!["(< (to_real 2) x)"].assert_eq(&scalar(environment, chain).to_string());
+    }
+
+    #[test]
+    fn test_matrix_equality_is_elementwise() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        let chain = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: Expr::new(RawExpr::Variable(a.clone())),
+            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(b.clone())))],
+        }));
+        let environment = Environment {
+            types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
+                .into_iter()
+                .collect(),
+            equalities: HashMap::new(),
+        };
+
+        expect!["(and (= |A_{1,1}| |B_{1,1}|) (= |A_{1,2}| |B_{1,2}|))"]
+            .assert_eq(&scalar(environment, chain).to_string());
+    }
+
+    #[test]
+    #[should_panic(expected = "boolean scalars cannot be compared")]
+    fn test_boolean_comparison_panics() {
+        let p = Variable::new("P");
+        let q = Variable::new("Q");
+        to_z3(
+            Environment {
+                types: [(p.clone(), Type::Bool), (q.clone(), Type::Bool)]
+                    .into_iter()
+                    .collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::CmpChain(CmpChain {
+                start: Expr::new(RawExpr::Variable(p)),
+                assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(q)))],
+            })),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix equality requires equal dimensions")]
+    fn test_mismatched_matrix_equality_panics() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        to_z3(
+            Environment {
+                types: [
+                    (a.clone(), Type::Matrix(1, 2)),
+                    (b.clone(), Type::Matrix(2, 1)),
+                ]
+                .into_iter()
+                .collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::CmpChain(CmpChain {
+                start: Expr::new(RawExpr::Variable(a)),
+                assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(b)))],
+            })),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "matrix ordering comparisons are not supported")]
+    fn test_matrix_ordering_panics() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        to_z3(
+            Environment {
+                types: [
+                    (a.clone(), Type::Matrix(1, 1)),
+                    (b.clone(), Type::Matrix(1, 1)),
+                ]
+                .into_iter()
+                .collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::CmpChain(CmpChain {
+                start: Expr::new(RawExpr::Variable(a)),
+                assertions: vec![(Cmp::Lt, Expr::new(RawExpr::Variable(b)))],
+            })),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "scalar-matrix comparisons are not supported")]
+    fn test_scalar_matrix_comparison_panics() {
+        let a = Variable::new("A");
+        to_z3(
+            Environment {
+                types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
+                equalities: HashMap::new(),
+            },
+            Expr::<()>::new(RawExpr::CmpChain(CmpChain {
+                start: Expr::new(RawExpr::NatLiteral(1)),
+                assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(a)))],
+            })),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "comparison chain requires at least one assertion")]
+    fn test_empty_comparison_chain_panics() {
+        to_z3(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::CmpChain(CmpChain {
+                start: Expr::new(RawExpr::NatLiteral(1)),
+                assertions: vec![],
+            })),
         );
     }
 }
