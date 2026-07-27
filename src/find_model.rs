@@ -4,8 +4,12 @@ use markdown::{
     Constructs, ParseOptions,
     mdast::{Heading, InlineMath, List, ListItem, Node, Paragraph, Root, Text},
 };
+use z3::{SatResult, Solver};
 
-use crate::{Binop, Cmp, CmpChain, Environment, Expr, Model, RawExpr};
+use crate::{
+    Binop, Cmp, CmpChain, Environment, Expr, Model, RawExpr,
+    to_z3::{Z3Object, to_z3},
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TestCase<Conclusion> {
@@ -24,6 +28,7 @@ pub struct NotSolvedYet;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModelOrUnsat {
     Unsat,
+    Unknown,
     Model(Model),
 }
 
@@ -158,6 +163,47 @@ impl<Conclusion: ToFromMd> ToFromMd for TestCases<Conclusion> {
     }
 }
 
+impl TestCases<NotSolvedYet> {
+    pub fn find_models(self) -> TestCases<ModelOrUnsat> {
+        TestCases(
+            self.0
+                .into_iter()
+                .map(|test_case| {
+                    let TestCase {
+                        name,
+                        sentences,
+                        environment,
+                        conclusion: NotSolvedYet,
+                    } = test_case;
+                    let solver = Solver::new();
+                    for sentence in &sentences {
+                        let Z3Object::Z3(sentence) = to_z3(&environment, sentence) else {
+                            panic!("test-case sentence must lower to a Boolean scalar")
+                        };
+                        let sentence = sentence
+                            .as_bool()
+                            .unwrap_or_else(|| panic!("test-case sentence must be Boolean"));
+                        solver.assert(&sentence);
+                    }
+                    let conclusion = match solver.check() {
+                        SatResult::Unsat => ModelOrUnsat::Unsat,
+                        SatResult::Unknown => ModelOrUnsat::Unknown,
+                        SatResult::Sat => {
+                            todo!("extract scalar and matrix assignments from the Z3 model")
+                        }
+                    };
+                    TestCase {
+                        name,
+                        sentences,
+                        environment,
+                        conclusion,
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
 impl ToFromMd for NotSolvedYet {
     fn parse_md(md: &Node) -> Self {
         assert_eq!(
@@ -178,6 +224,7 @@ impl ToFromMd for ModelOrUnsat {
         let children = root_children(md);
         match children {
             [node] if paragraph_text(node) == "Unsat" => Self::Unsat,
+            [node] if paragraph_text(node) == "Unknown" => Self::Unknown,
             [label, list] if paragraph_text(label) == "Model" => {
                 Self::Model(parse_expression_list(list))
             }
@@ -188,6 +235,7 @@ impl ToFromMd for ModelOrUnsat {
     fn to_md(&self) -> Node {
         match self {
             Self::Unsat => root(vec![paragraph_text_node("Unsat")]),
+            Self::Unknown => root(vec![paragraph_text_node("Unknown")]),
             Self::Model(model) => {
                 assert!(
                     !model.is_empty(),
@@ -561,6 +609,21 @@ Model
 
         assert_eq!(assert_stable::<TestCase<ModelOrUnsat>>(unsat), unsat);
         assert_eq!(assert_stable::<TestCase<ModelOrUnsat>>(model), model);
+    }
+
+    #[test]
+    fn unknown_conclusion_round_trips() {
+        let unknown = r#"# Incomplete
+
+## Environment
+
+## Sentences
+
+## Conclusion
+
+Unknown"#;
+
+        assert_eq!(assert_stable::<TestCase<ModelOrUnsat>>(unknown), unknown);
     }
 
     #[test]

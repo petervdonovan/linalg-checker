@@ -4,18 +4,9 @@ use std::{
     ops::{Add, Div, Mul, Neg},
 };
 
-use z3::{
-    Solver,
-    ast::{Bool, Int, Real},
-};
+use z3::ast::{Bool, Int, Real};
 
-use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Model, Monop, RawExpr, Type};
-
-impl Environment {
-    pub fn models(&self, solver: &Solver) -> impl std::iter::Iterator<Item = Model> {
-        std::iter::empty::<Model>() // todo: return a sequence of equalities between variables in the environment and expressions
-    }
-}
+use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
 
 #[derive(Clone)]
 pub enum Z3Object {
@@ -230,8 +221,8 @@ fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
     }
 }
 
-pub fn to_z3<Metadata>(γ: Environment, e: Expr<Metadata>) -> Z3Object {
-    lower(&γ, &e)
+pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
+    lower(γ, e)
 }
 
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
@@ -429,8 +420,12 @@ mod tests {
 
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable,
-        to_z3::{Environment, Z3Object, to_z3},
+        to_z3::{Environment, Z3Object, to_z3 as lower_to_z3},
     };
+
+    fn to_z3<Metadata>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
+        lower_to_z3(&environment, &expression)
+    }
 
     fn scalar(environment: Environment, expression: Expr<()>) -> z3::ast::Dynamic {
         match to_z3(environment, expression) {
