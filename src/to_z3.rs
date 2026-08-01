@@ -180,7 +180,7 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Bool {
         }
         (Z3Object::Matrix(left), Z3Object::Matrix(right)) => {
             assert!(
-                matches!(comparison, Cmp::Eq),
+                matches!(comparison, Cmp::Eq | Cmp::Ne),
                 "matrix ordering comparisons are not supported"
             );
             assert!(
@@ -193,7 +193,12 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Bool {
                 .zip(right.elements)
                 .map(|(left, right)| compare(left, Cmp::Eq, right))
                 .collect();
-            Bool::and(&comparisons)
+            let equality = Bool::and(&comparisons);
+            if matches!(comparison, Cmp::Ne) {
+                equality.not()
+            } else {
+                equality
+            }
         }
         (Z3Object::Matrix(_), Z3Object::Z3(_)) | (Z3Object::Z3(_), Z3Object::Matrix(_)) => {
             panic!("scalar-matrix comparisons are not supported")
@@ -204,6 +209,7 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Bool {
 fn compare_int(left: Int, comparison: Cmp, right: Int) -> Bool {
     match comparison {
         Cmp::Eq => left.eq(right),
+        Cmp::Ne => left.eq(right).not(),
         Cmp::Lt => left.lt(right),
         Cmp::Gt => left.gt(right),
         Cmp::Le => left.le(right),
@@ -214,6 +220,7 @@ fn compare_int(left: Int, comparison: Cmp, right: Int) -> Bool {
 fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
     match comparison {
         Cmp::Eq => left.eq(right),
+        Cmp::Ne => left.eq(right).not(),
         Cmp::Lt => left.lt(right),
         Cmp::Gt => left.gt(right),
         Cmp::Le => left.le(right),
@@ -964,6 +971,25 @@ mod tests {
         };
 
         expect!["(and (= |A_{1,1}| |B_{1,1}|) (= |A_{1,2}| |B_{1,2}|))"]
+            .assert_eq(&scalar(environment, chain).to_string());
+    }
+
+    #[test]
+    fn test_matrix_inequality_negates_elementwise_equality() {
+        let a = Variable::new("A");
+        let b = Variable::new("B");
+        let chain = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: Expr::new(RawExpr::Variable(a.clone())),
+            assertions: vec![(Cmp::Ne, Expr::new(RawExpr::Variable(b.clone())))],
+        }));
+        let environment = Environment {
+            types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
+                .into_iter()
+                .collect(),
+            equalities: HashMap::new(),
+        };
+
+        expect!["(not (and (= |A_{1,1}| |B_{1,1}|) (= |A_{1,2}| |B_{1,2}|)))"]
             .assert_eq(&scalar(environment, chain).to_string());
     }
 

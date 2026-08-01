@@ -392,12 +392,16 @@ impl<'a> Cursor<'a> {
     }
 
     fn current_comparison_operator(&self) -> Option<Cmp> {
-        match self.current_atom_text()? {
-            "=" => Some(Cmp::Eq),
-            "<" => Some(Cmp::Lt),
-            ">" => Some(Cmp::Gt),
-            r"\le" | r"\leq" => Some(Cmp::Le),
-            r"\ge" | r"\geq" => Some(Cmp::Ge),
+        match self.nodes.get(self.position)? {
+            node if is_not_equal(node) => Some(Cmp::Ne),
+            ParseNode::Atom { text, .. } => match text.as_str() {
+                "=" => Some(Cmp::Eq),
+                "<" => Some(Cmp::Lt),
+                ">" => Some(Cmp::Gt),
+                r"\le" | r"\leq" => Some(Cmp::Le),
+                r"\ge" | r"\geq" => Some(Cmp::Ge),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -450,6 +454,22 @@ impl<'a> Cursor<'a> {
             syntax,
         }
     }
+}
+
+fn is_not_equal(node: &ParseNode) -> bool {
+    matches!(
+        node,
+        ParseNode::HtmlMathMl { mathml, .. }
+            if matches!(
+                mathml.as_slice(),
+                [ParseNode::MClass { mclass, body, .. }]
+                    if mclass == "mrel"
+                        && matches!(
+                            body.as_slice(),
+                            [ParseNode::TextOrd { text, .. }] if text == "≠"
+                        )
+            )
+    )
 }
 
 fn parse_type(node: &ParseNode) -> Result<Option<Type>, FromTexError> {
@@ -994,13 +1014,17 @@ mod tests {
 
     #[test]
     fn parses_comparison_and_logic_chains() {
-        expect!["a = b < c > d \\le e \\ge f\nP \\implies Q \\iff R\na + b < c d \\implies P"]
-            .assert_eq(&format!(
-                "{}\n{}\n{}",
-                round_trip(r"a = b < c > d \le e \ge f").unwrap(),
-                round_trip(r"P \implies Q \iff R").unwrap(),
-                round_trip(r"a + b < c d \implies P").unwrap(),
-            ));
+        expect![
+            "a = b < c > d \\le e \\ge f\na \\ne b\na \\ne b\nP \\implies Q \\iff R\na + b < c d \\implies P"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}\n{}",
+            round_trip(r"a = b < c > d \le e \ge f").unwrap(),
+            round_trip(r"a \ne b").unwrap(),
+            round_trip(r"a \neq b").unwrap(),
+            round_trip(r"P \implies Q \iff R").unwrap(),
+            round_trip(r"a + b < c d \implies P").unwrap(),
+        ));
     }
 
     #[test]

@@ -85,6 +85,42 @@ Not solved yet
 
 Not solved yet
 
+# Nonidentity projection
+
+## Environment
+
+- $P \in \mathbb{R}^{2 \times 2}$
+- $k = 2$
+
+## Sentences
+
+- $P^{k} = P$
+- $P \begin{bmatrix}1 \\ 0\end{bmatrix} = \begin{bmatrix}1 \\ 0\end{bmatrix}$
+- $P \begin{bmatrix}0 \\ 1\end{bmatrix} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
+
+## Conclusion
+
+Not solved yet
+
+# Impossible surjective nonidentity projection
+
+## Environment
+
+- $C \in \mathbb{R}^{2 \times 2}$
+- $P \in \mathbb{R}^{2 \times 2}$
+- $v \in \mathbb{R}^{2}$
+- $k = 2$
+
+## Sentences
+
+- $P^{k} = P$
+- $P C = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+- $P v \ne v$
+
+## Conclusion
+
+Not solved yet
+
 # Inconsistent
 
 ## Environment

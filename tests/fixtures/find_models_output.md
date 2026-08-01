@@ -99,6 +99,44 @@ Model
 - $A = \begin{bmatrix}\frac{1}{8} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{2}\end{bmatrix}$
 - $B = \begin{bmatrix}\frac{1}{2} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{8}\end{bmatrix}$
 
+# Nonidentity projection
+
+## Environment
+
+- $P \in \mathbb{R}^{2 \times 2}$
+- $k = 2$
+
+## Sentences
+
+- $P^{k} = P$
+- $P \begin{bmatrix}1 \\ 0\end{bmatrix} = \begin{bmatrix}1 \\ 0\end{bmatrix}$
+- $P \begin{bmatrix}0 \\ 1\end{bmatrix} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
+
+## Conclusion
+
+Model
+
+- $P = \begin{bmatrix}1 & 0 \\ 0 & 0\end{bmatrix}$
+
+# Impossible surjective nonidentity projection
+
+## Environment
+
+- $C \in \mathbb{R}^{2 \times 2}$
+- $P \in \mathbb{R}^{2 \times 2}$
+- $v \in \mathbb{R}^{2}$
+- $k = 2$
+
+## Sentences
+
+- $P^{k} = P$
+- $P C = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+- $P v \ne v$
+
+## Conclusion
+
+Unsat
+
 # Inconsistent
 
 ## Environment

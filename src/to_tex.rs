@@ -347,6 +347,7 @@ fn logic_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &LogicChain<Metadata
 fn cmp_symbol(op: &Cmp) -> &'static str {
     match op {
         Cmp::Eq => "=",
+        Cmp::Ne => r"\ne",
         Cmp::Lt => "<",
         Cmp::Gt => ">",
         Cmp::Le => r"\le",
@@ -824,6 +825,10 @@ mod tests {
                 })),
             ),
         );
+        expect![r"a \ne b"].assert_eq(&as_latex(RawExpr::CmpChain(CmpChain {
+            start: variable_expr("a"),
+            assertions: vec![(Cmp::Ne, variable_expr("b"))],
+        })));
     }
 
     #[test]

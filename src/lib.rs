@@ -52,6 +52,7 @@ pub enum Annotation {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum Cmp {
     Eq,
+    Ne,
     Lt,
     Gt,
     Le,
