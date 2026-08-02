@@ -7,7 +7,7 @@ use markdown::{
 use z3::{Model as Z3Model, SatResult, Solver, ast::Dynamic};
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type,
+    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
     to_z3::{Z3Object, to_z3},
 };
 
@@ -176,6 +176,25 @@ impl TestCases<NotSolvedYet> {
                         conclusion: NotSolvedYet,
                     } = test_case;
                     let solver = Solver::new();
+                    for (variable, ty) in &environment.types {
+                        if !matches!(ty, Type::Nat) {
+                            continue;
+                        }
+                        let type_assertion = Expr::new(RawExpr::Binop(
+                            Binop::ElementOf,
+                            Expr::new(RawExpr::Variable(variable.clone())),
+                            Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
+                        ));
+                        let Z3Object::Z3(type_assertion) = to_z3(&environment, &type_assertion)
+                        else {
+                            unreachable!("type assertions lower to Boolean scalars")
+                        };
+                        solver.assert(
+                            type_assertion
+                                .as_bool()
+                                .expect("type assertion must be Boolean"),
+                        );
+                    }
                     for sentence in &sentences {
                         let Z3Object::Z3(sentence) = to_z3(&environment, sentence) else {
                             panic!("test-case sentence must lower to a Boolean scalar")
@@ -344,7 +363,7 @@ fn environment_expressions(environment: &Environment) -> Vec<Expr<()>> {
         Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(*ty)),
+            Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
         ))
     }));
     expressions.extend(environment.equalities.iter().map(|(expression, value)| {
@@ -373,9 +392,12 @@ fn parse_environment(nodes: &[Node]) -> Environment {
                 let RawExpr::Variable(variable) = &left.raw else {
                     panic!("environment membership must have a variable on the left")
                 };
-                let RawExpr::Type(ty) = right.raw else {
+                let RawExpr::Type(ref ty) = right.raw else {
                     panic!("environment membership must have a type on the right")
                 };
+                let ty = ty
+                    .concrete()
+                    .unwrap_or_else(|| panic!("environment type dimensions must be concrete"));
                 assert!(
                     environment.types.insert(variable.clone(), ty).is_none(),
                     "environment contains a duplicate type declaration"

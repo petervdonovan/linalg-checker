@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, SeqOp, Triop, Type,
+    Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, SeqOp, Triop, TypeExpr,
     Variable,
 };
 
@@ -145,15 +145,29 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     }
 }
 
-fn type_expr(f: &mut fmt::Formatter<'_>, ty: &Type) -> fmt::Result {
+fn type_expr<Metadata>(f: &mut fmt::Formatter<'_>, ty: &TypeExpr<Metadata>) -> fmt::Result {
     match ty {
-        Type::Bool => write!(f, r"\mathbb{{B}}"),
-        Type::Nat => write!(f, r"\mathbb{{N}}"),
-        Type::Int => write!(f, r"\mathbb{{Z}}"),
-        Type::Real | Type::Matrix(1, 1) => write!(f, r"\mathbb{{R}}"),
-        Type::Matrix(rows, 1) => write!(f, r"\mathbb{{R}}^{{{rows}}}"),
-        Type::Matrix(rows, cols) => {
-            write!(f, r"\mathbb{{R}}^{{{rows} \times {cols}}}")
+        TypeExpr::Bool => write!(f, r"\mathbb{{B}}"),
+        TypeExpr::Nat => write!(f, r"\mathbb{{N}}"),
+        TypeExpr::Int => write!(f, r"\mathbb{{Z}}"),
+        TypeExpr::Real => write!(f, r"\mathbb{{R}}"),
+        TypeExpr::Matrix(rows, cols)
+            if matches!(rows.raw, crate::RawExpr::NatLiteral(1))
+                && matches!(cols.raw, crate::RawExpr::NatLiteral(1)) =>
+        {
+            write!(f, r"\mathbb{{R}}")
+        }
+        TypeExpr::Matrix(rows, cols) if matches!(cols.raw, crate::RawExpr::NatLiteral(1)) => {
+            write!(f, r"\mathbb{{R}}^{{")?;
+            expr(f, rows)?;
+            write!(f, "}}")
+        }
+        TypeExpr::Matrix(rows, cols) => {
+            write!(f, r"\mathbb{{R}}^{{")?;
+            expr(f, rows)?;
+            write!(f, r" \times ")?;
+            expr(f, cols)?;
+            write!(f, "}}")
         }
     }
 }
@@ -400,7 +414,7 @@ mod tests {
 
     use crate::{
         Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-        SeqOp, SeqopRange, Triop, Type, Variable,
+        SeqOp, SeqopRange, Triop, Type, TypeExpr, Variable,
     };
 
     fn as_latex(raw: RawExpr<()>) -> String {
@@ -428,7 +442,7 @@ mod tests {
             Type::Matrix(3, 4),
             Type::Matrix(1, 1),
         ]
-        .map(|ty| as_latex(RawExpr::Type(ty)))
+        .map(|ty| as_latex(RawExpr::Type(TypeExpr::from(ty))))
         .join("\n");
         expect![
             "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\n\\mathbb{R}"
@@ -438,7 +452,7 @@ mod tests {
         expect!["A \\in \\mathbb{R}^{2 \\times 3}"].assert_eq(&as_latex(RawExpr::Binop(
             Binop::ElementOf,
             variable_expr("A"),
-            Expr::new(RawExpr::Type(Type::Matrix(2, 3))),
+            Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(2, 3)))),
         )));
     }
 

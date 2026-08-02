@@ -4,7 +4,7 @@ use ratex_parser::{ParseNode, parse_node::AtomFamily};
 
 use crate::{
     Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-    SeqOp, SeqopRange, Triop, Type, Variable,
+    SeqOp, SeqopRange, Triop, TypeExpr, Variable,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -472,44 +472,33 @@ fn is_not_equal(node: &ParseNode) -> bool {
     )
 }
 
-fn parse_type(node: &ParseNode) -> Result<Option<Type>, FromTexError> {
+fn parse_type(node: &ParseNode) -> Result<Option<TypeExpr<()>>, FromTexError> {
     match node {
-        ParseNode::Font { font, .. } if font == "mathbb" => {
-            Ok(type_base(node).map(|ty| match ty {
-                Type::Matrix(_, _) => unreachable!(),
-                ty => ty,
-            }))
-        }
+        ParseNode::Font { font, .. } if font == "mathbb" => Ok(type_base(node)),
         ParseNode::SupSub {
             base: Some(base),
             sup: Some(sup),
             sub: None,
             ..
-        } if type_base(base) == Some(Type::Real) => {
+        } if matches!(type_base(base), Some(TypeExpr::Real)) => {
             let dimensions = group_body(sup);
             let parts = split_top_level(dimensions, r"\times");
-            let dimension = |nodes: &[ParseNode]| -> Result<u64, FromTexError> {
-                let text = collect_text(
-                    &nodes
-                        .iter()
-                        .filter(|node| {
-                            !matches!(node, ParseNode::Kern { .. } | ParseNode::SpacingNode { .. })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
-                .ok_or_else(|| FromTexError::Malformed {
-                    index: 0,
-                    message: "type dimension must be a natural-number literal".to_owned(),
-                })?;
-                text.parse().map_err(|_| FromTexError::Malformed {
-                    index: 0,
-                    message: "type dimension does not fit in u64".to_owned(),
-                })
-            };
             match parts.as_slice() {
-                [size] => Ok(Some(Type::Matrix(dimension(size)?, 1))),
-                [rows, cols] => Ok(Some(Type::Matrix(dimension(rows)?, dimension(cols)?))),
+                [size] => Ok(Some(TypeExpr::Matrix(
+                    expr(size)?,
+                    Expr::new(RawExpr::NatLiteral(1)),
+                ))),
+                [rows, cols] => {
+                    let rows = expr(rows)?;
+                    let cols = expr(cols)?;
+                    if matches!(rows.raw, RawExpr::NatLiteral(1))
+                        && matches!(cols.raw, RawExpr::NatLiteral(1))
+                    {
+                        Ok(Some(TypeExpr::Real))
+                    } else {
+                        Ok(Some(TypeExpr::Matrix(rows, cols)))
+                    }
+                }
                 _ => Err(FromTexError::Malformed {
                     index: 0,
                     message: "matrix type requires one or two dimensions".to_owned(),
@@ -520,7 +509,7 @@ fn parse_type(node: &ParseNode) -> Result<Option<Type>, FromTexError> {
     }
 }
 
-fn type_base(node: &ParseNode) -> Option<Type> {
+fn type_base(node: &ParseNode) -> Option<TypeExpr<()>> {
     let ParseNode::Font { font, body, .. } = node else {
         return None;
     };
@@ -528,10 +517,10 @@ fn type_base(node: &ParseNode) -> Option<Type> {
         return None;
     }
     match collect_text(group_body(body)).as_deref()? {
-        "B" => Some(Type::Bool),
-        "N" => Some(Type::Nat),
-        "Z" => Some(Type::Int),
-        "R" => Some(Type::Real),
+        "B" => Some(TypeExpr::Bool),
+        "N" => Some(TypeExpr::Nat),
+        "Z" => Some(TypeExpr::Int),
+        "R" => Some(TypeExpr::Real),
         _ => None,
     }
 }
@@ -854,7 +843,7 @@ mod tests {
     use ratex_parser::parse;
 
     use super::FromTexError;
-    use crate::{Binop, Expr, RawExpr, Type};
+    use crate::{Binop, Expr, RawExpr, Type, TypeExpr};
 
     struct Latex(Expr<()>);
 
@@ -908,17 +897,17 @@ mod tests {
             &expression.raw,
             RawExpr::Binop(Binop::ElementOf, left, right)
                 if matches!(left.raw, RawExpr::Variable(_))
-                    && matches!(right.raw, RawExpr::Type(Type::Matrix(2, 3)))
+                    && matches!(right.raw, RawExpr::Type(TypeExpr::Matrix(_, _)))
         ));
     }
 
     #[test]
     fn one_by_one_matrix_type_canonicalizes_to_real() {
-        let expression: Expr<()> = Expr::new(RawExpr::Type(Type::Matrix(1, 1)));
+        let expression: Expr<()> = Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(1, 1))));
         let parsed = parse(&expression.as_latex().to_string()).unwrap();
         assert!(matches!(
             super::expr(&parsed).unwrap().raw,
-            RawExpr::Type(Type::Real)
+            RawExpr::Type(TypeExpr::Real)
         ));
     }
 
@@ -1091,11 +1080,9 @@ mod tests {
             Err(FromTexError::Unsupported { .. })
         ));
 
-        let symbolic_type_dimension = parse(r"\mathbb{R}^{n}").unwrap();
-        assert!(matches!(
-            super::expr(&symbolic_type_dimension),
-            Err(FromTexError::Malformed { .. })
-        ));
+        expect![r"\mathbb{R}^{n}"].assert_eq(&round_trip(r"\mathbb{R}^{n}").unwrap());
+        expect![r"\mathbb{R}^{n \times d + p}"]
+            .assert_eq(&round_trip(r"\mathbb{R}^{n \times d + p}").unwrap());
 
         let too_many_type_dimensions = parse(r"\mathbb{R}^{2 \times 3 \times 4}").unwrap();
         assert!(matches!(

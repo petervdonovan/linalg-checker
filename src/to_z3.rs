@@ -6,7 +6,10 @@ use std::{
 
 use z3::ast::{Bool, Int, Real};
 
-use crate::{Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type};
+use crate::{
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type, TypeExpr,
+    Variable,
+};
 
 #[derive(Clone)]
 pub enum Z3Object {
@@ -242,9 +245,9 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                 .get(variable)
                 .unwrap_or_else(|| panic!("variable is missing from the type environment"));
             match τ {
-                Type::Bool => Z3Object::Z3(Bool::new_const(variable.name.clone()).into()),
-                Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(variable.name.clone()).into()),
-                Type::Real => Z3Object::Z3(Real::new_const(variable.name.clone()).into()),
+                Type::Bool => Z3Object::Z3(Bool::new_const(variable.z3_name()).into()),
+                Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(variable.z3_name()).into()),
+                Type::Real => Z3Object::Z3(Real::new_const(variable.z3_name()).into()),
                 Type::Matrix(rows, cols) => {
                     let rows =
                         usize::try_from(*rows).expect("matrix row count does not fit in usize");
@@ -257,7 +260,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                     for row in 1..=rows {
                         for col in 1..=cols {
                             elements.push(Z3Object::Z3(
-                                Real::new_const(format!("{}_{{{row},{col}}}", variable.name))
+                                Real::new_const(format!("{}_{{{row},{col}}}", variable.z3_name()))
                                     .into(),
                             ));
                         }
@@ -283,9 +286,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                 });
             lower_power(γ, base, exponent)
         }
-        RawExpr::Binop(Binop::ElementOf, _, _) => {
-            panic!("element-of expressions are not supported by to_z3")
-        }
+        RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
         }
@@ -319,6 +320,56 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
         | RawExpr::Finop(_, _)
         | RawExpr::Seqop(_, _, _) => panic!("expression is not supported by to_z3"),
     }
+}
+
+fn lower_membership<Metadata>(
+    environment: &Environment,
+    left: &Expr<Metadata>,
+    right: &Expr<Metadata>,
+) -> Z3Object {
+    let (RawExpr::Variable(variable), RawExpr::Type(expected)) = (&left.raw, &right.raw) else {
+        return Z3Object::Z3(Bool::from_bool(false).into());
+    };
+    let Some(actual) = environment.types.get(variable) else {
+        return Z3Object::Z3(Bool::from_bool(false).into());
+    };
+    let result = match (actual, expected) {
+        (Type::Bool, TypeExpr::Bool)
+        | (Type::Int, TypeExpr::Int)
+        | (Type::Real, TypeExpr::Real) => Bool::from_bool(true),
+        (Type::Nat, TypeExpr::Nat) => Int::new_const(variable.z3_name()).ge(0),
+        (Type::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
+            let row_symbol = Int::new_const(dimension_name(variable, "rows"));
+            let col_symbol = Int::new_const(dimension_name(variable, "cols"));
+            let expected_rows = lower_dimension(environment, expected_rows, "row");
+            let expected_cols = lower_dimension(environment, expected_cols, "column");
+            Bool::and(&[
+                row_symbol.eq(Int::from_u64(*rows)),
+                col_symbol.eq(Int::from_u64(*cols)),
+                expected_rows.eq(&row_symbol),
+                expected_cols.eq(&col_symbol),
+            ])
+        }
+        _ => Bool::from_bool(false),
+    };
+    Z3Object::Z3(result.into())
+}
+
+fn lower_dimension<Metadata>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+    axis: &str,
+) -> Int {
+    let Z3Object::Z3(expression) = lower(environment, expression) else {
+        panic!("matrix {axis} dimension must be a natural-number scalar")
+    };
+    expression
+        .as_int()
+        .unwrap_or_else(|| panic!("matrix {axis} dimension must be a natural-number scalar"))
+}
+
+fn dimension_name(variable: &Variable, axis: &str) -> String {
+    format!("{}_{{{axis}}}", variable.z3_name())
 }
 
 fn lower_cmp_chain<Metadata>(γ: &Environment, chain: &CmpChain<Metadata>) -> Z3Object {
@@ -424,10 +475,10 @@ mod tests {
     use std::collections::HashMap;
 
     use expect_test::expect;
-    use z3::SortKind;
+    use z3::{SatResult, Solver, SortKind, ast::Int};
 
     use crate::{
-        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, Variable,
+        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, TypeExpr, Variable,
         to_z3::{Environment, Z3Object, to_z3 as lower_to_z3},
     };
 
@@ -492,21 +543,67 @@ mod tests {
     fn test_type_expression_is_not_lowered() {
         to_z3(
             Environment::default(),
-            Expr::<()>::new(RawExpr::Type(Type::Real)),
+            Expr::<()>::new(RawExpr::Type(TypeExpr::Real)),
         );
     }
 
     #[test]
-    #[should_panic(expected = "element-of expressions are not supported by to_z3")]
-    fn test_element_of_is_not_lowered() {
-        to_z3(
-            Environment::default(),
-            Expr::<()>::new(RawExpr::Binop(
-                Binop::ElementOf,
-                Expr::new(RawExpr::Variable(Variable::new("x"))),
-                Expr::new(RawExpr::Type(Type::Real)),
-            )),
+    fn test_incompatible_element_of_is_false() {
+        let membership = Expr::<()>::new(RawExpr::Binop(
+            Binop::ElementOf,
+            Expr::new(RawExpr::Variable(Variable::new("x"))),
+            Expr::new(RawExpr::Type(TypeExpr::Real)),
+        ));
+        assert_eq!(
+            scalar(Environment::default(), membership).to_string(),
+            "false"
         );
+    }
+
+    #[test]
+    fn test_symbolic_matrix_membership_uses_concrete_environment_dimensions() {
+        let a = Variable::new("A");
+        let n = Variable::new("n");
+        let d = Variable::new("d");
+        let p = Variable::new("p");
+        let environment = Environment {
+            types: [
+                (a.clone(), Type::Matrix(3, 8)),
+                (n.clone(), Type::Nat),
+                (d.clone(), Type::Nat),
+                (p.clone(), Type::Nat),
+            ]
+            .into_iter()
+            .collect(),
+            equalities: Default::default(),
+        };
+        let variable = |variable| Expr::new(RawExpr::Variable(variable));
+        let membership = Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            variable(a),
+            Expr::new(RawExpr::Type(TypeExpr::Matrix(
+                variable(n.clone()),
+                Expr::new(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![variable(d.clone()), variable(p.clone())],
+                )),
+            ))),
+        ));
+        let assertion = scalar(environment, membership).as_bool().unwrap();
+        let solver = Solver::new();
+        solver.assert(assertion);
+        solver.push();
+        solver.assert(Int::new_const(n.z3_name()).eq(3));
+        solver.assert(Int::new_const(d.z3_name()).eq(4));
+        solver.assert(Int::new_const(p.z3_name()).eq(4));
+        assert_eq!(solver.check(), SatResult::Sat);
+        solver.pop(1);
+        solver.push();
+        solver.assert(Int::new_const(n.z3_name()).eq(3));
+        solver.assert(Int::new_const(d.z3_name()).eq(4));
+        solver.assert(Int::new_const(p.z3_name()).eq(5));
+        assert_eq!(solver.check(), SatResult::Unsat);
+        solver.pop(1);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 #![allow(mixed_script_confusables)]
 
-pub mod enumerable_assignments_to_naturals;
 pub mod enumerable_envspec;
 pub mod find_model;
 pub mod from_tex;
@@ -17,6 +16,52 @@ pub enum Type {
     Int,
     Real,
     Matrix(u64, u64),
+}
+
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Clone)]
+pub enum TypeExpr<Metadata> {
+    Bool,
+    Nat,
+    Int,
+    Real,
+    Matrix(Expr<Metadata>, Expr<Metadata>),
+}
+
+impl From<Type> for TypeExpr<()> {
+    fn from(ty: Type) -> Self {
+        match ty {
+            Type::Bool => Self::Bool,
+            Type::Nat => Self::Nat,
+            Type::Int => Self::Int,
+            Type::Real | Type::Matrix(1, 1) => Self::Real,
+            Type::Matrix(rows, cols) => Self::Matrix(
+                Expr::new(RawExpr::NatLiteral(rows)),
+                Expr::new(RawExpr::NatLiteral(cols)),
+            ),
+        }
+    }
+}
+
+impl TypeExpr<()> {
+    pub fn concrete(&self) -> Option<Type> {
+        match self {
+            Self::Bool => Some(Type::Bool),
+            Self::Nat => Some(Type::Nat),
+            Self::Int => Some(Type::Int),
+            Self::Real => Some(Type::Real),
+            Self::Matrix(rows, cols) => {
+                let (RawExpr::NatLiteral(rows), RawExpr::NatLiteral(cols)) = (&rows.raw, &cols.raw)
+                else {
+                    return None;
+                };
+                Some(if (*rows, *cols) == (1, 1) {
+                    Type::Real
+                } else {
+                    Type::Matrix(*rows, *cols)
+                })
+            }
+        }
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -41,6 +86,27 @@ impl Variable {
             non_numeric_subscript: String::new(),
             annotations: Vec::new(),
         }
+    }
+
+    pub fn z3_name(&self) -> String {
+        let mut name = self.name.clone();
+        for annotation in &self.annotations {
+            name = match annotation {
+                Annotation::Hat => format!(r"\hat{{{name}}}"),
+                Annotation::Tilde => format!(r"\tilde{{{name}}}"),
+                Annotation::Arrow => format!(r"\vec{{{name}}}"),
+                Annotation::Prime => name,
+            };
+        }
+        if !self.non_numeric_subscript.is_empty() {
+            name = format!("{name}_{{{}}}", self.non_numeric_subscript);
+        }
+        for annotation in &self.annotations {
+            if matches!(annotation, Annotation::Prime) {
+                name.push_str(r"^{\prime}");
+            }
+        }
+        name
     }
 }
 
@@ -133,7 +199,15 @@ impl<Metadata> Expr<Metadata> {
     pub fn without_metadata(&self) -> Expr<()> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
-            RawExpr::Type(ty) => RawExpr::Type(*ty),
+            RawExpr::Type(ty) => RawExpr::Type(match ty {
+                TypeExpr::Bool => TypeExpr::Bool,
+                TypeExpr::Nat => TypeExpr::Nat,
+                TypeExpr::Int => TypeExpr::Int,
+                TypeExpr::Real => TypeExpr::Real,
+                TypeExpr::Matrix(rows, cols) => {
+                    TypeExpr::Matrix(rows.without_metadata(), cols.without_metadata())
+                }
+            }),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
             RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
@@ -252,7 +326,7 @@ where
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
     Hole,
-    Type(Type),
+    Type(TypeExpr<Metadata>),
     Variable(Variable),
     NatLiteral(u64),
     Matrix(Matrix<Expr<Metadata>>),
@@ -267,7 +341,7 @@ pub enum RawExpr<Metadata> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, Finop, RawExpr, Variable};
+    use super::{Expr, Finop, RawExpr, TypeExpr, Variable};
 
     struct MetadataWithoutClone;
 
@@ -310,5 +384,27 @@ mod tests {
         }
 
         assert!(expression(1).without_metadata() == expression(2).without_metadata());
+    }
+
+    #[test]
+    fn without_metadata_erases_symbolic_type_dimensions() {
+        let expression = Expr::with_metadata(
+            1,
+            RawExpr::Type(TypeExpr::Matrix(
+                Expr::with_metadata(2, RawExpr::Variable(Variable::new("n"))),
+                Expr::with_metadata(
+                    3,
+                    RawExpr::Finop(
+                        Finop::Plus,
+                        vec![
+                            Expr::with_metadata(4, RawExpr::Variable(Variable::new("d"))),
+                            Expr::with_metadata(5, RawExpr::Variable(Variable::new("p"))),
+                        ],
+                    ),
+                ),
+            )),
+        );
+        let erased = expression.without_metadata();
+        assert!(matches!(erased.raw, RawExpr::Type(TypeExpr::Matrix(_, _))));
     }
 }
