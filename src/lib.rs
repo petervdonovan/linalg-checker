@@ -1,5 +1,7 @@
 #![allow(mixed_script_confusables)]
 
+pub mod enumerable_assignments_to_naturals;
+pub mod enumerable_envspec;
 pub mod find_model;
 pub mod from_tex;
 pub mod normalize;
