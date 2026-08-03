@@ -1,27 +1,11 @@
-# Scalar values
+# Symbolic dimensions
 
-## Environment
+## Assumptions
 
-- $n \in \mathbb{Z}$
-- $x \in \mathbb{R}$
-
-## Sentences
-
-- $n = -2$
-- $2 x = 1$
-
-## Conclusion
-
-Model
-
-- $n = -2$
-- $x = \frac{1}{2}$
-
-# Matrix value
-
-## Environment
-
-- $A \in \mathbb{R}^{2 \times 2}$
+- $A \in \mathbb{R}^{n \times d + p}$
+- $n = 2$
+- $d = 1$
+- $p = 1$
 
 ## Sentences
 
@@ -32,122 +16,57 @@ Model
 Model
 
 - $A = \begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix}$
+- $d = 1$
+- $n = 2$
+- $p = 1$
 
-# Matrix value with many models
+# Inferred matrix compatibility
 
-## Environment
+## Assumptions
 
+- $A B = C$
 - $A \in \mathbb{R}^{2 \times 2}$
+- $C \in \mathbb{R}^{2}$
 
 ## Sentences
+
+- $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+- $B = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+- $C = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+
+## Conclusion
+
+Model
+
+- $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+- $B = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+- $C = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+
+# Impossible shape
+
+## Assumptions
+
+- $A \in \mathbb{R}^{n}$
+- $n = 0$
+
+## Sentences
+
+## Conclusion
+
+Unsat
+
+# No small model
+
+## Assumptions
 
 - $A = A$
-
-## Conclusion
-
-Model
-
-- $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-
-# Unconstrained scalar
-
-## Environment
-
-- $x \in \mathbb{R}$
+- $a \in \mathbb{R}$
 
 ## Sentences
 
-- $x = x$
+- $a = 0$
+- $a = 1$
 
 ## Conclusion
 
-Model
-
-- $x = \square$
-
-# Rectangular matrix scaling
-
-## Environment
-
-- $A \in \mathbb{R}^{2 \times 3}$
-
-## Sentences
-
-- $2 A = \begin{bmatrix}2 & 4 & 6 \\ 8 & 10 & 12\end{bmatrix}$
-
-## Conclusion
-
-Model
-
-- $A = \begin{bmatrix}1 & 2 & 3 \\ 4 & 5 & 6\end{bmatrix}$
-
-# Matrix factorization
-
-## Environment
-
-- $A \in \mathbb{R}^{2 \times 2}$
-- $B \in \mathbb{R}^{2 \times 2}$
-
-## Sentences
-
-- $A B = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-
-## Conclusion
-
-Model
-
-- $A = \begin{bmatrix}\frac{1}{8} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{2}\end{bmatrix}$
-- $B = \begin{bmatrix}\frac{1}{2} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{8}\end{bmatrix}$
-
-# Nonidentity projection
-
-## Environment
-
-- $P \in \mathbb{R}^{2 \times 2}$
-- $k = 2$
-
-## Sentences
-
-- $P^{k} = P$
-- $P \begin{bmatrix}1 \\ 0\end{bmatrix} = \begin{bmatrix}1 \\ 0\end{bmatrix}$
-- $P \begin{bmatrix}0 \\ 1\end{bmatrix} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
-
-## Conclusion
-
-Model
-
-- $P = \begin{bmatrix}1 & 0 \\ 0 & 0\end{bmatrix}$
-
-# Impossible surjective nonidentity projection
-
-## Environment
-
-- $C \in \mathbb{R}^{2 \times 2}$
-- $P \in \mathbb{R}^{2 \times 2}$
-- $v \in \mathbb{R}^{2}$
-- $k = 2$
-
-## Sentences
-
-- $P^{k} = P$
-- $P C = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-- $P v \ne v$
-
-## Conclusion
-
-Unsat
-
-# Inconsistent
-
-## Environment
-
-- $z \in \mathbb{Z}$
-
-## Sentences
-
-- $z < 0$
-- $z > 0$
-
-## Conclusion
-
-Unsat
+Unsat up to dimension 3

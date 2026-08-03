@@ -49,12 +49,14 @@ pub struct EnvironmentIterator {
     dimensions: Vec<Int>,
     known_equalities: HashMap<Expr<()>, u64>,
     dim_limit: u64,
+    max_dimension: u64,
     dimensionless_yielded: bool,
     finished: bool,
 }
 
 pub fn extract_environment_iterator<Metadata>(
     assumptions: impl Iterator<Item = Expr<Metadata>>,
+    max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
     let assumptions: Vec<_> = assumptions.map(|e| e.without_metadata()).collect();
     let specification = collect_environment_specification(&assumptions)?;
@@ -73,7 +75,7 @@ pub fn extract_environment_iterator<Metadata>(
     };
     check_base_constraints(&mut solver)?;
 
-    let dimensions = variable_types
+    let dimensions: Vec<Int> = variable_types
         .values()
         .filter_map(|shape| match shape {
             Shape::Matrix(rows, cols) => Some([rows.clone(), cols.clone()]),
@@ -81,16 +83,18 @@ pub fn extract_environment_iterator<Metadata>(
         })
         .flatten()
         .collect();
+    let finished = !dimensions.is_empty() && max_dimension == 0;
     let mut iterator = EnvironmentIterator {
         solver,
         variable_types,
         dimensions,
         known_equalities,
         dim_limit: 1,
+        max_dimension,
         dimensionless_yielded: false,
-        finished: false,
+        finished,
     };
-    if !iterator.dimensions.is_empty() {
+    if !iterator.dimensions.is_empty() && !iterator.finished {
         iterator.push_dim_limit();
     }
     Ok(iterator)
@@ -289,6 +293,10 @@ impl Iterator for EnvironmentIterator {
                 }
                 SatResult::Unsat => {
                     self.solver.pop(1);
+                    if self.dim_limit == self.max_dimension {
+                        self.finished = true;
+                        return None;
+                    }
                     self.dim_limit = self.dim_limit.checked_add(1).unwrap();
                     self.push_dim_limit();
                 }
@@ -779,7 +787,7 @@ mod tests {
     }
 
     fn environments(tex: &[&str]) -> super::EnvironmentIterator {
-        extract_environment_iterator(tex.iter().map(|tex| expression(tex))).unwrap()
+        extract_environment_iterator(tex.iter().map(|tex| expression(tex)), 10).unwrap()
     }
 
     #[test]
@@ -811,6 +819,35 @@ mod tests {
             next_limit
                 .iter()
                 .all(|ty| matches!(ty, Type::Matrix(rows, cols) if (*rows).max(*cols) == 2))
+        );
+    }
+
+    #[test]
+    fn stops_after_the_maximum_dimension() {
+        let environments: Vec<_> =
+            extract_environment_iterator([expression("A = A")].into_iter(), 2)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+        assert_eq!(environments.len(), 4);
+        assert!(environments.iter().all(|environment| {
+            matches!(environment.types[&Variable::new("A")], Type::Matrix(rows, cols) if rows <= 2 && cols <= 2)
+        }));
+    }
+
+    #[test]
+    fn zero_bound_excludes_matrices_but_not_dimensionless_environments() {
+        assert_eq!(
+            extract_environment_iterator([expression("A = A")].into_iter(), 0)
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            extract_environment_iterator([expression("a = a")].into_iter(), 0)
+                .unwrap()
+                .count(),
+            1
         );
     }
 
@@ -862,15 +899,15 @@ mod tests {
     #[test]
     fn rejects_unsatisfiable_and_nonlinear_constraints() {
         assert!(matches!(
-            extract_environment_iterator([expression(r"n < 0")].into_iter()),
+            extract_environment_iterator([expression(r"n < 0")].into_iter(), 10),
             Err(ShapeError::Unsat(_))
         ));
         assert!(matches!(
-            extract_environment_iterator([expression(r"A \in \mathbb{R}^{n p}")].into_iter()),
+            extract_environment_iterator([expression(r"A \in \mathbb{R}^{n p}")].into_iter(), 10),
             Err(ShapeError::Unsupported(_))
         ));
         assert!(matches!(
-            extract_environment_iterator([expression(r"A \in \mathbb{R}^{-n}")].into_iter()),
+            extract_environment_iterator([expression(r"A \in \mathbb{R}^{-n}")].into_iter(), 10),
             Err(ShapeError::Unsupported(_))
         ));
     }
@@ -879,7 +916,8 @@ mod tests {
     fn rejects_generated_dimension_name_collisions() {
         assert!(matches!(
             extract_environment_iterator(
-                [expression(r"A = A"), expression(r"A_{rows} = A_{rows}"),].into_iter()
+                [expression(r"A = A"), expression(r"A_{rows} = A_{rows}"),].into_iter(),
+                10,
             ),
             Err(ShapeError::InvalidTyping(_))
         ));
@@ -899,7 +937,7 @@ mod tests {
             elements: vec![block],
         }));
         assert!(matches!(
-            extract_environment_iterator([matrix].into_iter()),
+            extract_environment_iterator([matrix].into_iter(), 10),
             Err(ShapeError::Unsupported(_))
         ));
     }
@@ -908,7 +946,8 @@ mod tests {
     fn rejects_boolean_numeric_operations() {
         assert!(matches!(
             extract_environment_iterator(
-                [expression(r"b \in \mathbb{B}"), expression("b + 1 = 2")].into_iter()
+                [expression(r"b \in \mathbb{B}"), expression("b + 1 = 2")].into_iter(),
+                10,
             ),
             Err(ShapeError::InvalidTyping(_))
         ));

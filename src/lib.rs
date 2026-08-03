@@ -2,7 +2,9 @@
 
 pub mod enumerable_envspec;
 pub mod find_model;
+pub mod find_model_given_environment;
 pub mod from_tex;
+mod model_finding;
 pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
