@@ -25,7 +25,7 @@ fn find_model_given_environment_fixtures_are_canonical_markdown() {
 #[test]
 fn finds_models_matching_committed_markdown() {
     let input = TestCases::<NotSolvedYet>::parse_str(INPUT);
-    let actual = input.find_models().to_string();
+    let actual = input.find_models().unwrap().to_string();
     if std::env::var_os("UPDATE_EXPECT").is_some() {
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/find_models_given_environment_output.md");

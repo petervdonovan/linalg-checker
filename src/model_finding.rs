@@ -1,4 +1,7 @@
-use std::fmt::{self, Display};
+use std::{
+    error::Error,
+    fmt::{self, Display},
+};
 
 use markdown::{
     Constructs, ParseOptions,
@@ -8,8 +11,47 @@ use z3::{Model as Z3Model, SatResult, Solver, ast::Dynamic};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
-    to_z3::{Z3Object, to_z3},
+    enumerable_envspec::ShapeError,
+    to_z3::{ToZ3Error, Z3Object, to_z3},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelFindingError {
+    Lowering(ToZ3Error),
+    Shape(ShapeError),
+    NonBooleanAssertion,
+    MissingModel,
+    UnsupportedModel(&'static str),
+    ModelValueOutOfRange(&'static str),
+}
+
+impl Display for ModelFindingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lowering(error) => error.fmt(f),
+            Self::Shape(error) => error.fmt(f),
+            Self::NonBooleanAssertion => f.write_str("test-case assertion must be Boolean"),
+            Self::MissingModel => f.write_str("Z3 returned sat without providing a model"),
+            Self::UnsupportedModel(message) | Self::ModelValueOutOfRange(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl Error for ModelFindingError {}
+
+impl From<ToZ3Error> for ModelFindingError {
+    fn from(error: ToZ3Error) -> Self {
+        Self::Lowering(error)
+    }
+}
+
+impl From<ShapeError> for ModelFindingError {
+    fn from(error: ShapeError) -> Self {
+        Self::Shape(error)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TestCase<Conclusion> {
@@ -165,8 +207,8 @@ impl<Conclusion: ToFromMd> ToFromMd for TestCases<Conclusion> {
 }
 
 impl TestCases<NotSolvedYet> {
-    pub fn find_models(self) -> TestCases<ModelOrUnsat> {
-        TestCases(
+    pub fn find_models(self) -> Result<TestCases<ModelOrUnsat>, ModelFindingError> {
+        Ok(TestCases(
             self.0
                 .into_iter()
                 .map(|test_case| {
@@ -176,23 +218,23 @@ impl TestCases<NotSolvedYet> {
                         environment,
                         conclusion: NotSolvedYet,
                     } = test_case;
-                    let conclusion = solve_environment(&environment, &sentences);
-                    TestCase {
+                    let conclusion = solve_environment(&environment, &sentences)?;
+                    Ok(TestCase {
                         name,
                         sentences,
                         environment,
                         conclusion,
-                    }
+                    })
                 })
-                .collect(),
-        )
+                .collect::<Result<_, ModelFindingError>>()?,
+        ))
     }
 }
 
 pub(crate) fn solve_environment<'a>(
     environment: &Environment,
     assertions: impl IntoIterator<Item = &'a Expr<()>>,
-) -> ModelOrUnsat {
+) -> Result<ModelOrUnsat, ModelFindingError> {
     let solver = Solver::new();
     for (variable, ty) in &environment.types {
         if !matches!(ty, Type::Nat) {
@@ -203,47 +245,51 @@ pub(crate) fn solve_environment<'a>(
             Expr::new(RawExpr::Variable(variable.clone())),
             Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
         ));
-        assert_boolean(&solver, environment, &type_assertion);
+        assert_boolean(&solver, environment, &type_assertion)?;
     }
     for assertion in assertions {
-        assert_boolean(&solver, environment, assertion);
+        assert_boolean(&solver, environment, assertion)?;
     }
     match solver.check() {
-        SatResult::Unsat => ModelOrUnsat::Unsat,
-        SatResult::Unknown => ModelOrUnsat::Unknown,
-        SatResult::Sat => ModelOrUnsat::Model(extract_model(
+        SatResult::Unsat => Ok(ModelOrUnsat::Unsat),
+        SatResult::Unknown => Ok(ModelOrUnsat::Unknown),
+        SatResult::Sat => Ok(ModelOrUnsat::Model(extract_model(
             environment,
-            &solver
-                .get_model()
-                .expect("Z3 returned sat without providing a model"),
-        )),
+            &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
+        )?)),
     }
 }
 
-fn assert_boolean(solver: &Solver, environment: &Environment, assertion: &Expr<()>) {
-    let Z3Object::Z3(assertion) = to_z3(environment, assertion) else {
-        panic!("test-case assertion must lower to a Boolean scalar")
+fn assert_boolean(
+    solver: &Solver,
+    environment: &Environment,
+    assertion: &Expr<()>,
+) -> Result<(), ModelFindingError> {
+    let Z3Object::Z3(assertion) = to_z3(environment, assertion)? else {
+        return Err(ModelFindingError::NonBooleanAssertion);
     };
     solver.assert(
         assertion
             .as_bool()
-            .unwrap_or_else(|| panic!("test-case assertion must be Boolean")),
+            .ok_or(ModelFindingError::NonBooleanAssertion)?,
     );
+    Ok(())
 }
 
-fn extract_model(environment: &Environment, model: &Z3Model) -> Model {
+fn extract_model(environment: &Environment, model: &Z3Model) -> Result<Model, ModelFindingError> {
     let mut variables: Vec<_> = environment.types.iter().collect();
     variables.sort_by_key(|(variable, _)| *variable);
     variables
         .into_iter()
         .map(|(variable, ty)| {
-            assert!(
-                !matches!(ty, Type::Bool),
-                "Boolean model extraction is not supported"
-            );
+            if matches!(ty, Type::Bool) {
+                return Err(ModelFindingError::UnsupportedModel(
+                    "Boolean model extraction is not supported",
+                ));
+            }
             let left = Expr::new(RawExpr::Variable(variable.clone()));
-            let right = match to_z3(environment, &left) {
-                Z3Object::Z3(value) => scalar_model_value(model, value),
+            let right = match to_z3(environment, &left)? {
+                Z3Object::Z3(value) => scalar_model_value(model, value)?,
                 Z3Object::Matrix(matrix) => Expr::new(RawExpr::Matrix(Matrix {
                     rows: matrix.rows,
                     cols: matrix.cols,
@@ -252,60 +298,70 @@ fn extract_model(environment: &Environment, model: &Z3Model) -> Model {
                         .into_iter()
                         .map(|value| match value {
                             Z3Object::Z3(value) => scalar_model_value(model, value),
-                            Z3Object::Matrix(_) => {
-                                panic!("nested matrices are not supported in Z3 models")
-                            }
+                            Z3Object::Matrix(_) => Err(ModelFindingError::UnsupportedModel(
+                                "nested matrices are not supported in Z3 models",
+                            )),
                         })
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                 })),
             };
-            Expr::new(RawExpr::CmpChain(CmpChain {
+            Ok(Expr::new(RawExpr::CmpChain(CmpChain {
                 start: left,
                 assertions: vec![(Cmp::Eq, right)],
-            }))
+            })))
         })
         .collect()
 }
 
-fn scalar_model_value(model: &Z3Model, value: Dynamic) -> Expr<()> {
+fn scalar_model_value(model: &Z3Model, value: Dynamic) -> Result<Expr<()>, ModelFindingError> {
     if let Some(value) = value.as_int() {
         let Some(value) = model.get_const_interp(&value) else {
-            return Expr::new(RawExpr::Hole);
+            return Ok(Expr::new(RawExpr::Hole));
         };
         if let Some(value) = value.as_i64() {
-            signed_integer(value)
+            Ok(signed_integer(value))
         } else if let Some(value) = value.as_u64() {
-            Expr::new(RawExpr::NatLiteral(value))
+            Ok(Expr::new(RawExpr::NatLiteral(value)))
         } else {
-            panic!("integer model value does not fit in the supported literal range")
+            Err(ModelFindingError::ModelValueOutOfRange(
+                "integer model value does not fit in the supported literal range",
+            ))
         }
     } else if let Some(value) = value.as_real() {
         let Some(value) = model.get_const_interp(&value) else {
-            return Expr::new(RawExpr::Hole);
+            return Ok(Expr::new(RawExpr::Hole));
         };
-        let (numerator, denominator) = value
-            .as_rational()
-            .unwrap_or_else(|| todo!("algebraic irrational model values are not supported"));
-        assert!(
-            denominator > 0,
-            "Z3 returned a rational with a nonpositive denominator"
-        );
+        let (numerator, denominator) =
+            value
+                .as_rational()
+                .ok_or(ModelFindingError::UnsupportedModel(
+                    "algebraic irrational model values are not supported",
+                ))?;
+        if denominator <= 0 {
+            return Err(ModelFindingError::ModelValueOutOfRange(
+                "Z3 returned a rational with a nonpositive denominator",
+            ));
+        }
         let numerator = signed_integer(numerator);
         if denominator == 1 {
-            numerator
+            Ok(numerator)
         } else {
-            Expr::new(RawExpr::Binop(
+            Ok(Expr::new(RawExpr::Binop(
                 Binop::Div,
                 numerator,
-                Expr::new(RawExpr::NatLiteral(
-                    denominator
-                        .try_into()
-                        .expect("rational denominator does not fit in u64"),
-                )),
-            ))
+                Expr::new(RawExpr::NatLiteral(denominator.try_into().map_err(
+                    |_| {
+                        ModelFindingError::ModelValueOutOfRange(
+                            "rational denominator does not fit in u64",
+                        )
+                    },
+                )?)),
+            )))
         }
     } else {
-        panic!("model extraction requires an integer or real scalar")
+        Err(ModelFindingError::UnsupportedModel(
+            "model extraction requires an integer or real scalar",
+        ))
     }
 }
 
@@ -644,7 +700,10 @@ mod tests {
         ast::{Int, Real},
     };
 
-    use super::{ModelOrUnsat, NotSolvedYet, TestCase, TestCases, ToFromMd, extract_model};
+    use super::{
+        ModelFindingError, ModelOrUnsat, NotSolvedYet, TestCase, TestCases, ToFromMd,
+        extract_model, solve_environment,
+    };
     use crate::{Cmp, CmpChain, Environment, Expr, RawExpr, Type, Variable};
 
     fn variable(name: &str) -> Expr<()> {
@@ -890,10 +949,9 @@ Model
     }
 
     #[test]
-    #[should_panic(expected = "Boolean model extraction is not supported")]
     fn model_extraction_rejects_booleans() {
         let boolean = Variable::new("b");
-        TestCases(vec![TestCase {
+        let error = TestCases(vec![TestCase {
             name: "Boolean".to_owned(),
             sentences: vec![Expr::new(RawExpr::Variable(boolean.clone()))],
             environment: Environment {
@@ -902,7 +960,22 @@ Model
             },
             conclusion: NotSolvedYet,
         }])
-        .find_models();
+        .find_models()
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Boolean model extraction is not supported"
+        );
+    }
+
+    #[test]
+    fn solver_rejects_non_boolean_assertions() {
+        let error = solve_environment(
+            &Environment::default(),
+            &[Expr::new(RawExpr::NatLiteral(1))],
+        )
+        .unwrap_err();
+        assert_eq!(error, ModelFindingError::NonBooleanAssertion);
     }
 
     #[test]
@@ -913,7 +986,7 @@ Model
             types: HashMap::from([(Variable::new("x"), Type::Real)]),
             equalities: HashMap::new(),
         };
-        let extracted = extract_model(&environment, &solver.get_model().unwrap());
+        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
         };
@@ -929,7 +1002,7 @@ Model
             types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 2))]),
             equalities: HashMap::new(),
         };
-        let extracted = extract_model(&environment, &solver.get_model().unwrap());
+        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
         };

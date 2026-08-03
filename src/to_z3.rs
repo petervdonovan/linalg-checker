@@ -1,6 +1,6 @@
 use std::{
-    fmt::Display,
-    iter::Sum,
+    error::Error,
+    fmt::{self, Display},
     ops::{Add, Div, Mul, Neg},
 };
 
@@ -17,53 +17,101 @@ pub enum Z3Object {
     Z3(z3::ast::Dynamic),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToZ3Error {
+    Unsupported(&'static str),
+    MissingVariableType(Variable),
+    MissingPowerExponent,
+    InvalidOperands(&'static str),
+    Shape(&'static str),
+    Empty(&'static str),
+    DimensionOverflow,
+    InvalidMatrixLiteral,
+}
+
+impl Display for ToZ3Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsupported(message)
+            | Self::InvalidOperands(message)
+            | Self::Shape(message)
+            | Self::Empty(message) => f.write_str(message),
+            Self::MissingVariableType(variable) => {
+                write!(
+                    f,
+                    "variable {} is missing from the type environment",
+                    variable.z3_name()
+                )
+            }
+            Self::MissingPowerExponent => {
+                f.write_str("power exponent is missing from the equality environment")
+            }
+            Self::DimensionOverflow => f.write_str("matrix dimensions overflow usize"),
+            Self::InvalidMatrixLiteral => {
+                f.write_str("matrix element count does not match its dimensions")
+            }
+        }
+    }
+}
+
+impl Error for ToZ3Error {}
+
 impl Neg for Z3Object {
-    type Output = Self;
+    type Output = Result<Self, ToZ3Error>;
 
     fn neg(self) -> Self::Output {
         match self {
             Self::Z3(expression) => {
                 if let Some(expression) = expression.as_int() {
-                    Self::Z3((-expression).into())
+                    Ok(Self::Z3((-expression).into()))
                 } else if let Some(expression) = expression.as_real() {
-                    Self::Z3((-expression).into())
+                    Ok(Self::Z3((-expression).into()))
                 } else {
-                    panic!("negation requires a numeric scalar")
+                    Err(ToZ3Error::InvalidOperands(
+                        "negation requires a numeric scalar",
+                    ))
                 }
             }
-            Self::Matrix(matrix) => Self::Matrix(Matrix {
+            Self::Matrix(matrix) => Ok(Self::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
-                elements: matrix.elements.into_iter().map(Neg::neg).collect(),
-            }),
+                elements: matrix
+                    .elements
+                    .into_iter()
+                    .map(Neg::neg)
+                    .collect::<Result<_, _>>()?,
+            })),
         }
     }
 }
 
 impl Add for Z3Object {
-    type Output = Self;
+    type Output = Result<Self, ToZ3Error>;
 
     fn add(self, right: Self) -> Self::Output {
         match (self, right) {
             (Self::Z3(left), Self::Z3(right)) => {
                 if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
-                    Self::Z3((left + right).into())
+                    Ok(Self::Z3((left + right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
-                    Self::Z3((left + right).into())
+                    Ok(Self::Z3((left + right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
-                    Self::Z3((Real::from_int(&left) + right).into())
+                    Ok(Self::Z3((Real::from_int(&left) + right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_int()) {
-                    Self::Z3((left + Real::from_int(&right)).into())
+                    Ok(Self::Z3((left + Real::from_int(&right)).into()))
                 } else {
-                    panic!("addition requires numeric scalars")
+                    Err(ToZ3Error::InvalidOperands(
+                        "addition requires numeric scalars",
+                    ))
                 }
             }
             (Self::Matrix(left), Self::Matrix(right)) => {
-                assert!(
-                    left.rows == right.rows && left.cols == right.cols,
-                    "matrix addition requires equal dimensions"
-                );
-                Self::Matrix(Matrix {
+                if left.rows != right.rows || left.cols != right.cols {
+                    return Err(ToZ3Error::Shape(
+                        "matrix addition requires equal dimensions",
+                    ));
+                }
+                Ok(Self::Matrix(Matrix {
                     rows: left.rows,
                     cols: left.cols,
                     elements: left
@@ -71,141 +119,176 @@ impl Add for Z3Object {
                         .into_iter()
                         .zip(right.elements)
                         .map(|(left, right)| left + right)
-                        .collect(),
-                })
+                        .collect::<Result<_, _>>()?,
+                }))
             }
-            (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => {
-                panic!("scalar-matrix addition is not supported")
-            }
+            (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => Err(
+                ToZ3Error::InvalidOperands("scalar-matrix addition is not supported"),
+            ),
         }
     }
 }
 
 impl Mul for Z3Object {
-    type Output = Self;
+    type Output = Result<Self, ToZ3Error>;
 
     fn mul(self, right: Self) -> Self::Output {
         match (self, right) {
             (Self::Z3(left), Self::Z3(right)) => {
                 if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
-                    Self::Z3((left * right).into())
+                    Ok(Self::Z3((left * right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
-                    Self::Z3((left * right).into())
+                    Ok(Self::Z3((left * right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
-                    Self::Z3((Real::from_int(&left) * right).into())
+                    Ok(Self::Z3((Real::from_int(&left) * right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_int()) {
-                    Self::Z3((left * Real::from_int(&right)).into())
+                    Ok(Self::Z3((left * Real::from_int(&right)).into()))
                 } else {
-                    panic!("multiplication requires numeric scalars")
+                    Err(ToZ3Error::InvalidOperands(
+                        "multiplication requires numeric scalars",
+                    ))
                 }
             }
-            (Self::Matrix(left), Self::Matrix(right)) => Self::Matrix(left * right),
-            (Self::Matrix(matrix), scalar @ Self::Z3(_)) => Self::Matrix(Matrix {
+            (Self::Matrix(left), Self::Matrix(right)) => multiply_matrices(left, right),
+            (Self::Matrix(matrix), scalar @ Self::Z3(_)) => Ok(Self::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
                 elements: matrix
                     .elements
                     .into_iter()
                     .map(|element| element * scalar.clone())
-                    .collect(),
-            }),
-            (scalar @ Self::Z3(_), Self::Matrix(matrix)) => Self::Matrix(Matrix {
+                    .collect::<Result<_, _>>()?,
+            })),
+            (scalar @ Self::Z3(_), Self::Matrix(matrix)) => Ok(Self::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
                 elements: matrix
                     .elements
                     .into_iter()
                     .map(|element| scalar.clone() * element)
-                    .collect(),
-            }),
+                    .collect::<Result<_, _>>()?,
+            })),
         }
     }
 }
 
 impl Div for Z3Object {
-    type Output = Self;
+    type Output = Result<Self, ToZ3Error>;
 
     fn div(self, right: Self) -> Self::Output {
         match (self, right) {
             (Self::Z3(left), Self::Z3(right)) => {
                 if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
-                    Self::Z3((left / right).into())
+                    Ok(Self::Z3((left / right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
-                    Self::Z3((left / right).into())
+                    Ok(Self::Z3((left / right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
-                    Self::Z3((Real::from_int(&left) / right).into())
+                    Ok(Self::Z3((Real::from_int(&left) / right).into()))
                 } else if let (Some(left), Some(right)) = (left.as_real(), right.as_int()) {
-                    Self::Z3((left / Real::from_int(&right)).into())
+                    Ok(Self::Z3((left / Real::from_int(&right)).into()))
                 } else {
-                    panic!("division requires numeric scalars")
+                    Err(ToZ3Error::InvalidOperands(
+                        "division requires numeric scalars",
+                    ))
                 }
             }
-            (Self::Matrix(left), Self::Matrix(right)) => single_cell(left) / single_cell(right),
-            (Self::Matrix(left), right @ Self::Z3(_)) => single_cell(left) / right,
-            (left @ Self::Z3(_), Self::Matrix(right)) => left / single_cell(right),
+            (Self::Matrix(left), Self::Matrix(right)) => single_cell(left)? / single_cell(right)?,
+            (Self::Matrix(left), right @ Self::Z3(_)) => single_cell(left)? / right,
+            (left @ Self::Z3(_), Self::Matrix(right)) => left / single_cell(right)?,
         }
     }
 }
 
-impl Sum for Z3Object {
-    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let first = iter
-            .next()
-            .unwrap_or_else(|| panic!("matrix dot product requires at least one term"));
-        iter.fold(first, Add::add)
+fn single_cell(mut matrix: Matrix<Z3Object>) -> Result<Z3Object, ToZ3Error> {
+    if matrix.rows != 1 || matrix.cols != 1 || matrix.elements.len() != 1 {
+        return Err(ToZ3Error::Shape(
+            "matrix division is only supported for 1x1 matrices",
+        ));
     }
+    Ok(matrix.elements.pop().unwrap())
 }
 
-fn single_cell(mut matrix: Matrix<Z3Object>) -> Z3Object {
-    assert!(
-        matrix.rows == 1 && matrix.cols == 1 && matrix.elements.len() == 1,
-        "matrix division is only supported for 1x1 matrices"
-    );
-    matrix.elements.pop().unwrap()
+fn multiply_matrices(
+    left: Matrix<Z3Object>,
+    right: Matrix<Z3Object>,
+) -> Result<Z3Object, ToZ3Error> {
+    if left.cols != right.rows {
+        return Err(ToZ3Error::Shape(
+            "matrix multiplication requires compatible dimensions",
+        ));
+    }
+    let capacity = left
+        .rows
+        .checked_mul(right.cols)
+        .ok_or(ToZ3Error::DimensionOverflow)?;
+    let mut elements = Vec::with_capacity(capacity);
+    for row in 0..left.rows {
+        for col in 0..right.cols {
+            let mut terms = (0..left.cols).map(|inner| {
+                left.elements[row * left.cols + inner].clone()
+                    * right.elements[inner * right.cols + col].clone()
+            });
+            let first = terms.next().ok_or(ToZ3Error::Empty(
+                "matrix dot product requires at least one term",
+            ))??;
+            elements.push(terms.try_fold(first, |sum, term| sum + term?)?);
+        }
+    }
+    Ok(Z3Object::Matrix(Matrix {
+        rows: left.rows,
+        cols: right.cols,
+        elements,
+    }))
 }
 
-fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Bool {
+fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ3Error> {
     match (left, right) {
         (Z3Object::Z3(left), Z3Object::Z3(right)) => {
             if left.as_bool().is_some() || right.as_bool().is_some() {
-                panic!("boolean scalars cannot be compared")
+                Err(ToZ3Error::InvalidOperands(
+                    "boolean scalars cannot be compared",
+                ))
             } else if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
-                compare_int(left, comparison, right)
+                Ok(compare_int(left, comparison, right))
             } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
-                compare_real(left, comparison, right)
+                Ok(compare_real(left, comparison, right))
             } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
-                compare_real(Real::from_int(&left), comparison, right)
+                Ok(compare_real(Real::from_int(&left), comparison, right))
             } else if let (Some(left), Some(right)) = (left.as_real(), right.as_int()) {
-                compare_real(left, comparison, Real::from_int(&right))
+                Ok(compare_real(left, comparison, Real::from_int(&right)))
             } else {
-                panic!("comparison requires numeric scalars")
+                Err(ToZ3Error::InvalidOperands(
+                    "comparison requires numeric scalars",
+                ))
             }
         }
         (Z3Object::Matrix(left), Z3Object::Matrix(right)) => {
-            assert!(
-                matches!(comparison, Cmp::Eq | Cmp::Ne),
-                "matrix ordering comparisons are not supported"
-            );
-            assert!(
-                left.rows == right.rows && left.cols == right.cols,
-                "matrix equality requires equal dimensions"
-            );
+            if !matches!(comparison, Cmp::Eq | Cmp::Ne) {
+                return Err(ToZ3Error::InvalidOperands(
+                    "matrix ordering comparisons are not supported",
+                ));
+            }
+            if left.rows != right.rows || left.cols != right.cols {
+                return Err(ToZ3Error::Shape(
+                    "matrix equality requires equal dimensions",
+                ));
+            }
             let comparisons: Vec<_> = left
                 .elements
                 .into_iter()
                 .zip(right.elements)
                 .map(|(left, right)| compare(left, Cmp::Eq, right))
-                .collect();
+                .collect::<Result<_, _>>()?;
             let equality = Bool::and(&comparisons);
             if matches!(comparison, Cmp::Ne) {
-                equality.not()
+                Ok(equality.not())
             } else {
-                equality
+                Ok(equality)
             }
         }
-        (Z3Object::Matrix(_), Z3Object::Z3(_)) | (Z3Object::Z3(_), Z3Object::Matrix(_)) => {
-            panic!("scalar-matrix comparisons are not supported")
-        }
+        (Z3Object::Matrix(_), Z3Object::Z3(_)) | (Z3Object::Z3(_), Z3Object::Matrix(_)) => Err(
+            ToZ3Error::InvalidOperands("scalar-matrix comparisons are not supported"),
+        ),
     }
 }
 
@@ -231,31 +314,29 @@ fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
     }
 }
 
-pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
+pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
     lower(γ, e)
 }
 
-fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
+fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
-        RawExpr::Hole => panic!("holes are not supported by to_z3"),
-        RawExpr::Type(_) => panic!("type expressions are not supported by to_z3"),
+        RawExpr::Hole => Err(ToZ3Error::Unsupported("holes are not supported by to_z3")),
+        RawExpr::Type(_) => Err(ToZ3Error::Unsupported(
+            "type expressions are not supported by to_z3",
+        )),
         RawExpr::Variable(variable) => {
             let τ = γ
                 .types
                 .get(variable)
-                .unwrap_or_else(|| panic!("variable is missing from the type environment"));
-            match τ {
+                .ok_or_else(|| ToZ3Error::MissingVariableType(variable.clone()))?;
+            Ok(match τ {
                 Type::Bool => Z3Object::Z3(Bool::new_const(variable.z3_name()).into()),
                 Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(variable.z3_name()).into()),
                 Type::Real => Z3Object::Z3(Real::new_const(variable.z3_name()).into()),
                 Type::Matrix(rows, cols) => {
-                    let rows =
-                        usize::try_from(*rows).expect("matrix row count does not fit in usize");
-                    let cols =
-                        usize::try_from(*cols).expect("matrix column count does not fit in usize");
-                    let capacity = rows
-                        .checked_mul(cols)
-                        .expect("matrix dimensions overflow usize");
+                    let rows = usize::try_from(*rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
+                    let cols = usize::try_from(*cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
+                    let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
                     let mut elements = Vec::with_capacity(capacity);
                     for row in 1..=rows {
                         for col in 1..=cols {
@@ -271,19 +352,17 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
                         elements,
                     })
                 }
-            }
+            })
         }
-        RawExpr::NatLiteral(value) => Z3Object::Z3(Int::from_u64(*value).into()),
-        RawExpr::Monop(Monop::Neg, inner) => -lower(γ, inner),
-        RawExpr::Binop(Binop::Div, left, right) => lower(γ, left) / lower(γ, right),
+        RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(Int::from_u64(*value).into())),
+        RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
+        RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
         RawExpr::Binop(Binop::Power, base, exponent) => {
             let exponent = γ
                 .equalities
                 .get(&exponent.without_metadata())
                 .copied()
-                .unwrap_or_else(|| {
-                    panic!("power exponent is missing from the equality environment")
-                });
+                .ok_or(ToZ3Error::MissingPowerExponent)?;
             lower_power(γ, base, exponent)
         }
         RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
@@ -297,28 +376,31 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Z3Object {
             let expected_elements = matrix
                 .rows
                 .checked_mul(matrix.cols)
-                .expect("matrix dimensions overflow usize");
-            assert!(
-                matrix.elements.len() == expected_elements,
-                "matrix element count does not match its dimensions"
-            );
-            Z3Object::Matrix(Matrix {
+                .ok_or(ToZ3Error::DimensionOverflow)?;
+            if matrix.elements.len() != expected_elements {
+                return Err(ToZ3Error::InvalidMatrixLiteral);
+            }
+            Ok(Z3Object::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
                 elements: matrix
                     .elements
                     .iter()
                     .map(|expression| lower(γ, expression))
-                    .collect(),
-            })
+                    .collect::<Result<_, _>>()?,
+            }))
         }
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
-        RawExpr::LogicChain(_) => panic!("logic chains are not supported"),
+        RawExpr::LogicChain(_) => Err(ToZ3Error::Unsupported(
+            "logic chains are not supported by to_z3",
+        )),
         RawExpr::Monop(_, _)
         | RawExpr::Binop(_, _, _)
         | RawExpr::Triop(_, _, _, _)
         | RawExpr::Finop(_, _)
-        | RawExpr::Seqop(_, _, _) => panic!("expression is not supported by to_z3"),
+        | RawExpr::Seqop(_, _, _) => Err(ToZ3Error::Unsupported(
+            "expression is not supported by to_z3",
+        )),
     }
 }
 
@@ -326,12 +408,12 @@ fn lower_membership<Metadata>(
     environment: &Environment,
     left: &Expr<Metadata>,
     right: &Expr<Metadata>,
-) -> Z3Object {
+) -> Result<Z3Object, ToZ3Error> {
     let (RawExpr::Variable(variable), RawExpr::Type(expected)) = (&left.raw, &right.raw) else {
-        return Z3Object::Z3(Bool::from_bool(false).into());
+        return Ok(Z3Object::Z3(Bool::from_bool(false).into()));
     };
     let Some(actual) = environment.types.get(variable) else {
-        return Z3Object::Z3(Bool::from_bool(false).into());
+        return Ok(Z3Object::Z3(Bool::from_bool(false).into()));
     };
     let result = match (actual, expected) {
         (Type::Bool, TypeExpr::Bool)
@@ -341,8 +423,8 @@ fn lower_membership<Metadata>(
         (Type::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
             let row_symbol = Int::new_const(dimension_name(variable, "rows"));
             let col_symbol = Int::new_const(dimension_name(variable, "cols"));
-            let expected_rows = lower_dimension(environment, expected_rows, "row");
-            let expected_cols = lower_dimension(environment, expected_cols, "column");
+            let expected_rows = lower_dimension(environment, expected_rows, "row")?;
+            let expected_cols = lower_dimension(environment, expected_cols, "column")?;
             Bool::and(&[
                 row_symbol.eq(Int::from_u64(*rows)),
                 col_symbol.eq(Int::from_u64(*cols)),
@@ -352,36 +434,46 @@ fn lower_membership<Metadata>(
         }
         _ => Bool::from_bool(false),
     };
-    Z3Object::Z3(result.into())
+    Ok(Z3Object::Z3(result.into()))
 }
 
 fn lower_dimension<Metadata>(
     environment: &Environment,
     expression: &Expr<Metadata>,
     axis: &str,
-) -> Int {
-    let Z3Object::Z3(expression) = lower(environment, expression) else {
-        panic!("matrix {axis} dimension must be a natural-number scalar")
+) -> Result<Int, ToZ3Error> {
+    let Z3Object::Z3(expression) = lower(environment, expression)? else {
+        return Err(ToZ3Error::InvalidOperands(match axis {
+            "row" => "matrix row dimension must be a natural-number scalar",
+            _ => "matrix column dimension must be a natural-number scalar",
+        }));
     };
     expression
         .as_int()
-        .unwrap_or_else(|| panic!("matrix {axis} dimension must be a natural-number scalar"))
+        .ok_or(ToZ3Error::InvalidOperands(match axis {
+            "row" => "matrix row dimension must be a natural-number scalar",
+            _ => "matrix column dimension must be a natural-number scalar",
+        }))
 }
 
 fn dimension_name(variable: &Variable, axis: &str) -> String {
     format!("{}_{{{axis}}}", variable.z3_name())
 }
 
-fn lower_cmp_chain<Metadata>(γ: &Environment, chain: &CmpChain<Metadata>) -> Z3Object {
-    assert!(
-        !chain.assertions.is_empty(),
-        "comparison chain requires at least one assertion"
-    );
-    let mut previous = lower(γ, &chain.start);
+fn lower_cmp_chain<Metadata>(
+    γ: &Environment,
+    chain: &CmpChain<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
+    if chain.assertions.is_empty() {
+        return Err(ToZ3Error::Empty(
+            "comparison chain requires at least one assertion",
+        ));
+    }
+    let mut previous = lower(γ, &chain.start)?;
     let mut comparisons = Vec::with_capacity(chain.assertions.len());
     for (comparison, current) in &chain.assertions {
-        let current = lower(γ, current);
-        comparisons.push(compare(previous, *comparison, current.clone()));
+        let current = lower(γ, current)?;
+        comparisons.push(compare(previous, *comparison, current.clone())?);
         previous = current;
     }
     let result = if comparisons.len() == 1 {
@@ -389,45 +481,61 @@ fn lower_cmp_chain<Metadata>(γ: &Environment, chain: &CmpChain<Metadata>) -> Z3
     } else {
         Bool::and(&comparisons)
     };
-    Z3Object::Z3(result.into())
+    Ok(Z3Object::Z3(result.into()))
 }
 
-fn lower_power<Metadata>(γ: &Environment, base: &Expr<Metadata>, exponent: u64) -> Z3Object {
-    let lowered_base = lower(γ, base);
-    if let Z3Object::Matrix(matrix) = &lowered_base {
-        assert!(
-            matrix.rows == matrix.cols,
-            "matrix power requires a square matrix"
-        );
+fn lower_power<Metadata>(
+    γ: &Environment,
+    base: &Expr<Metadata>,
+    exponent: u64,
+) -> Result<Z3Object, ToZ3Error> {
+    let lowered_base = lower(γ, base)?;
+    if let Z3Object::Matrix(matrix) = &lowered_base
+        && matrix.rows != matrix.cols
+    {
+        return Err(ToZ3Error::Shape("matrix power requires a square matrix"));
     }
     if exponent == 0 {
         return match lowered_base {
             Z3Object::Z3(expression) if expression.as_int().is_some() => {
-                Z3Object::Z3(Int::from_u64(1).into())
+                Ok(Z3Object::Z3(Int::from_u64(1).into()))
             }
             Z3Object::Z3(expression) if expression.as_real().is_some() => {
-                Z3Object::Z3(Real::from_int(&Int::from_u64(1)).into())
+                Ok(Z3Object::Z3(Real::from_int(&Int::from_u64(1)).into()))
             }
-            Z3Object::Z3(_) => panic!("zero power requires a numeric scalar base"),
-            Z3Object::Matrix(matrix) => Z3Object::Matrix(matrix_identity(&matrix)),
+            Z3Object::Z3(_) => Err(ToZ3Error::InvalidOperands(
+                "zero power requires a numeric scalar base",
+            )),
+            Z3Object::Matrix(matrix) => Ok(Z3Object::Matrix(matrix_identity(&matrix)?)),
         };
     }
 
-    (1..exponent).fold(lowered_base, |power, _| power * lower(γ, base))
+    (1..exponent).try_fold(lowered_base, |power, _| power * lower(γ, base)?)
 }
 
-fn matrix_identity(matrix: &Matrix<Z3Object>) -> Matrix<Z3Object> {
-    let real = matrix.elements.iter().any(|element| match element {
-        Z3Object::Z3(expression) if expression.as_int().is_some() => false,
-        Z3Object::Z3(expression) if expression.as_real().is_some() => true,
-        Z3Object::Z3(_) => panic!("matrix identity requires numeric scalar cells"),
-        Z3Object::Matrix(_) => panic!("matrix identity does not support nested matrices"),
-    });
+fn matrix_identity(matrix: &Matrix<Z3Object>) -> Result<Matrix<Z3Object>, ToZ3Error> {
+    let mut real = false;
+    for element in &matrix.elements {
+        match element {
+            Z3Object::Z3(expression) if expression.as_int().is_some() => {}
+            Z3Object::Z3(expression) if expression.as_real().is_some() => real = true,
+            Z3Object::Z3(_) => {
+                return Err(ToZ3Error::InvalidOperands(
+                    "matrix identity requires numeric scalar cells",
+                ));
+            }
+            Z3Object::Matrix(_) => {
+                return Err(ToZ3Error::InvalidOperands(
+                    "matrix identity does not support nested matrices",
+                ));
+            }
+        }
+    }
     let mut elements = Vec::with_capacity(
         matrix
             .rows
             .checked_mul(matrix.cols)
-            .expect("matrix dimensions overflow usize"),
+            .ok_or(ToZ3Error::DimensionOverflow)?,
     );
     for row in 0..matrix.rows {
         for col in 0..matrix.cols {
@@ -439,24 +547,25 @@ fn matrix_identity(matrix: &Matrix<Z3Object>) -> Matrix<Z3Object> {
             }
         }
     }
-    Matrix {
+    Ok(Matrix {
         rows: matrix.rows,
         cols: matrix.cols,
         elements,
-    }
+    })
 }
 
 fn lower_finite<Metadata>(
     γ: &Environment,
     expressions: &[Expr<Metadata>],
-    operation: fn(Z3Object, Z3Object) -> Z3Object,
+    operation: fn(Z3Object, Z3Object) -> Result<Z3Object, ToZ3Error>,
     name: &str,
-) -> Z3Object {
+) -> Result<Z3Object, ToZ3Error> {
     let mut expressions = expressions.iter().map(|expression| lower(γ, expression));
-    let first = expressions
-        .next()
-        .unwrap_or_else(|| panic!("{name} requires at least one operand"));
-    expressions.fold(first, operation)
+    let first = expressions.next().ok_or(ToZ3Error::Empty(match name {
+        "addition" => "addition requires at least one operand",
+        _ => "multiplication requires at least one operand",
+    }))??;
+    expressions.try_fold(first, |left, right| operation(left, right?))
 }
 
 impl Display for Z3Object {
@@ -479,11 +588,19 @@ mod tests {
 
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, TypeExpr, Variable,
-        to_z3::{Environment, Z3Object, to_z3 as lower_to_z3},
+        to_z3::{Environment, ToZ3Error, Z3Object, to_z3 as lower_to_z3},
     };
 
     fn to_z3<Metadata>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
-        lower_to_z3(&environment, &expression)
+        lower_to_z3(&environment, &expression).unwrap()
+    }
+
+    fn assert_lowering_error<Metadata>(
+        environment: Environment,
+        expression: Expr<Metadata>,
+        expected: ToZ3Error,
+    ) {
+        assert_eq!(lower_to_z3(&environment, &expression).err(), Some(expected));
     }
 
     fn scalar(environment: Environment, expression: Expr<()>) -> z3::ast::Dynamic {
@@ -533,17 +650,39 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "holes are not supported by to_z3")]
     fn test_hole_is_not_lowered() {
-        to_z3(Environment::default(), Expr::<()>::new(RawExpr::Hole));
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Hole),
+            ToZ3Error::Unsupported("holes are not supported by to_z3"),
+        );
     }
 
     #[test]
-    #[should_panic(expected = "type expressions are not supported by to_z3")]
     fn test_type_expression_is_not_lowered() {
-        to_z3(
+        assert_lowering_error(
             Environment::default(),
             Expr::<()>::new(RawExpr::Type(TypeExpr::Real)),
+            ToZ3Error::Unsupported("type expressions are not supported by to_z3"),
+        );
+    }
+
+    #[test]
+    fn test_missing_variable_type_returns_an_error() {
+        let variable = Variable::new("x");
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Variable(variable.clone())),
+            ToZ3Error::MissingVariableType(variable),
+        );
+    }
+
+    #[test]
+    fn test_empty_finite_operation_returns_an_error() {
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Finop(Finop::Plus, vec![])),
+            ToZ3Error::Empty("addition requires at least one operand"),
         );
     }
 
@@ -709,7 +848,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "power exponent is missing from the equality environment")]
     fn test_power_requires_known_exponent_equality() {
         let power: Expr<()> = Expr::new(RawExpr::Binop(
             Binop::Power,
@@ -717,7 +855,11 @@ mod tests {
             Expr::new(RawExpr::Variable(Variable::new("n"))),
         ));
 
-        to_z3(Environment::default(), power);
+        assert_lowering_error(
+            Environment::default(),
+            power,
+            ToZ3Error::MissingPowerExponent,
+        );
     }
 
     #[test]
@@ -922,11 +1064,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "matrix power requires a square matrix")]
-    fn test_non_square_matrix_power_panics() {
+    fn test_non_square_matrix_power_returns_an_error() {
         let a = Variable::new("A");
         let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
                 equalities: [(exponent.clone(), 1)].into_iter().collect(),
@@ -936,12 +1077,12 @@ mod tests {
                 Expr::new(RawExpr::Variable(a)),
                 exponent,
             )),
+            ToZ3Error::Shape("matrix power requires a square matrix"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "matrix multiplication requires compatible dimensions")]
-    fn test_invalid_matrix_multiplication_panics() {
+    fn test_invalid_matrix_multiplication_returns_an_error() {
         let a = Variable::new("A");
         let b = Variable::new("B");
         let product: Expr<()> = Expr::new(RawExpr::Finop(
@@ -951,7 +1092,7 @@ mod tests {
                 Expr::new(RawExpr::Variable(b.clone())),
             ],
         ));
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [
                     (a.clone(), Type::Matrix(2, 2)),
@@ -962,15 +1103,15 @@ mod tests {
                 equalities: HashMap::new(),
             },
             product,
+            ToZ3Error::Shape("matrix multiplication requires compatible dimensions"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "matrix addition requires equal dimensions")]
-    fn test_mismatched_matrix_addition_panics() {
+    fn test_mismatched_matrix_addition_returns_an_error() {
         let a = Variable::new("A");
         let b = Variable::new("B");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [
                     (a.clone(), Type::Matrix(1, 2)),
@@ -987,14 +1128,14 @@ mod tests {
                     Expr::new(RawExpr::Variable(b)),
                 ],
             )),
+            ToZ3Error::Shape("matrix addition requires equal dimensions"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "matrix division is only supported for 1x1 matrices")]
-    fn test_larger_matrix_division_panics() {
+    fn test_larger_matrix_division_returns_an_error() {
         let a = Variable::new("A");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
                 equalities: HashMap::new(),
@@ -1004,6 +1145,7 @@ mod tests {
                 Expr::new(RawExpr::Variable(a)),
                 Expr::new(RawExpr::NatLiteral(2)),
             )),
+            ToZ3Error::Shape("matrix division is only supported for 1x1 matrices"),
         );
     }
 
@@ -1091,11 +1233,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "boolean scalars cannot be compared")]
-    fn test_boolean_comparison_panics() {
+    fn test_boolean_comparison_returns_an_error() {
         let p = Variable::new("P");
         let q = Variable::new("Q");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [(p.clone(), Type::Bool), (q.clone(), Type::Bool)]
                     .into_iter()
@@ -1106,15 +1247,15 @@ mod tests {
                 start: Expr::new(RawExpr::Variable(p)),
                 assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(q)))],
             })),
+            ToZ3Error::InvalidOperands("boolean scalars cannot be compared"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "matrix equality requires equal dimensions")]
-    fn test_mismatched_matrix_equality_panics() {
+    fn test_mismatched_matrix_equality_returns_an_error() {
         let a = Variable::new("A");
         let b = Variable::new("B");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [
                     (a.clone(), Type::Matrix(1, 2)),
@@ -1128,15 +1269,15 @@ mod tests {
                 start: Expr::new(RawExpr::Variable(a)),
                 assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(b)))],
             })),
+            ToZ3Error::Shape("matrix equality requires equal dimensions"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "matrix ordering comparisons are not supported")]
-    fn test_matrix_ordering_panics() {
+    fn test_matrix_ordering_returns_an_error() {
         let a = Variable::new("A");
         let b = Variable::new("B");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [
                     (a.clone(), Type::Matrix(1, 1)),
@@ -1150,14 +1291,14 @@ mod tests {
                 start: Expr::new(RawExpr::Variable(a)),
                 assertions: vec![(Cmp::Lt, Expr::new(RawExpr::Variable(b)))],
             })),
+            ToZ3Error::InvalidOperands("matrix ordering comparisons are not supported"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "scalar-matrix comparisons are not supported")]
-    fn test_scalar_matrix_comparison_panics() {
+    fn test_scalar_matrix_comparison_returns_an_error() {
         let a = Variable::new("A");
-        to_z3(
+        assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
                 equalities: HashMap::new(),
@@ -1166,18 +1307,19 @@ mod tests {
                 start: Expr::new(RawExpr::NatLiteral(1)),
                 assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(a)))],
             })),
+            ToZ3Error::InvalidOperands("scalar-matrix comparisons are not supported"),
         );
     }
 
     #[test]
-    #[should_panic(expected = "comparison chain requires at least one assertion")]
-    fn test_empty_comparison_chain_panics() {
-        to_z3(
+    fn test_empty_comparison_chain_returns_an_error() {
+        assert_lowering_error(
             Environment::default(),
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {
                 start: Expr::new(RawExpr::NatLiteral(1)),
                 assertions: vec![],
             })),
+            ToZ3Error::Empty("comparison chain requires at least one assertion"),
         );
     }
 }

@@ -2,7 +2,7 @@ use std::fmt::{self, Display};
 
 use markdown::mdast::{Heading, Node, Root};
 
-pub use crate::model_finding::{ModelOrUnsat, NotSolvedYet, ToFromMd};
+pub use crate::model_finding::{ModelFindingError, ModelOrUnsat, NotSolvedYet, ToFromMd};
 use crate::{
     Expr,
     enumerable_envspec::{ShapeError, extract_environment_iterator},
@@ -130,18 +130,21 @@ impl<Conclusion: ToFromMd> ToFromMd for TestCases<Conclusion> {
 }
 
 impl TestCases<NotSolvedYet> {
-    pub fn find_models(self, max_dimension: u64) -> TestCases<ModelOrUnsat> {
-        TestCases(
+    pub fn find_models(
+        self,
+        max_dimension: u64,
+    ) -> Result<TestCases<ModelOrUnsat>, ModelFindingError> {
+        Ok(TestCases(
             self.0
                 .into_iter()
                 .map(|test_case| test_case.find_model(max_dimension))
-                .collect(),
-        )
+                .collect::<Result<_, _>>()?,
+        ))
     }
 }
 
 impl TestCase<NotSolvedYet> {
-    fn find_model(self, max_dimension: u64) -> TestCase<ModelOrUnsat> {
+    fn find_model(self, max_dimension: u64) -> Result<TestCase<ModelOrUnsat>, ModelFindingError> {
         let Self {
             name,
             assumptions,
@@ -152,7 +155,7 @@ impl TestCase<NotSolvedYet> {
             match extract_environment_iterator(assumptions.iter().cloned(), max_dimension) {
                 Err(ShapeError::Unsat(_)) => ModelOrUnsat::Unsat,
                 Err(ShapeError::Unknown(_)) => ModelOrUnsat::Unknown,
-                Err(error) => panic!("failed to infer environments: {error}"),
+                Err(error) => return Err(error.into()),
                 Ok(environments) => {
                     let mut conclusion = None;
                     for environment in environments {
@@ -162,12 +165,12 @@ impl TestCase<NotSolvedYet> {
                                 conclusion = Some(ModelOrUnsat::Unknown);
                                 break;
                             }
-                            Err(error) => panic!("failed to enumerate environments: {error}"),
+                            Err(error) => return Err(error.into()),
                         };
                         match solve_environment(
                             &environment,
                             assumptions.iter().chain(sentences.iter()),
-                        ) {
+                        )? {
                             ModelOrUnsat::Unsat => {}
                             result @ (ModelOrUnsat::Model(_) | ModelOrUnsat::Unknown) => {
                                 conclusion = Some(result);
@@ -179,12 +182,12 @@ impl TestCase<NotSolvedYet> {
                     conclusion.unwrap_or(ModelOrUnsat::UnsatUpToDimension(max_dimension))
                 }
             };
-        TestCase {
+        Ok(TestCase {
             name,
             assumptions,
             sentences,
             conclusion,
-        }
+        })
     }
 }
 
@@ -227,8 +230,7 @@ Unsat up to dimension 4"#;
     }
 
     #[test]
-    #[should_panic(expected = "matrix equality requires equal dimensions")]
-    fn invalid_sentence_dimensions_panic() {
+    fn invalid_sentence_dimensions_return_an_error() {
         let input = r#"# Invalid
 
 ## Assumptions
@@ -242,6 +244,12 @@ Unsat up to dimension 4"#;
 ## Conclusion
 
 Not solved yet"#;
-        TestCases(vec![TestCase::<NotSolvedYet>::parse_str(input)]).find_models(2);
+        let error = TestCases(vec![TestCase::<NotSolvedYet>::parse_str(input)])
+            .find_models(2)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "matrix equality requires equal dimensions"
+        );
     }
 }

@@ -24,7 +24,7 @@ fn find_model_fixtures_are_canonical_markdown() {
 #[test]
 fn finds_models_matching_committed_markdown() {
     let input = TestCases::<NotSolvedYet>::parse_str(INPUT);
-    let actual = input.find_models(MAX_DIMENSION).to_string();
+    let actual = input.find_models(MAX_DIMENSION).unwrap().to_string();
     if std::env::var_os("UPDATE_EXPECT").is_some() {
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/find_models_output.md");
