@@ -260,23 +260,31 @@ pub(crate) fn solve_environment<'a>(
     }
 }
 
+pub(crate) fn lower_boolean(
+    environment: &Environment,
+    assertion: &Expr<()>,
+) -> Result<z3::ast::Bool, ModelFindingError> {
+    let Z3Object::Z3(assertion) = to_z3(environment, assertion)? else {
+        return Err(ModelFindingError::NonBooleanAssertion);
+    };
+    assertion
+        .as_bool()
+        .ok_or(ModelFindingError::NonBooleanAssertion)
+}
+
 fn assert_boolean(
     solver: &Solver,
     environment: &Environment,
     assertion: &Expr<()>,
 ) -> Result<(), ModelFindingError> {
-    let Z3Object::Z3(assertion) = to_z3(environment, assertion)? else {
-        return Err(ModelFindingError::NonBooleanAssertion);
-    };
-    solver.assert(
-        assertion
-            .as_bool()
-            .ok_or(ModelFindingError::NonBooleanAssertion)?,
-    );
+    solver.assert(lower_boolean(environment, assertion)?);
     Ok(())
 }
 
-fn extract_model(environment: &Environment, model: &Z3Model) -> Result<Model, ModelFindingError> {
+pub(crate) fn extract_model(
+    environment: &Environment,
+    model: &Z3Model,
+) -> Result<Model, ModelFindingError> {
     let mut variables: Vec<_> = environment.types.iter().collect();
     variables.sort_by_key(|(variable, _)| *variable);
     variables
@@ -525,7 +533,7 @@ fn parse_expression_list(node: &Node) -> Vec<Expr<()>> {
     children.iter().map(parse_expression_item).collect()
 }
 
-fn parse_expression_item(node: &Node) -> Expr<()> {
+pub(crate) fn parse_expression_item(node: &Node) -> Expr<()> {
     let Node::ListItem(ListItem { children, .. }) = node else {
         panic!("expression list contains a non-list-item node")
     };
@@ -665,6 +673,36 @@ pub(crate) fn render_md(node: &Node) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
+            Node::List(List {
+                children,
+                ordered: true,
+                start,
+                ..
+            }) => {
+                let start = start.unwrap_or(1);
+                children
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| {
+                        let Node::ListItem(ListItem { children, .. }) = item else {
+                            panic!("list contains a non-list-item node")
+                        };
+                        let mut blocks = children.iter().map(block);
+                        let first = blocks
+                            .next()
+                            .unwrap_or_else(|| panic!("ordered list item is empty"));
+                        let number = start + u32::try_from(offset).unwrap();
+                        let mut rendered = format!("{number}. {first}");
+                        for child in blocks {
+                            rendered.push_str("\n\n   ");
+                            rendered.push_str(&child.replace('\n', "\n   "));
+                        }
+                        rendered
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Node::Html(html) => html.value.clone(),
             _ => panic!("unsupported Markdown block in canonical renderer"),
         }
     }
@@ -996,7 +1034,7 @@ Model
     #[test]
     fn matrix_extraction_preserves_constrained_and_unconstrained_cells() {
         let solver = Solver::new();
-        solver.assert(&Real::new_const("A_{1,1}").eq(Real::from_int(&Int::from_u64(1))));
+        solver.assert(Real::new_const("A_{1,1}").eq(Real::from_int(&Int::from_u64(1))));
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment {
             types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 2))]),

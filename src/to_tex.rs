@@ -413,8 +413,8 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-        SeqOp, SeqopRange, Triop, Type, TypeExpr, Variable,
+        Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, Range,
+        RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
     };
 
     fn as_latex(raw: RawExpr<()>) -> String {
@@ -648,7 +648,7 @@ mod tests {
         let sequence = |op| {
             RawExpr::Seqop(
                 op,
-                SeqopRange {
+                Range {
                     index_variable: Variable::new("i"),
                     from: Expr::new(RawExpr::NatLiteral(1)),
                     to: Expr::new(RawExpr::NatLiteral(3)),
@@ -669,7 +669,7 @@ mod tests {
         let sequence = |body| {
             RawExpr::Seqop(
                 SeqOp::Sum,
-                SeqopRange {
+                Range {
                     index_variable: Variable::new("i"),
                     from: Expr::new(RawExpr::NatLiteral(1)),
                     to: Expr::new(RawExpr::NatLiteral(3)),

@@ -3,8 +3,8 @@ use std::{error::Error, fmt};
 use ratex_parser::{ParseNode, parse_node::AtomFamily};
 
 use crate::{
-    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, RawExpr,
-    SeqOp, SeqopRange, Triop, TypeExpr, Variable,
+    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, Range,
+    RawExpr, SeqOp, Triop, TypeExpr, Variable,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -674,7 +674,7 @@ fn parse_sup_sub(
     Ok(expression)
 }
 
-fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, SeqopRange<()>)>, FromTexError> {
+fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, Range<()>)>, FromTexError> {
     let ParseNode::SupSub {
         base: Some(base),
         sup: Some(sup),
@@ -719,7 +719,7 @@ fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, SeqopRange<()>
     };
     Ok(Some((
         op,
-        SeqopRange {
+        Range {
             index_variable,
             from: expr(parts[1])?,
             to: parse_group(sup)?,

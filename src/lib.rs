@@ -8,6 +8,7 @@ mod model_finding;
 pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
+pub mod validate_argument;
 
 use std::{collections::HashMap, ops::Deref, rc::Rc};
 
@@ -72,7 +73,7 @@ pub struct Environment {
     pub equalities: HashMap<Expr<()>, u64>,
 }
 
-type Model = Vec<Expr<()>>;
+pub type Model = Vec<Expr<()>>;
 
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Debug)]
 pub struct Variable {
@@ -249,7 +250,7 @@ impl<Metadata> Expr<Metadata> {
             }),
             RawExpr::Seqop(op, range, body) => RawExpr::Seqop(
                 *op,
-                SeqopRange {
+                Range {
                     index_variable: range.index_variable.clone(),
                     from: range.from.without_metadata(),
                     to: range.to.without_metadata(),
@@ -273,7 +274,7 @@ pub struct MetaExpr<Metadata> {
     pub raw: RawExpr<Metadata>,
 }
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct SeqopRange<Metadata> {
+pub struct Range<Metadata> {
     pub index_variable: Variable,
     pub from: Expr<Metadata>,
     pub to: Expr<Metadata>,
@@ -338,7 +339,7 @@ pub enum RawExpr<Metadata> {
     Finop(Finop, Vec<Expr<Metadata>>),
     CmpChain(CmpChain<Metadata>),
     LogicChain(LogicChain<Metadata>),
-    Seqop(SeqOp, SeqopRange<Metadata>, Expr<Metadata>),
+    Seqop(SeqOp, Range<Metadata>, Expr<Metadata>),
 }
 
 #[cfg(test)]
