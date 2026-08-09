@@ -13,9 +13,9 @@ use crate::{
     Binop, Environment, Expr, Model, RawExpr, Type, TypeExpr,
     enumerable_envspec::{ShapeError, extract_environment_iterator},
     model_finding::{
-        expression_list, extract_model, heading, heading_text, lower_boolean,
-        parse_expression_item, parse_expression_section, render_md, root, root_children,
-        section_start,
+        assert_environment_equalities, expression_list, extract_model, heading, heading_text,
+        lower_boolean, parse_expression_item, parse_expression_section, render_md, root,
+        root_children, section_start,
     },
 };
 
@@ -155,6 +155,7 @@ impl Argument {
     ) -> Result<EnvironmentResult, ArgumentValidationError> {
         let mut solver = Solver::new();
         assert_natural_constraints(&mut solver, &environment)?;
+        assert_environment_equalities(&solver, &environment)?;
 
         let mut tracked = Vec::new();
         for assumption in &self.assumptions {
@@ -297,7 +298,7 @@ fn assert_natural_constraints(
         let type_assertion = Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
+            Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
         ));
         solver.assert(lower_boolean(environment, &type_assertion)?);
     }

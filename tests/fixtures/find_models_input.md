@@ -61,3 +61,17 @@ Not solved yet
 ## Conclusion
 
 Not solved yet
+
+# Negative sum of squared vector norms
+
+## Assumptions
+
+- $\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R}^{d})$
+
+## Sentences
+
+- $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} < 0$
+
+## Conclusion
+
+Not solved yet

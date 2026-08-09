@@ -138,9 +138,8 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
         crate::RawExpr::Finop(Finop::Times, _) => Precedence::Multiplication,
         crate::RawExpr::Monop(Monop::Neg, _) => Precedence::Prefix,
-        crate::RawExpr::Monop(Monop::Inverse, _) | crate::RawExpr::Binop(Binop::Power, _, _) => {
-            Precedence::Power
-        }
+        crate::RawExpr::Monop(Monop::Inverse | Monop::Transpose, _)
+        | crate::RawExpr::Binop(Binop::Power, _, _) => Precedence::Power,
         _ => Precedence::Atom,
     }
 }
@@ -169,6 +168,13 @@ fn type_expr<Metadata>(f: &mut fmt::Formatter<'_>, ty: &TypeExpr<Metadata>) -> f
             expr(f, cols)?;
             write!(f, "}}")
         }
+        TypeExpr::Seq(element, size) => {
+            write!(f, r"\operatorname{{Seq}}_{{")?;
+            expr(f, size)?;
+            write!(f, "}}(")?;
+            expr(f, element)?;
+            write!(f, ")")
+        }
     }
 }
 
@@ -186,7 +192,7 @@ fn variable(f: &mut fmt::Formatter<'_>, v: &Variable) -> fmt::Result {
 
     write!(f, "{name}")?;
     if !v.non_numeric_subscript.is_empty() {
-        write!(f, "_{{{}}}", v.non_numeric_subscript)?;
+        write!(f, "_{{\\text{{{}}}}}", v.non_numeric_subscript)?;
     }
     for annotation in &v.annotations {
         if matches!(annotation, crate::Annotation::Prime) {
@@ -206,6 +212,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
         Monop::Det => write!(f, r"\operatorname{{det}}(")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
+        Monop::Transpose => {}
         Monop::Norm1 | Monop::Norm2 | Monop::NormInfty | Monop::NormFrob => {
             write!(f, r"\left\lVert ")?
         }
@@ -217,6 +224,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
         Monop::Trace | Monop::Det => write!(f, ")"),
         Monop::Neg => Ok(()),
         Monop::Inverse => write!(f, "^{{-1}}"),
+        Monop::Transpose => write!(f, r"^\top"),
         Monop::Norm1 => write!(f, r" \right\rVert_{{1}}"),
         Monop::Norm2 => write!(f, r" \right\rVert_{{2}}"),
         Monop::NormInfty => write!(f, r" \right\rVert_{{\infty}}"),
@@ -539,11 +547,13 @@ mod tests {
 
     #[test]
     fn test_annotated_variable() {
-        expect!["\\hat{x}_{i}^{\\prime}"].assert_eq(&as_latex(RawExpr::Variable(Variable {
-            name: "x".to_owned(),
-            non_numeric_subscript: "i".to_owned(),
-            annotations: vec![Annotation::Hat, Annotation::Prime],
-        })));
+        expect!["\\hat{x}_{\\text{i}}^{\\prime}"].assert_eq(&as_latex(RawExpr::Variable(
+            Variable {
+                name: "x".to_owned(),
+                non_numeric_subscript: "i".to_owned(),
+                annotations: vec![Annotation::Hat, Annotation::Prime],
+            },
+        )));
     }
 
     #[test]

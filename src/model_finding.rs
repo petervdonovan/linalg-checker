@@ -12,7 +12,7 @@ use z3::{Model as Z3Model, SatResult, Solver, ast::Dynamic};
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
     enumerable_envspec::ShapeError,
-    to_z3::{ToZ3Error, Z3Object, to_z3},
+    to_z3::{ToZ3Error, Z3Object, lower_sequence_element, to_z3},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,10 +243,11 @@ pub(crate) fn solve_environment<'a>(
         let type_assertion = Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
+            Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
         ));
         assert_boolean(&solver, environment, &type_assertion)?;
     }
+    assert_environment_equalities(&solver, environment)?;
     for assertion in assertions {
         assert_boolean(&solver, environment, assertion)?;
     }
@@ -281,6 +282,26 @@ fn assert_boolean(
     Ok(())
 }
 
+pub(crate) fn assert_environment_equalities(
+    solver: &Solver,
+    environment: &Environment,
+) -> Result<(), ModelFindingError> {
+    for (expression, value) in &environment.equalities {
+        let equality = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: expression.clone(),
+            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
+        }));
+        match lower_boolean(environment, &equality) {
+            Ok(equality) => solver.assert(equality),
+            Err(ModelFindingError::Lowering(ToZ3Error::MissingVariableType(_))) => {
+                // Some equalities are compile-time facts used only to concretize syntax.
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn extract_model(
     environment: &Environment,
     model: &Z3Model,
@@ -289,36 +310,75 @@ pub(crate) fn extract_model(
     variables.sort_by_key(|(variable, _)| *variable);
     variables
         .into_iter()
-        .map(|(variable, ty)| {
-            if matches!(ty, Type::Bool) {
+        .map(|(variable, ty)| extract_variable(environment, model, variable, ty))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|assignments| assignments.into_iter().flatten().collect())
+}
+
+fn extract_variable(
+    environment: &Environment,
+    model: &Z3Model,
+    variable: &crate::Variable,
+    ty: &Type,
+) -> Result<Vec<Expr<()>>, ModelFindingError> {
+    match ty {
+        Type::Seq(sequence) => {
+            if matches!(sequence.t, Type::Seq(_)) {
                 return Err(ModelFindingError::UnsupportedModel(
-                    "Boolean model extraction is not supported",
+                    "nested sequence extraction is not supported",
                 ));
             }
+            (1..=sequence.n)
+                .map(|index| {
+                    let left = Expr::new(RawExpr::Binop(
+                        Binop::SingleSubscript,
+                        Expr::new(RawExpr::Variable(variable.clone())),
+                        Expr::new(RawExpr::NatLiteral(index)),
+                    ));
+                    let right = z3_object_model_value(
+                        model,
+                        lower_sequence_element(environment, variable, index)?,
+                    )?;
+                    Ok(model_equality(left, right))
+                })
+                .collect()
+        }
+        Type::Bool => Err(ModelFindingError::UnsupportedModel(
+            "Boolean model extraction is not supported",
+        )),
+        _ => {
             let left = Expr::new(RawExpr::Variable(variable.clone()));
-            let right = match to_z3(environment, &left)? {
-                Z3Object::Z3(value) => scalar_model_value(model, value)?,
-                Z3Object::Matrix(matrix) => Expr::new(RawExpr::Matrix(Matrix {
-                    rows: matrix.rows,
-                    cols: matrix.cols,
-                    elements: matrix
-                        .elements
-                        .into_iter()
-                        .map(|value| match value {
-                            Z3Object::Z3(value) => scalar_model_value(model, value),
-                            Z3Object::Matrix(_) => Err(ModelFindingError::UnsupportedModel(
-                                "nested matrices are not supported in Z3 models",
-                            )),
-                        })
-                        .collect::<Result<_, _>>()?,
-                })),
-            };
-            Ok(Expr::new(RawExpr::CmpChain(CmpChain {
-                start: left,
-                assertions: vec![(Cmp::Eq, right)],
-            })))
-        })
-        .collect()
+            let right = z3_object_model_value(model, to_z3(environment, &left)?)?;
+            Ok(vec![model_equality(left, right)])
+        }
+    }
+}
+
+fn z3_object_model_value(model: &Z3Model, value: Z3Object) -> Result<Expr<()>, ModelFindingError> {
+    match value {
+        Z3Object::Z3(value) => scalar_model_value(model, value),
+        Z3Object::Matrix(matrix) => Ok(Expr::new(RawExpr::Matrix(Matrix {
+            rows: matrix.rows,
+            cols: matrix.cols,
+            elements: matrix
+                .elements
+                .into_iter()
+                .map(|value| match value {
+                    Z3Object::Z3(value) => scalar_model_value(model, value),
+                    Z3Object::Matrix(_) => Err(ModelFindingError::UnsupportedModel(
+                        "nested matrices are not supported in Z3 models",
+                    )),
+                })
+                .collect::<Result<_, _>>()?,
+        }))),
+    }
+}
+
+fn model_equality(left: Expr<()>, right: Expr<()>) -> Expr<()> {
+    Expr::new(RawExpr::CmpChain(CmpChain {
+        start: left,
+        assertions: vec![(Cmp::Eq, right)],
+    }))
 }
 
 fn scalar_model_value(model: &Z3Model, value: Dynamic) -> Result<Expr<()>, ModelFindingError> {
@@ -449,7 +509,7 @@ fn environment_expressions(environment: &Environment) -> Vec<Expr<()>> {
         Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(TypeExpr::from(*ty))),
+            Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
         ))
     }));
     expressions.extend(environment.equalities.iter().map(|(expression, value)| {
@@ -742,7 +802,7 @@ mod tests {
         ModelFindingError, ModelOrUnsat, NotSolvedYet, TestCase, TestCases, ToFromMd,
         extract_model, solve_environment,
     };
-    use crate::{Cmp, CmpChain, Environment, Expr, RawExpr, Type, Variable};
+    use crate::{Binop, Cmp, CmpChain, Environment, Expr, RawExpr, SeqType, Type, Variable};
 
     fn variable(name: &str) -> Expr<()> {
         Expr::new(RawExpr::Variable(Variable::new(name)))
@@ -1049,5 +1109,42 @@ Model
         };
         assert!(matches!(matrix.elements[0].raw, RawExpr::NatLiteral(1)));
         assert!(matches!(matrix.elements[1].raw, RawExpr::Hole));
+    }
+
+    #[test]
+    fn sequence_extraction_emits_indexed_equalities() {
+        let solver = Solver::new();
+        solver.assert(Real::new_const("z_{1}").eq(Real::from_int(&Int::from_u64(2))));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let environment = Environment {
+            types: HashMap::from([(
+                Variable::new("z"),
+                Type::Seq(Box::new(SeqType {
+                    t: Type::Real,
+                    n: 2,
+                })),
+            )]),
+            equalities: HashMap::new(),
+        };
+        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+        assert_eq!(extracted.len(), 2);
+        for (index, equality) in extracted.iter().enumerate() {
+            let RawExpr::CmpChain(equality) = &equality.raw else {
+                panic!("expected an equality")
+            };
+            assert!(matches!(
+                equality.start.raw,
+                RawExpr::Binop(Binop::SingleSubscript, _, ref subscript)
+                    if matches!(subscript.raw, RawExpr::NatLiteral(value) if value == index as u64 + 1)
+            ));
+        }
+        let RawExpr::CmpChain(first) = &extracted[0].raw else {
+            unreachable!()
+        };
+        let RawExpr::CmpChain(second) = &extracted[1].raw else {
+            unreachable!()
+        };
+        assert!(matches!(first.assertions[0].1.raw, RawExpr::NatLiteral(2)));
+        assert!(matches!(second.assertions[0].1.raw, RawExpr::Hole));
     }
 }

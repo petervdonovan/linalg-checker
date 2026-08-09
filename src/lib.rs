@@ -12,13 +12,20 @@ pub mod validate_argument;
 
 use std::{collections::HashMap, ops::Deref, rc::Rc};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
     Bool,
     Nat,
     Int,
     Real,
     Matrix(u64, u64),
+    Seq(Box<SeqType>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SeqType {
+    pub t: Type,
+    pub n: u64,
 }
 
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Clone)]
@@ -28,6 +35,7 @@ pub enum TypeExpr<Metadata> {
     Int,
     Real,
     Matrix(Expr<Metadata>, Expr<Metadata>),
+    Seq(Expr<Metadata>, Expr<Metadata>),
 }
 
 impl From<Type> for TypeExpr<()> {
@@ -40,6 +48,10 @@ impl From<Type> for TypeExpr<()> {
             Type::Matrix(rows, cols) => Self::Matrix(
                 Expr::new(RawExpr::NatLiteral(rows)),
                 Expr::new(RawExpr::NatLiteral(cols)),
+            ),
+            Type::Seq(sequence) => Self::Seq(
+                Expr::new(RawExpr::Type(TypeExpr::from(sequence.t))),
+                Expr::new(RawExpr::NatLiteral(sequence.n)),
             ),
         }
     }
@@ -62,6 +74,18 @@ impl TypeExpr<()> {
                 } else {
                     Type::Matrix(*rows, *cols)
                 })
+            }
+            Self::Seq(element, size) => {
+                let RawExpr::Type(element) = &element.raw else {
+                    return None;
+                };
+                let RawExpr::NatLiteral(n) = size.raw else {
+                    return None;
+                };
+                Some(Type::Seq(Box::new(SeqType {
+                    t: element.concrete()?,
+                    n,
+                })))
             }
         }
     }
@@ -144,6 +168,7 @@ pub enum Monop {
     Norm2,
     NormInfty,
     NormFrob,
+    Transpose,
     // Dim,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -209,6 +234,9 @@ impl<Metadata> Expr<Metadata> {
                 TypeExpr::Real => TypeExpr::Real,
                 TypeExpr::Matrix(rows, cols) => {
                     TypeExpr::Matrix(rows.without_metadata(), cols.without_metadata())
+                }
+                TypeExpr::Seq(element, size) => {
+                    TypeExpr::Seq(element.without_metadata(), size.without_metadata())
                 }
             }),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
@@ -409,5 +437,32 @@ mod tests {
         );
         let erased = expression.without_metadata();
         assert!(matches!(erased.raw, RawExpr::Type(TypeExpr::Matrix(_, _))));
+    }
+
+    #[test]
+    fn without_metadata_erases_sequence_element_and_size_metadata() {
+        fn sequence(metadata: u8) -> Expr<u8> {
+            Expr::with_metadata(
+                metadata,
+                RawExpr::Type(TypeExpr::Seq(
+                    Expr::with_metadata(
+                        metadata + 1,
+                        RawExpr::Type(TypeExpr::Matrix(
+                            Expr::with_metadata(
+                                metadata + 2,
+                                RawExpr::Variable(Variable::new("d")),
+                            ),
+                            Expr::with_metadata(metadata + 3, RawExpr::NatLiteral(1)),
+                        )),
+                    ),
+                    Expr::with_metadata(metadata + 4, RawExpr::Variable(Variable::new("n"))),
+                )),
+            )
+        }
+
+        assert_eq!(
+            sequence(1).without_metadata(),
+            sequence(10).without_metadata()
+        );
     }
 }

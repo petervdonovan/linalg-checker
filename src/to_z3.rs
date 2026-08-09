@@ -7,8 +7,8 @@ use std::{
 use z3::ast::{Bool, Int, Real};
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, Matrix, Monop, RawExpr, Type, TypeExpr,
-    Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, LogicChain, Matrix, Monop, Range, RawExpr,
+    SeqOp, Type, TypeExpr, Variable,
 };
 
 #[derive(Clone)]
@@ -242,6 +242,8 @@ fn multiply_matrices(
 }
 
 fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ3Error> {
+    let left = comparison_scalar(left)?;
+    let right = comparison_scalar(right)?;
     match (left, right) {
         (Z3Object::Z3(left), Z3Object::Z3(right)) => {
             if left.as_bool().is_some() || right.as_bool().is_some() {
@@ -292,6 +294,13 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ
     }
 }
 
+fn comparison_scalar(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
+    match value {
+        Z3Object::Matrix(matrix) if matrix.rows == 1 && matrix.cols == 1 => single_cell(matrix),
+        value => Ok(value),
+    }
+}
+
 fn compare_int(left: Int, comparison: Cmp, right: Int) -> Bool {
     match comparison {
         Cmp::Eq => left.eq(right),
@@ -329,33 +338,11 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
                 .types
                 .get(variable)
                 .ok_or_else(|| ToZ3Error::MissingVariableType(variable.clone()))?;
-            Ok(match τ {
-                Type::Bool => Z3Object::Z3(Bool::new_const(variable.z3_name()).into()),
-                Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(variable.z3_name()).into()),
-                Type::Real => Z3Object::Z3(Real::new_const(variable.z3_name()).into()),
-                Type::Matrix(rows, cols) => {
-                    let rows = usize::try_from(*rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
-                    let cols = usize::try_from(*cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
-                    let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
-                    let mut elements = Vec::with_capacity(capacity);
-                    for row in 1..=rows {
-                        for col in 1..=cols {
-                            elements.push(Z3Object::Z3(
-                                Real::new_const(format!("{}_{{{row},{col}}}", variable.z3_name()))
-                                    .into(),
-                            ));
-                        }
-                    }
-                    Z3Object::Matrix(Matrix {
-                        rows,
-                        cols,
-                        elements,
-                    })
-                }
-            })
+            lower_typed_name(variable.z3_name(), τ)
         }
         RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(Int::from_u64(*value).into())),
         RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
+        RawExpr::Monop(Monop::Transpose, inner) => transpose(lower(γ, inner)?),
         RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
         RawExpr::Binop(Binop::Power, base, exponent) => {
             let exponent = γ
@@ -366,6 +353,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             lower_power(γ, base, exponent)
         }
         RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
+        RawExpr::Binop(Binop::SingleSubscript, base, index) => lower_subscript(γ, base, index),
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
         }
@@ -391,16 +379,223 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             }))
         }
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
+        RawExpr::Seqop(op, range, body) => lower_sequence(γ, *op, range, body),
         RawExpr::LogicChain(_) => Err(ToZ3Error::Unsupported(
             "logic chains are not supported by to_z3",
         )),
         RawExpr::Monop(_, _)
         | RawExpr::Binop(_, _, _)
         | RawExpr::Triop(_, _, _, _)
-        | RawExpr::Finop(_, _)
-        | RawExpr::Seqop(_, _, _) => Err(ToZ3Error::Unsupported(
+        | RawExpr::Finop(_, _) => Err(ToZ3Error::Unsupported(
             "expression is not supported by to_z3",
         )),
+    }
+}
+
+fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
+    Ok(match ty {
+        Type::Bool => Z3Object::Z3(Bool::new_const(name).into()),
+        Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(name).into()),
+        Type::Real => Z3Object::Z3(Real::new_const(name).into()),
+        Type::Matrix(rows, cols) => {
+            let rows = usize::try_from(*rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
+            let cols = usize::try_from(*cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
+            let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
+            let mut elements = Vec::with_capacity(capacity);
+            for row in 1..=rows {
+                for col in 1..=cols {
+                    elements.push(Z3Object::Z3(
+                        Real::new_const(format!("{name}_{{{row},{col}}}")).into(),
+                    ));
+                }
+            }
+            Z3Object::Matrix(Matrix {
+                rows,
+                cols,
+                elements,
+            })
+        }
+        Type::Seq(_) => {
+            return Err(ToZ3Error::Unsupported(
+                "sequence variables require an index",
+            ));
+        }
+    })
+}
+
+fn lower_subscript<Metadata>(
+    environment: &Environment,
+    base: &Expr<Metadata>,
+    index: &Expr<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
+    let RawExpr::Variable(variable) = &base.raw else {
+        return Err(ToZ3Error::Unsupported(
+            "sequence subscript base must be a variable",
+        ));
+    };
+    let Some(Type::Seq(sequence)) = environment.types.get(variable) else {
+        return Err(ToZ3Error::InvalidOperands(
+            "subscripted variable is not a sequence",
+        ));
+    };
+    let index = concrete_nat(environment, index)?;
+    if index == 0 || index > sequence.n {
+        return Err(ToZ3Error::InvalidOperands(
+            "sequence index is outside its one-based bounds",
+        ));
+    }
+    lower_typed_name(format!("{}_{{{index}}}", variable.z3_name()), &sequence.t)
+}
+
+pub(crate) fn lower_sequence_element(
+    environment: &Environment,
+    variable: &Variable,
+    index: u64,
+) -> Result<Z3Object, ToZ3Error> {
+    lower_subscript(
+        environment,
+        &Expr::<()>::new(RawExpr::Variable(variable.clone())),
+        &Expr::new(RawExpr::NatLiteral(index)),
+    )
+}
+
+fn concrete_nat<Metadata>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+) -> Result<u64, ToZ3Error> {
+    if let RawExpr::NatLiteral(value) = expression.raw {
+        return Ok(value);
+    }
+    environment
+        .equalities
+        .get(&expression.without_metadata())
+        .copied()
+        .ok_or(ToZ3Error::Unsupported(
+            "sequence bound is missing from the equality environment",
+        ))
+}
+
+fn transpose(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
+    let Z3Object::Matrix(matrix) = value else {
+        return Err(ToZ3Error::InvalidOperands(
+            "transpose requires a matrix operand",
+        ));
+    };
+    let mut elements = Vec::with_capacity(matrix.elements.len());
+    for col in 0..matrix.cols {
+        for row in 0..matrix.rows {
+            elements.push(matrix.elements[row * matrix.cols + col].clone());
+        }
+    }
+    Ok(Z3Object::Matrix(Matrix {
+        rows: matrix.cols,
+        cols: matrix.rows,
+        elements,
+    }))
+}
+
+fn lower_sequence<Metadata>(
+    environment: &Environment,
+    op: SeqOp,
+    range: &Range<Metadata>,
+    body: &Expr<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
+    let from = concrete_nat(environment, &range.from)?;
+    let to = concrete_nat(environment, &range.to)?;
+    if from == 0 || from > to {
+        return Err(ToZ3Error::InvalidOperands(
+            "sequence range must be nonempty and one-based",
+        ));
+    }
+    let mut terms = (from..=to).map(|index| {
+        let term = substitute_index(body, &range.index_variable, index);
+        lower(environment, &term)
+    });
+    let first = terms.next().ok_or(ToZ3Error::Empty(
+        "sequence operation requires at least one term",
+    ))??;
+    match op {
+        SeqOp::Sum => terms.try_fold(first, |sum, term| sum + term?),
+        SeqOp::Prod => terms.try_fold(first, |product, term| product * term?),
+    }
+}
+
+fn substitute_index<Metadata>(
+    expression: &Expr<Metadata>,
+    variable: &Variable,
+    value: u64,
+) -> Expr<()> {
+    let recurse = |expression: &Expr<Metadata>| substitute_index(expression, variable, value);
+    let raw = match &expression.raw {
+        RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
+        RawExpr::Hole => RawExpr::Hole,
+        RawExpr::Type(ty) => RawExpr::Type(substitute_type(ty, variable, value)),
+        RawExpr::Variable(found) => RawExpr::Variable(found.clone()),
+        RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
+        RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
+            rows: matrix.rows,
+            cols: matrix.cols,
+            elements: matrix.elements.iter().map(recurse).collect(),
+        }),
+        RawExpr::Monop(op, inner) => RawExpr::Monop(*op, recurse(inner)),
+        RawExpr::Binop(op, left, right) => RawExpr::Binop(*op, recurse(left), recurse(right)),
+        RawExpr::Triop(op, first, second, third) => {
+            RawExpr::Triop(*op, recurse(first), recurse(second), recurse(third))
+        }
+        RawExpr::Finop(op, expressions) => {
+            RawExpr::Finop(*op, expressions.iter().map(recurse).collect())
+        }
+        RawExpr::CmpChain(chain) => RawExpr::CmpChain(CmpChain {
+            start: recurse(&chain.start),
+            assertions: chain
+                .assertions
+                .iter()
+                .map(|(op, expression)| (*op, recurse(expression)))
+                .collect(),
+        }),
+        RawExpr::LogicChain(chain) => RawExpr::LogicChain(LogicChain {
+            start: recurse(&chain.start),
+            assertions: chain
+                .assertions
+                .iter()
+                .map(|(op, expression)| (*op, recurse(expression)))
+                .collect(),
+        }),
+        RawExpr::Seqop(op, range, body) => RawExpr::Seqop(
+            *op,
+            Range {
+                index_variable: range.index_variable.clone(),
+                from: recurse(&range.from),
+                to: recurse(&range.to),
+            },
+            if range.index_variable == *variable {
+                body.without_metadata()
+            } else {
+                recurse(body)
+            },
+        ),
+    };
+    Expr::new(raw)
+}
+
+fn substitute_type<Metadata>(
+    ty: &TypeExpr<Metadata>,
+    variable: &Variable,
+    value: u64,
+) -> TypeExpr<()> {
+    match ty {
+        TypeExpr::Bool => TypeExpr::Bool,
+        TypeExpr::Nat => TypeExpr::Nat,
+        TypeExpr::Int => TypeExpr::Int,
+        TypeExpr::Real => TypeExpr::Real,
+        TypeExpr::Matrix(rows, cols) => TypeExpr::Matrix(
+            substitute_index(rows, variable, value),
+            substitute_index(cols, variable, value),
+        ),
+        TypeExpr::Seq(element, size) => TypeExpr::Seq(
+            substitute_index(element, variable, value),
+            substitute_index(size, variable, value),
+        ),
     }
 }
 
@@ -432,9 +627,66 @@ fn lower_membership<Metadata>(
                 expected_cols.eq(&col_symbol),
             ])
         }
+        (Type::Seq(sequence), TypeExpr::Seq(expected_element, expected_length)) => {
+            let RawExpr::Type(expected_element) = &expected_element.raw else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "sequence element must be a type expression",
+                ));
+            };
+            if matches!(sequence.t, Type::Seq(_)) {
+                return Err(ToZ3Error::Unsupported(
+                    "nested sequence membership is not supported",
+                ));
+            }
+            let length_symbol = Int::new_const(dimension_name(variable, "length"));
+            let expected_length = lower_dimension(environment, expected_length, "sequence")?;
+            let mut constraints = vec![
+                length_symbol.eq(Int::from_u64(sequence.n)),
+                expected_length.eq(&length_symbol),
+            ];
+            constraints.extend(type_constraints(
+                environment,
+                variable,
+                &sequence.t,
+                expected_element,
+                "element_",
+            )?);
+            Bool::and(&constraints)
+        }
         _ => Bool::from_bool(false),
     };
     Ok(Z3Object::Z3(result.into()))
+}
+
+fn type_constraints<Metadata>(
+    environment: &Environment,
+    variable: &Variable,
+    actual: &Type,
+    expected: &TypeExpr<Metadata>,
+    prefix: &str,
+) -> Result<Vec<Bool>, ToZ3Error> {
+    Ok(match (actual, expected) {
+        (Type::Bool, TypeExpr::Bool)
+        | (Type::Nat, TypeExpr::Nat)
+        | (Type::Int, TypeExpr::Int)
+        | (Type::Real, TypeExpr::Real) => Vec::new(),
+        (Type::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
+            let row_symbol = Int::new_const(dimension_name(variable, &format!("{prefix}rows")));
+            let col_symbol = Int::new_const(dimension_name(variable, &format!("{prefix}cols")));
+            vec![
+                row_symbol.eq(Int::from_u64(*rows)),
+                col_symbol.eq(Int::from_u64(*cols)),
+                lower_dimension(environment, expected_rows, "row")?.eq(&row_symbol),
+                lower_dimension(environment, expected_cols, "column")?.eq(&col_symbol),
+            ]
+        }
+        (Type::Seq(_), TypeExpr::Seq(_, _)) => {
+            return Err(ToZ3Error::Unsupported(
+                "nested sequence membership is not supported",
+            ));
+        }
+        _ => vec![Bool::from_bool(false)],
+    })
 }
 
 fn lower_dimension<Metadata>(
@@ -584,12 +836,18 @@ mod tests {
     use std::collections::HashMap;
 
     use expect_test::expect;
+    use ratex_parser::parse;
     use z3::{SatResult, Solver, SortKind, ast::Int};
 
     use crate::{
-        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, Type, TypeExpr, Variable,
+        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, SeqType, Type, TypeExpr,
+        Variable, from_tex,
         to_z3::{Environment, ToZ3Error, Z3Object, to_z3 as lower_to_z3},
     };
+
+    fn expression(tex: &str) -> Expr<()> {
+        from_tex::expr(&parse(tex).unwrap()).unwrap()
+    }
 
     fn to_z3<Metadata>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
         lower_to_z3(&environment, &expression).unwrap()
@@ -647,6 +905,67 @@ mod tests {
         expect!["42"].assert_eq(
             &scalar(Environment::default(), Expr::new(RawExpr::NatLiteral(42))).to_string(),
         );
+    }
+
+    #[test]
+    fn test_sequence_operations_expand_exactly_the_selected_terms() {
+        let sequence = Variable::new("z");
+        let environment = || Environment {
+            types: HashMap::from([(
+                sequence.clone(),
+                Type::Seq(Box::new(SeqType {
+                    t: Type::Real,
+                    n: 3,
+                })),
+            )]),
+            equalities: HashMap::from([(expression("n"), 3)]),
+        };
+        expect!["(+ |z_{2}| |z_{3}|)\n(* |z_{2}| |z_{3}|)"].assert_eq(&format!(
+            "{}\n{}",
+            scalar(environment(), expression(r"\sum_{i=2}^{n} z_i")),
+            scalar(environment(), expression(r"\prod_{i=2}^{n} z_i")),
+        ));
+    }
+
+    #[test]
+    fn test_sequence_index_must_be_in_bounds() {
+        let sequence = Variable::new("z");
+        assert_lowering_error(
+            Environment {
+                types: HashMap::from([(
+                    sequence,
+                    Type::Seq(Box::new(SeqType {
+                        t: Type::Real,
+                        n: 2,
+                    })),
+                )]),
+                equalities: HashMap::new(),
+            },
+            expression("z_3"),
+            ToZ3Error::InvalidOperands("sequence index is outside its one-based bounds"),
+        );
+    }
+
+    #[test]
+    fn test_matrix_sequence_product_uses_only_selected_terms() {
+        let sequence = Variable::new("A");
+        let environment = Environment {
+            types: HashMap::from([(
+                sequence,
+                Type::Seq(Box::new(SeqType {
+                    t: Type::Matrix(2, 2),
+                    n: 3,
+                })),
+            )]),
+            equalities: HashMap::new(),
+        };
+        let product = matrix(environment, expression(r"\prod_{i=2}^{3} A_i"));
+        assert_eq!((product.rows, product.cols), (2, 2));
+        for cell in matrix_strings(&product) {
+            assert!(cell.contains("A_{2}"));
+            assert!(cell.contains("A_{3}"));
+            assert!(!cell.contains("A_{1}"));
+        }
     }
 
     #[test]
@@ -1280,8 +1599,8 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(1, 1)),
-                    (b.clone(), Type::Matrix(1, 1)),
+                    (a.clone(), Type::Matrix(1, 2)),
+                    (b.clone(), Type::Matrix(1, 2)),
                 ]
                 .into_iter()
                 .collect(),
@@ -1300,7 +1619,7 @@ mod tests {
         let a = Variable::new("A");
         assert_lowering_error(
             Environment {
-                types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
+                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {

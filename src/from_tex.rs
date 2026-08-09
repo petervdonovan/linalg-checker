@@ -1,6 +1,9 @@
 use std::{error::Error, fmt};
 
-use ratex_parser::{ParseNode, parse_node::AtomFamily};
+use ratex_parser::{
+    ParseNode,
+    parse_node::{AtomFamily, Mode},
+};
 
 use crate::{
     Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, Range,
@@ -185,6 +188,18 @@ impl<'a> Cursor<'a> {
                 context: "an operand",
             })?;
 
+        if let Some(size) = parse_sequence_type_head(current)? {
+            self.position += 1;
+            let argument = self.take_parenthesized()?;
+            let element = expr(argument)?;
+            if !matches!(element.raw, RawExpr::Type(_)) {
+                return Err(FromTexError::Malformed {
+                    index: self.position,
+                    message: "sequence element must be a type expression".to_owned(),
+                });
+            }
+            return Ok(Expr::new(RawExpr::Type(TypeExpr::Seq(element, size))));
+        }
         if let Some((op, range)) = parse_sequence_head(current)? {
             self.position += 1;
             let body = self.parse_multiplication()?;
@@ -637,7 +652,7 @@ fn parse_sup_sub(
                 expr(parts[0])?,
                 expr(parts[1])?,
             ));
-        } else if let Some(name) = collect_text(body).filter(|name| {
+        } else if let Some(name) = explicit_text(body).filter(|name| {
             !name.is_empty() && !name.chars().all(|character| character.is_ascii_digit())
         }) {
             if let Ok(variable) = variable_mut(&mut expression, "subscript") {
@@ -666,12 +681,37 @@ fn parse_sup_sub(
                 .push(Annotation::Prime);
         } else if is_minus_one(body) {
             expression = Expr::new(RawExpr::Monop(Monop::Inverse, expression));
+        } else if is_transpose(body) {
+            expression = Expr::new(RawExpr::Monop(Monop::Transpose, expression));
         } else {
             expression = Expr::new(RawExpr::Binop(Binop::Power, expression, expr(body)?));
         }
     }
 
     Ok(expression)
+}
+
+fn is_transpose(nodes: &[ParseNode]) -> bool {
+    matches!(collect_text(nodes).as_deref(), Some(r"\top" | "⊤"))
+}
+
+fn parse_sequence_type_head(node: &ParseNode) -> Result<Option<Expr<()>>, FromTexError> {
+    let ParseNode::SupSub {
+        base: Some(base),
+        sup: None,
+        sub: Some(size),
+        ..
+    } = node
+    else {
+        return Ok(None);
+    };
+    let ParseNode::OperatorName { body, .. } = base.as_ref() else {
+        return Ok(None);
+    };
+    if collect_text(body).as_deref() != Some("Seq") {
+        return Ok(None);
+    }
+    Ok(Some(parse_group(size)?))
 }
 
 fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, Range<()>)>, FromTexError> {
@@ -762,6 +802,14 @@ fn collect_text(nodes: &[ParseNode]) -> Option<String> {
         }
     }
     Some(result)
+}
+
+fn explicit_text(nodes: &[ParseNode]) -> Option<String> {
+    match nodes {
+        [ParseNode::Text { body, .. }] => collect_text(body),
+        nodes if nodes.iter().all(|node| node.mode() == Mode::Text) => collect_text(nodes),
+        _ => None,
+    }
 }
 
 fn is_prime(nodes: &[ParseNode]) -> bool {
@@ -860,11 +908,11 @@ mod tests {
 
     #[test]
     fn parses_literals_variables_and_annotations() {
-        expect!["42\nx\n\\hat{x}_{i}^{\\prime}\n\\tilde{x}\n\\vec{x}"].assert_eq(&format!(
+        expect!["42\nx\n\\hat{x}_{\\text{i}}^{\\prime}\n\\tilde{x}\n\\vec{x}"].assert_eq(&format!(
             "{}\n{}\n{}\n{}\n{}",
             round_trip("42").unwrap(),
             round_trip("x").unwrap(),
-            round_trip(r"\hat{x}_{i}^{\prime}").unwrap(),
+            round_trip(r"\hat{x}_{\text{i}}^{\prime}").unwrap(),
             round_trip(r"\tilde{x}").unwrap(),
             round_trip(r"\vec{x}").unwrap(),
         ));
@@ -908,6 +956,28 @@ mod tests {
         assert!(matches!(
             super::expr(&parsed).unwrap().raw,
             RawExpr::Type(TypeExpr::Real)
+        ));
+    }
+
+    #[test]
+    fn parses_sequence_types_transpose_and_subscript_kinds() {
+        expect!["\\operatorname{Seq}_{n}(\\mathbb{R}^{d})\n\\vec{z}_{i}^\\top\nz_{\\text{i}}"]
+            .assert_eq(&format!(
+                "{}\n{}\n{}",
+                round_trip(r"\operatorname{Seq}_{n}(\mathbb{R}^{d})").unwrap(),
+                round_trip(r"\vec{z}_i^\top").unwrap(),
+                round_trip(r"z_{\text{i}}").unwrap(),
+            ));
+
+        let parsed = parse(r"\vec{z}_i").unwrap();
+        assert!(matches!(
+            &super::expr(&parsed).unwrap().raw,
+            RawExpr::Binop(Binop::SingleSubscript, _, _)
+        ));
+        let parsed = parse(r"z_{\text{i}}").unwrap();
+        assert!(matches!(
+            &super::expr(&parsed).unwrap().raw,
+            RawExpr::Variable(variable) if variable.non_numeric_subscript == "i"
         ));
     }
 

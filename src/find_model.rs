@@ -249,7 +249,7 @@ Not solved yet"#;
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "matrix equality requires equal dimensions"
+            "scalar-matrix comparisons are not supported"
         );
     }
 }
