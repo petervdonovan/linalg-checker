@@ -10,7 +10,27 @@ pub mod to_tex;
 pub mod to_z3;
 pub mod validate_argument;
 
-use std::{collections::HashMap, ops::Deref, rc::Rc};
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_IMPLICIT_DIMENSION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImplicitDimension(u64);
+
+impl ImplicitDimension {
+    pub fn fresh() -> Self {
+        Self(NEXT_IMPLICIT_DIMENSION.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn z3_name(self) -> String {
+        format!("__implicit_dimension_{}", self.0)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Type {
@@ -95,6 +115,7 @@ impl TypeExpr<()> {
 pub struct Environment {
     pub types: HashMap<Variable, Type>,
     pub equalities: HashMap<Expr<()>, u64>,
+    pub implicit_dimensions: HashMap<ImplicitDimension, u64>,
 }
 
 pub type Model = Vec<Expr<()>>;
@@ -227,6 +248,17 @@ impl<Metadata> Expr<Metadata> {
     pub fn without_metadata(&self) -> Expr<()> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
+            RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
+                dimension: *dimension,
+            },
+            RawExpr::StandardBasis { index, dimension } => RawExpr::StandardBasis {
+                index: index.without_metadata(),
+                dimension: *dimension,
+            },
+            RawExpr::ZeroMatrix { rows, cols } => RawExpr::ZeroMatrix {
+                rows: *rows,
+                cols: *cols,
+            },
             RawExpr::Type(ty) => RawExpr::Type(match ty {
                 TypeExpr::Bool => TypeExpr::Bool,
                 TypeExpr::Nat => TypeExpr::Nat,
@@ -357,6 +389,17 @@ where
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
     Hole,
+    IdentityMatrix {
+        dimension: ImplicitDimension,
+    },
+    StandardBasis {
+        index: Expr<Metadata>,
+        dimension: ImplicitDimension,
+    },
+    ZeroMatrix {
+        rows: ImplicitDimension,
+        cols: ImplicitDimension,
+    },
     Type(TypeExpr<Metadata>),
     Variable(Variable),
     NatLiteral(u64),
@@ -372,7 +415,7 @@ pub enum RawExpr<Metadata> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, Finop, RawExpr, TypeExpr, Variable};
+    use super::{Expr, Finop, ImplicitDimension, RawExpr, TypeExpr, Variable};
 
     struct MetadataWithoutClone;
 
@@ -464,5 +507,24 @@ mod tests {
             sequence(1).without_metadata(),
             sequence(10).without_metadata()
         );
+    }
+
+    #[test]
+    fn without_metadata_preserves_implicit_dimension_identity() {
+        let dimension = ImplicitDimension::fresh();
+        let expression = Expr::with_metadata(
+            1,
+            RawExpr::StandardBasis {
+                index: Expr::with_metadata(2, RawExpr::Variable(Variable::new("i"))),
+                dimension,
+            },
+        );
+        assert!(matches!(
+            expression.without_metadata().raw,
+            RawExpr::StandardBasis {
+                dimension: found,
+                ..
+            } if found == dimension
+        ));
     }
 }

@@ -24,6 +24,13 @@ impl<Metadata> Expr<Metadata> {
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
     match &e.raw {
         crate::RawExpr::Hole => write!(f, r"\square"),
+        crate::RawExpr::IdentityMatrix { .. } => write!(f, "I"),
+        crate::RawExpr::StandardBasis { index, .. } => {
+            write!(f, "e_{{")?;
+            expr(f, index)?;
+            write!(f, "}}")
+        }
+        crate::RawExpr::ZeroMatrix { .. } => write!(f, r"\mathbb{{0}}"),
         crate::RawExpr::Type(ty) => type_expr(f, ty),
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),

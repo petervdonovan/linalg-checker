@@ -44,3 +44,24 @@
 
 1. $-x < -y$
 2. $-x > -y$
+
+# Independent implicit matrix constants
+
+## Assumptions
+
+## Steps
+
+1. $I = \begin{bmatrix}1\end{bmatrix}$
+2. $I = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+3. $\mathbb{0} = \begin{bmatrix}0 & 0\end{bmatrix}$
+4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
+
+# One-sided orthogonality
+
+## Assumptions
+
+- $U^\top U = I$
+
+## Steps
+
+1. $U U^\top = I$

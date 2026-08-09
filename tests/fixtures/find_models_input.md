@@ -15,6 +15,26 @@
 
 Not solved yet
 
+# Independent implicit matrix constants
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{3 \times 3}$
+- $C \in \mathbb{R}^{2 \times 3}$
+- $D \in \mathbb{R}^{3}$
+
+## Sentences
+
+- $A = I$
+- $B = I$
+- $C = \mathbb{0}$
+- $D = \mathbb{0}$
+
+## Conclusion
+
+Not solved yet
+
 # Inferred matrix compatibility
 
 ## Assumptions

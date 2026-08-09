@@ -5,7 +5,7 @@ use markdown::mdast::{Heading, Node, Root};
 pub use crate::model_finding::{ModelFindingError, ModelOrUnsat, NotSolvedYet, ToFromMd};
 use crate::{
     Expr,
-    enumerable_envspec::{ShapeError, extract_environment_iterator},
+    enumerable_envspec::{ShapeError, extract_environment_iterator_with_context},
     model_finding::{
         expression_list, heading, heading_text, parse_expression_section, render_md, root,
         root_children, section_start, solve_environment,
@@ -151,37 +151,40 @@ impl TestCase<NotSolvedYet> {
             sentences,
             conclusion: NotSolvedYet,
         } = self;
-        let conclusion =
-            match extract_environment_iterator(assumptions.iter().cloned(), max_dimension) {
-                Err(ShapeError::Unsat(_)) => ModelOrUnsat::Unsat,
-                Err(ShapeError::Unknown(_)) => ModelOrUnsat::Unknown,
-                Err(error) => return Err(error.into()),
-                Ok(environments) => {
-                    let mut conclusion = None;
-                    for environment in environments {
-                        let environment = match environment {
-                            Ok(environment) => environment,
-                            Err(ShapeError::Unknown(_)) => {
-                                conclusion = Some(ModelOrUnsat::Unknown);
-                                break;
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
-                        match solve_environment(
-                            &environment,
-                            assumptions.iter().chain(sentences.iter()),
-                        )? {
-                            ModelOrUnsat::Unsat => {}
-                            result @ (ModelOrUnsat::Model(_) | ModelOrUnsat::Unknown) => {
-                                conclusion = Some(result);
-                                break;
-                            }
-                            ModelOrUnsat::UnsatUpToDimension(_) => unreachable!(),
+        let conclusion = match extract_environment_iterator_with_context(
+            assumptions.iter().cloned(),
+            sentences.iter().cloned(),
+            max_dimension,
+        ) {
+            Err(ShapeError::Unsat(_)) => ModelOrUnsat::Unsat,
+            Err(ShapeError::Unknown(_)) => ModelOrUnsat::Unknown,
+            Err(error) => return Err(error.into()),
+            Ok(environments) => {
+                let mut conclusion = None;
+                for environment in environments {
+                    let environment = match environment {
+                        Ok(environment) => environment,
+                        Err(ShapeError::Unknown(_)) => {
+                            conclusion = Some(ModelOrUnsat::Unknown);
+                            break;
                         }
+                        Err(error) => return Err(error.into()),
+                    };
+                    match solve_environment(
+                        &environment,
+                        assumptions.iter().chain(sentences.iter()),
+                    )? {
+                        ModelOrUnsat::Unsat => {}
+                        result @ (ModelOrUnsat::Model(_) | ModelOrUnsat::Unknown) => {
+                            conclusion = Some(result);
+                            break;
+                        }
+                        ModelOrUnsat::UnsatUpToDimension(_) => unreachable!(),
                     }
-                    conclusion.unwrap_or(ModelOrUnsat::UnsatUpToDimension(max_dimension))
                 }
-            };
+                conclusion.unwrap_or(ModelOrUnsat::UnsatUpToDimension(max_dimension))
+            }
+        };
         Ok(TestCase {
             name,
             assumptions,

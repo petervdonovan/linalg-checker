@@ -20,6 +20,31 @@ Model
 - $n = 2$
 - $p = 1$
 
+# Independent implicit matrix constants
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{3 \times 3}$
+- $C \in \mathbb{R}^{2 \times 3}$
+- $D \in \mathbb{R}^{3}$
+
+## Sentences
+
+- $A = I$
+- $B = I$
+- $C = \mathbb{0}$
+- $D = \mathbb{0}$
+
+## Conclusion
+
+Model
+
+- $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+- $B = \begin{bmatrix}1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1\end{bmatrix}$
+- $C = \begin{bmatrix}0 & 0 & 0 \\ 0 & 0 & 0\end{bmatrix}$
+- $D = \begin{bmatrix}0 \\ 0 \\ 0\end{bmatrix}$
+
 # Inferred matrix compatibility
 
 ## Assumptions

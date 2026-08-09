@@ -989,6 +989,7 @@ Model
                 (Variable::new("A"), Type::Matrix(2, 3)),
                 (Variable::new("b"), Type::Bool),
             ]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::from([(variable("k"), 3)]),
         };
         let case = TestCase {
@@ -1049,6 +1050,7 @@ Model
             sentences: Vec::new(),
             environment: Environment {
                 types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 1))]),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             conclusion: NotSolvedYet,
@@ -1065,6 +1067,7 @@ Model
             sentences: vec![Expr::new(RawExpr::Variable(boolean.clone()))],
             environment: Environment {
                 types: HashMap::from([(boolean, Type::Bool)]),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             conclusion: NotSolvedYet,
@@ -1093,6 +1096,7 @@ Model
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment {
             types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
         let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
@@ -1109,6 +1113,7 @@ Model
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment {
             types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 2))]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
         let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
@@ -1135,6 +1140,7 @@ Model
                     n: 2,
                 })),
             )]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
         let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();

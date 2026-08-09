@@ -7,8 +7,8 @@ use std::{
 use z3::ast::{Bool, Int, Real};
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, LogicChain, Matrix, Monop, Range, RawExpr,
-    SeqOp, Type, TypeExpr, Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, LogicChain, Matrix, Monop,
+    Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
 };
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ pub enum Z3Object {
 pub enum ToZ3Error {
     Unsupported(&'static str),
     MissingVariableType(Variable),
+    MissingImplicitDimension(ImplicitDimension),
     MissingPowerExponent,
     InvalidOperands(&'static str),
     Shape(&'static str),
@@ -42,6 +43,9 @@ impl Display for ToZ3Error {
                     "variable {} is missing from the type environment",
                     variable.z3_name()
                 )
+            }
+            Self::MissingImplicitDimension(_) => {
+                f.write_str("an implicit matrix dimension is missing from the environment")
             }
             Self::MissingPowerExponent => {
                 f.write_str("power exponent is missing from the equality environment")
@@ -330,6 +334,25 @@ pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object,
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
         RawExpr::Hole => Err(ToZ3Error::Unsupported("holes are not supported by to_z3")),
+        RawExpr::IdentityMatrix { dimension } => {
+            let dimension = implicit_dimension(γ, *dimension)?;
+            matrix_constant(dimension, dimension, |row, col| u64::from(row == col))
+        }
+        RawExpr::StandardBasis { index, dimension } => {
+            let dimension = implicit_dimension(γ, *dimension)?;
+            let index = concrete_nat(γ, index)?;
+            if index == 0 || index > dimension {
+                return Err(ToZ3Error::InvalidOperands(
+                    "standard basis index is outside its one-based bounds",
+                ));
+            }
+            matrix_constant(dimension, 1, |row, _| u64::from(row + 1 == index))
+        }
+        RawExpr::ZeroMatrix { rows, cols } => matrix_constant(
+            implicit_dimension(γ, *rows)?,
+            implicit_dimension(γ, *cols)?,
+            |_, _| 0,
+        ),
         RawExpr::Type(_) => Err(ToZ3Error::Unsupported(
             "type expressions are not supported by to_z3",
         )),
@@ -421,6 +444,42 @@ fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
             ));
         }
     })
+}
+
+fn implicit_dimension(
+    environment: &Environment,
+    dimension: ImplicitDimension,
+) -> Result<u64, ToZ3Error> {
+    environment
+        .implicit_dimensions
+        .get(&dimension)
+        .copied()
+        .ok_or(ToZ3Error::MissingImplicitDimension(dimension))
+}
+
+fn matrix_constant(
+    rows: u64,
+    cols: u64,
+    value: impl Fn(u64, u64) -> u64,
+) -> Result<Z3Object, ToZ3Error> {
+    let row_count = usize::try_from(rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
+    let col_count = usize::try_from(cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
+    let capacity = row_count
+        .checked_mul(col_count)
+        .ok_or(ToZ3Error::DimensionOverflow)?;
+    let mut elements = Vec::with_capacity(capacity);
+    for row in 0..rows {
+        for col in 0..cols {
+            elements.push(Z3Object::Z3(
+                Real::from_int(&Int::from_u64(value(row, col))).into(),
+            ));
+        }
+    }
+    Ok(Z3Object::Matrix(Matrix {
+        rows: row_count,
+        cols: col_count,
+        elements,
+    }))
 }
 
 fn lower_subscript<Metadata>(
@@ -529,6 +588,17 @@ fn substitute_index<Metadata>(
     let raw = match &expression.raw {
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
+        RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
+            dimension: *dimension,
+        },
+        RawExpr::StandardBasis { index, dimension } => RawExpr::StandardBasis {
+            index: recurse(index),
+            dimension: *dimension,
+        },
+        RawExpr::ZeroMatrix { rows, cols } => RawExpr::ZeroMatrix {
+            rows: *rows,
+            cols: *cols,
+        },
         RawExpr::Type(ty) => RawExpr::Type(substitute_type(ty, variable, value)),
         RawExpr::Variable(found) => RawExpr::Variable(found.clone()),
         RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
@@ -890,6 +960,7 @@ mod tests {
             let variable = Variable::new(name);
             let environment = Environment {
                 types: [(variable.clone(), τ)].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: [].into_iter().collect(),
             };
 
@@ -908,6 +979,76 @@ mod tests {
     }
 
     #[test]
+    fn test_context_dependent_matrix_constants() {
+        let identity = expression("I");
+        let basis = expression("e_2");
+        let zero = expression(r"\mathbb{0}");
+        let RawExpr::IdentityMatrix {
+            dimension: identity_dimension,
+        } = identity.raw
+        else {
+            panic!("expected identity matrix")
+        };
+        let RawExpr::StandardBasis {
+            dimension: basis_dimension,
+            ..
+        } = basis.raw
+        else {
+            panic!("expected standard basis vector")
+        };
+        let RawExpr::ZeroMatrix {
+            rows: zero_rows,
+            cols: zero_cols,
+        } = zero.raw
+        else {
+            panic!("expected zero matrix")
+        };
+        let environment = || Environment {
+            types: HashMap::new(),
+            equalities: HashMap::new(),
+            implicit_dimensions: HashMap::from([
+                (identity_dimension, 2),
+                (basis_dimension, 3),
+                (zero_rows, 2),
+                (zero_cols, 3),
+            ]),
+        };
+
+        assert_eq!(
+            matrix_strings(&matrix(environment(), identity)),
+            ["(to_real 1)", "(to_real 0)", "(to_real 0)", "(to_real 1)"]
+        );
+        assert_eq!(
+            matrix_strings(&matrix(environment(), basis)),
+            ["(to_real 0)", "(to_real 1)", "(to_real 0)"]
+        );
+        assert_eq!(
+            matrix_strings(&matrix(environment(), zero)),
+            [
+                "(to_real 0)",
+                "(to_real 0)",
+                "(to_real 0)",
+                "(to_real 0)",
+                "(to_real 0)",
+                "(to_real 0)"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_implicit_matrix_dimension_must_be_present() {
+        let identity = expression("I");
+        let RawExpr::IdentityMatrix { dimension } = identity.raw else {
+            panic!("expected identity matrix")
+        };
+        assert_lowering_error(
+            Environment::default(),
+            identity,
+            ToZ3Error::MissingImplicitDimension(dimension),
+        );
+    }
+
+    #[test]
     fn test_sequence_operations_expand_exactly_the_selected_terms() {
         let sequence = Variable::new("z");
         let environment = || Environment {
@@ -918,6 +1059,7 @@ mod tests {
                     n: 3,
                 })),
             )]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::from([(expression("n"), 3)]),
         };
         expect!["(+ |z_{2}| |z_{3}|)\n(* |z_{2}| |z_{3}|)"].assert_eq(&format!(
@@ -939,6 +1081,7 @@ mod tests {
                         n: 2,
                     })),
                 )]),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             expression("z_3"),
@@ -957,6 +1100,7 @@ mod tests {
                     n: 3,
                 })),
             )]),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
         let product = matrix(environment, expression(r"\prod_{i=2}^{3} A_i"));
@@ -1033,6 +1177,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: Default::default(),
         };
         let variable = |variable| Expr::new(RawExpr::Variable(variable));
@@ -1111,6 +1256,7 @@ mod tests {
         let x = Variable::new("x");
         let environment = || Environment {
             types: [(x.clone(), Type::Real)].into_iter().collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: [].into_iter().collect(),
         };
         let real = || Expr::new(RawExpr::Variable(x.clone()));
@@ -1140,6 +1286,7 @@ mod tests {
         };
         let environment = |value| Environment {
             types: [(x.clone(), Type::Int)].into_iter().collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: [(exponent().without_metadata(), value)]
                 .into_iter()
                 .collect(),
@@ -1160,6 +1307,7 @@ mod tests {
         ));
         let environment = Environment {
             types: [(x, Type::Real)].into_iter().collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: [(exponent, 0)].into_iter().collect(),
         };
 
@@ -1187,6 +1335,7 @@ mod tests {
         let lowered = matrix(
             Environment {
                 types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::new(RawExpr::Variable(a)),
@@ -1225,6 +1374,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
         let variable = |variable| Expr::new(RawExpr::Variable(variable));
@@ -1275,6 +1425,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::Finop(
@@ -1302,6 +1453,7 @@ mod tests {
         let quotient = scalar(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::new(RawExpr::Binop(
@@ -1321,6 +1473,7 @@ mod tests {
         let identity = matrix(
             Environment {
                 types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 0)].into_iter().collect(),
             },
             Expr::new(RawExpr::Binop(
@@ -1339,6 +1492,7 @@ mod tests {
         let integer_identity = matrix(
             Environment {
                 types: HashMap::new(),
+                implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 0)].into_iter().collect(),
             },
             Expr::new(RawExpr::Binop(
@@ -1366,6 +1520,7 @@ mod tests {
         let squared = matrix(
             Environment {
                 types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 2)].into_iter().collect(),
             },
             Expr::new(RawExpr::Binop(
@@ -1389,6 +1544,7 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 1)].into_iter().collect(),
             },
             Expr::new(RawExpr::Binop(
@@ -1419,6 +1575,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             product,
@@ -1438,6 +1595,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::Finop(
@@ -1457,6 +1615,7 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::Binop(
@@ -1491,6 +1650,7 @@ mod tests {
                 .into_iter()
                 .map(|variable| (variable, Type::Int))
                 .collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
 
@@ -1507,6 +1667,7 @@ mod tests {
         }));
         let environment = Environment {
             types: [(x, Type::Real)].into_iter().collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
 
@@ -1525,6 +1686,7 @@ mod tests {
             types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
                 .into_iter()
                 .collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
 
@@ -1544,6 +1706,7 @@ mod tests {
             types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
                 .into_iter()
                 .collect(),
+            implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
 
@@ -1560,6 +1723,7 @@ mod tests {
                 types: [(p.clone(), Type::Bool), (q.clone(), Type::Bool)]
                     .into_iter()
                     .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {
@@ -1582,6 +1746,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {
@@ -1604,6 +1769,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {
@@ -1620,6 +1786,7 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
             Expr::<()>::new(RawExpr::CmpChain(CmpChain {

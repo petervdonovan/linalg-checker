@@ -205,6 +205,13 @@ impl<'a> Cursor<'a> {
             let body = self.parse_multiplication()?;
             return Ok(Expr::new(RawExpr::Seqop(op, range, body)));
         }
+        if is_blackboard_zero(current) {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::ZeroMatrix {
+                rows: crate::ImplicitDimension::fresh(),
+                cols: crate::ImplicitDimension::fresh(),
+            }));
+        }
         if let Some(ty) = parse_type(current)? {
             self.position += 1;
             return Ok(Expr::new(RawExpr::Type(ty)));
@@ -330,6 +337,11 @@ impl<'a> Cursor<'a> {
             unreachable!("parse_variable_name is only called for MathOrd nodes")
         };
         self.position += 1;
+        if name == "I" {
+            return Ok(Expr::new(RawExpr::IdentityMatrix {
+                dimension: crate::ImplicitDimension::fresh(),
+            }));
+        }
         Ok(Expr::new(RawExpr::Variable(Variable {
             name: name.clone(),
             non_numeric_subscript: String::new(),
@@ -540,6 +552,13 @@ fn type_base(node: &ParseNode) -> Option<TypeExpr<()>> {
     }
 }
 
+fn is_blackboard_zero(node: &ParseNode) -> bool {
+    let ParseNode::Font { font, body, .. } = node else {
+        return false;
+    };
+    font == "mathbb" && collect_text(group_body(body)).as_deref() == Some("0")
+}
+
 fn parse_group(group: &ParseNode) -> Result<Expr<()>, FromTexError> {
     match group {
         ParseNode::OrdGroup { body, .. } => expr(body),
@@ -665,11 +684,16 @@ fn parse_sup_sub(
                 ));
             }
         } else {
-            expression = Expr::new(RawExpr::Binop(
-                Binop::SingleSubscript,
-                expression,
-                expr(body)?,
-            ));
+            let index = expr(body)?;
+            expression = if matches!(&expression.raw, RawExpr::Variable(variable) if variable == &Variable::new("e"))
+            {
+                Expr::new(RawExpr::StandardBasis {
+                    index,
+                    dimension: crate::ImplicitDimension::fresh(),
+                })
+            } else {
+                Expr::new(RawExpr::Binop(Binop::SingleSubscript, expression, index))
+            };
         }
     }
 
@@ -979,6 +1003,29 @@ mod tests {
             &super::expr(&parsed).unwrap().raw,
             RawExpr::Variable(variable) if variable.non_numeric_subscript == "i"
         ));
+    }
+
+    #[test]
+    fn parses_context_dependent_matrix_constants() {
+        expect!["I\ne_{1}\ne_{i + 1}\n\\mathbb{0}\ne_{\\text{i}}"].assert_eq(&format!(
+            "{}\n{}\n{}\n{}\n{}",
+            round_trip("I").unwrap(),
+            round_trip("e_1").unwrap(),
+            round_trip("e_{i+1}").unwrap(),
+            round_trip(r"\mathbb{0}").unwrap(),
+            round_trip(r"e_{\text{i}}").unwrap(),
+        ));
+
+        let first = super::expr(&parse("I").unwrap()).unwrap();
+        let second = super::expr(&parse("I").unwrap()).unwrap();
+        let (
+            RawExpr::IdentityMatrix { dimension: first },
+            RawExpr::IdentityMatrix { dimension: second },
+        ) = (&first.raw, &second.raw)
+        else {
+            panic!("expected identity matrices")
+        };
+        assert_ne!(first, second);
     }
 
     #[test]

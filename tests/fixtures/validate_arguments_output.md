@@ -121,3 +121,66 @@
 
    - $x < y$
    </details>
+
+# Independent implicit matrix constants
+
+## Assumptions
+
+## Steps
+
+1. $I = \begin{bmatrix}1\end{bmatrix}$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No tracked premises appeared in the unsatisfiable cores.
+   </details>
+2. $I = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No tracked premises appeared in the unsatisfiable cores.
+   </details>
+3. $\mathbb{0} = \begin{bmatrix}0 & 0\end{bmatrix}$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No tracked premises appeared in the unsatisfiable cores.
+   </details>
+4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No tracked premises appeared in the unsatisfiable cores.
+   </details>
+
+# One-sided orthogonality
+
+## Assumptions
+
+- $U \in \mathbb{R}^{2}$
+- $U = \begin{bmatrix}1 \\ 0\end{bmatrix}$
+- $U^\top U = I$
+
+## Steps
+
+1. $U U^\top = I$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $U U^\top = I$ is satisfied by:
+
+   - $U = \begin{bmatrix}1 \\ 0\end{bmatrix}$
+   </details>

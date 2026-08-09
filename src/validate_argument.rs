@@ -11,7 +11,7 @@ use z3::{SatResult, Solver, ast::Bool};
 pub use crate::model_finding::{ModelFindingError, ToFromMd};
 use crate::{
     Binop, Environment, Expr, Model, RawExpr, Type, TypeExpr,
-    enumerable_envspec::{ShapeError, extract_environment_iterator},
+    enumerable_envspec::{ShapeError, extract_environment_iterator_with_context},
     model_finding::{
         assert_environment_equalities, expression_list, extract_model, heading, heading_text,
         lower_boolean, parse_expression_item, parse_expression_section, render_md, root,
@@ -110,19 +110,22 @@ impl Argument {
             step.validation.max_dimension = Some(max_dimension);
         }
 
-        let environments =
-            match extract_environment_iterator(self.assumptions.iter().cloned(), max_dimension) {
-                Ok(environments) => environments,
-                Err(ShapeError::Unsat(_)) => {
-                    self.record_inconsistent_assumptions(None);
-                    return Ok(());
-                }
-                Err(ShapeError::Unknown(_)) => {
-                    self.record_unknown(None);
-                    return Ok(());
-                }
-                Err(error) => return Err(error.into()),
-            };
+        let environments = match extract_environment_iterator_with_context(
+            self.assumptions.iter().cloned(),
+            self.steps.iter().map(|step| step.sentence.clone()),
+            max_dimension,
+        ) {
+            Ok(environments) => environments,
+            Err(ShapeError::Unsat(_)) => {
+                self.record_inconsistent_assumptions(None);
+                return Ok(());
+            }
+            Err(ShapeError::Unknown(_)) => {
+                self.record_unknown(None);
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         let mut satisfiable_assumption_count = 0;
         let mut assumption_unknown = false;

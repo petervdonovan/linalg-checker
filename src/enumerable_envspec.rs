@@ -10,8 +10,8 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, Monop, RawExpr, SeqOp, SeqType, Type, TypeExpr,
-    Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, RawExpr, SeqOp,
+    SeqType, Type, TypeExpr, Variable,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +48,7 @@ enum Shape {
 pub struct EnvironmentIterator {
     solver: Solver,
     variable_types: BTreeMap<Variable, Shape>,
+    implicit_dimensions: Vec<(ImplicitDimension, Int)>,
     dimensions: Vec<Int>,
     known_equalities: HashMap<Expr<()>, u64>,
     projections: Vec<(Expr<()>, Int)>,
@@ -61,31 +62,65 @@ pub fn extract_environment_iterator<Metadata>(
     assumptions: impl Iterator<Item = Expr<Metadata>>,
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
+    extract_environment_iterator_with_context(
+        assumptions,
+        std::iter::empty::<Expr<()>>(),
+        max_dimension,
+    )
+}
+
+pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMetadata>(
+    assumptions: impl Iterator<Item = Expr<AssumptionMetadata>>,
+    contextual_expressions: impl Iterator<Item = Expr<ContextMetadata>>,
+    max_dimension: u64,
+) -> Result<EnvironmentIterator, ShapeError> {
     let assumptions: Vec<_> = assumptions.map(|e| e.without_metadata()).collect();
+    let contextual_expressions: Vec<_> = contextual_expressions
+        .map(|expression| expression.without_metadata())
+        .collect();
     let specification = collect_environment_specification(&assumptions)?;
     let mut solver = Solver::new();
     let variable_types = infer_variable_types(&mut solver, specification)?;
     assert_positive_matrix_dimensions(&mut solver, &variable_types);
+    let implicit_dimensions =
+        collect_implicit_dimension_symbols(assumptions.iter().chain(contextual_expressions.iter()));
+    for dimension in implicit_dimensions.values() {
+        solver.assert(dimension.gt(0));
+    }
     let (known_equalities, projections) = {
         let mut projections = BTreeMap::new();
         let mut context = ShapeContext {
             solver: &mut solver,
             variable_types: &variable_types,
+            implicit_dimensions: &implicit_dimensions,
             projections: &mut projections,
+            contextual: false,
         };
         for assumption in &assumptions {
             context.constrain_assertion(assumption)?;
         }
         let known = context.known_equalities(&assumptions)?;
+        check_base_constraints(context.solver)?;
+        context.contextual = true;
+        for expression in &contextual_expressions {
+            if contains_implicit(expression) {
+                context.constrain_assertion(expression)?;
+            }
+        }
+        check_contextual_constraints(context.solver)?;
         (known, projections.into_iter().collect())
     };
-    check_base_constraints(&mut solver)?;
 
-    let dimensions: Vec<Int> = variable_types.values().flat_map(shape_dimensions).collect();
+    let dimensions: Vec<Int> = variable_types
+        .values()
+        .flat_map(shape_dimensions)
+        .chain(implicit_dimensions.values().cloned())
+        .collect();
     let finished = !dimensions.is_empty() && max_dimension == 0;
     let mut iterator = EnvironmentIterator {
         solver,
         variable_types,
+        implicit_dimensions: implicit_dimensions.into_iter().collect(),
         dimensions,
         known_equalities,
         projections,
@@ -205,6 +240,20 @@ fn check_base_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
     }
 }
 
+fn check_contextual_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
+    match solver.check() {
+        SatResult::Sat => Ok(()),
+        SatResult::Unsat => Err(ShapeError::InvalidTyping(
+            "contextual implicit matrix dimensions are inconsistent".to_owned(),
+        )),
+        SatResult::Unknown => Err(ShapeError::Unknown(
+            solver
+                .get_reason_unknown()
+                .unwrap_or_else(|| "unknown reason".to_owned()),
+        )),
+    }
+}
+
 impl EnvironmentIterator {
     fn push_dim_limit(&mut self) {
         self.solver.push();
@@ -228,6 +277,11 @@ impl EnvironmentIterator {
         for (variable, shape) in &self.variable_types {
             let ty = concrete_type(model, shape)?;
             environment.types.insert(variable.clone(), ty);
+        }
+        for (dimension, expression) in &self.implicit_dimensions {
+            environment
+                .implicit_dimensions
+                .insert(*dimension, model_u64(model, expression)?);
         }
         for (expression, projection) in &self.projections {
             environment
@@ -311,13 +365,147 @@ impl Iterator for EnvironmentIterator {
     }
 }
 
+fn collect_implicit_dimension_symbols<'a>(
+    expressions: impl Iterator<Item = &'a Expr<()>>,
+) -> BTreeMap<ImplicitDimension, Int> {
+    let mut dimensions = BTreeSet::new();
+    for expression in expressions {
+        collect_implicit_dimensions(expression, &mut dimensions);
+    }
+    dimensions
+        .into_iter()
+        .map(|dimension| (dimension, Int::new_const(dimension.z3_name())))
+        .collect()
+}
+
+fn contains_implicit(expression: &Expr<()>) -> bool {
+    let mut dimensions = BTreeSet::new();
+    collect_implicit_dimensions(expression, &mut dimensions);
+    !dimensions.is_empty()
+}
+
+fn collect_implicit_dimensions(
+    expression: &Expr<()>,
+    dimensions: &mut BTreeSet<ImplicitDimension>,
+) {
+    match &expression.raw {
+        RawExpr::IdentityMatrix { dimension } => {
+            dimensions.insert(*dimension);
+        }
+        RawExpr::StandardBasis { index, dimension } => {
+            dimensions.insert(*dimension);
+            collect_implicit_dimensions(index, dimensions);
+        }
+        RawExpr::ZeroMatrix { rows, cols } => {
+            dimensions.insert(*rows);
+            dimensions.insert(*cols);
+        }
+        RawExpr::Type(ty) => collect_type_implicit_dimensions(ty, dimensions),
+        RawExpr::Matrix(matrix) => {
+            for element in &matrix.elements {
+                collect_implicit_dimensions(element, dimensions);
+            }
+        }
+        RawExpr::Monop(_, inner) => collect_implicit_dimensions(inner, dimensions),
+        RawExpr::Binop(_, left, right) => {
+            collect_implicit_dimensions(left, dimensions);
+            collect_implicit_dimensions(right, dimensions);
+        }
+        RawExpr::Triop(_, first, second, third) => {
+            collect_implicit_dimensions(first, dimensions);
+            collect_implicit_dimensions(second, dimensions);
+            collect_implicit_dimensions(third, dimensions);
+        }
+        RawExpr::Finop(_, expressions) => {
+            for expression in expressions {
+                collect_implicit_dimensions(expression, dimensions);
+            }
+        }
+        RawExpr::CmpChain(chain) => {
+            collect_implicit_dimensions(&chain.start, dimensions);
+            for (_, expression) in &chain.assertions {
+                collect_implicit_dimensions(expression, dimensions);
+            }
+        }
+        RawExpr::LogicChain(chain) => {
+            collect_implicit_dimensions(&chain.start, dimensions);
+            for (_, expression) in &chain.assertions {
+                collect_implicit_dimensions(expression, dimensions);
+            }
+        }
+        RawExpr::Seqop(_, range, body) => {
+            collect_implicit_dimensions(&range.from, dimensions);
+            collect_implicit_dimensions(&range.to, dimensions);
+            collect_implicit_dimensions(body, dimensions);
+        }
+        RawExpr::Hole | RawExpr::Variable(_) | RawExpr::NatLiteral(_) => {}
+    }
+}
+
+fn collect_type_implicit_dimensions(
+    ty: &TypeExpr<()>,
+    dimensions: &mut BTreeSet<ImplicitDimension>,
+) {
+    match ty {
+        TypeExpr::Matrix(rows, cols) | TypeExpr::Seq(rows, cols) => {
+            collect_implicit_dimensions(rows, dimensions);
+            collect_implicit_dimensions(cols, dimensions);
+        }
+        _ => {}
+    }
+}
+
 struct ShapeContext<'a> {
     solver: &'a mut Solver,
     variable_types: &'a BTreeMap<Variable, Shape>,
+    implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     projections: &'a mut BTreeMap<Expr<()>, Int>,
+    contextual: bool,
 }
 
 impl ShapeContext<'_> {
+    fn implicit_dimension(&self, dimension: ImplicitDimension) -> Int {
+        self.implicit_dimensions[&dimension].clone()
+    }
+
+    fn is_implicit_dimension(&self, dimension: &Int) -> bool {
+        self.implicit_dimensions
+            .values()
+            .any(|implicit| implicit == dimension)
+    }
+
+    fn shape_depends_on_implicit(&self, shape: &Shape) -> bool {
+        match shape {
+            Shape::Matrix(rows, cols) => {
+                self.is_implicit_dimension(rows) || self.is_implicit_dimension(cols)
+            }
+            Shape::Seq(element, length) => {
+                self.is_implicit_dimension(length) || self.shape_depends_on_implicit(element)
+            }
+            _ => false,
+        }
+    }
+
+    fn assert_if_relevant(&mut self, assertion: Bool, dimensions: &[&Int]) {
+        if !self.contextual
+            || dimensions
+                .iter()
+                .any(|dimension| self.is_implicit_dimension(dimension))
+        {
+            self.solver.assert(assertion);
+        }
+    }
+
+    fn assert_dimensions_equal(&mut self, left: &Int, right: &Int) {
+        self.assert_if_relevant(left.eq(right), &[left, right]);
+    }
+
+    fn assert_typing_failure(&mut self, shape: &Shape) {
+        if !self.contextual || self.shape_depends_on_implicit(shape) {
+            self.solver.assert(Bool::from_bool(false));
+        }
+    }
+
     fn known_equalities(
         &self,
         assumptions: &[Expr<()>],
@@ -352,7 +540,8 @@ impl ShapeContext<'_> {
     }
 
     fn constrain_assertion(&mut self, expression: &Expr<()>) -> Result<(), ShapeError> {
-        if let RawExpr::CmpChain(chain) = &expression.raw
+        if !self.contextual
+            && let RawExpr::CmpChain(chain) = &expression.raw
             && let Some(comparison) = self.natural_comparison(chain)?
         {
             self.solver.assert(comparison);
@@ -427,6 +616,26 @@ impl ShapeContext<'_> {
     fn infer(&mut self, expression: &Expr<()>) -> Result<Shape, ShapeError> {
         match &expression.raw {
             RawExpr::Hole | RawExpr::Type(_) => Ok(Shape::Bool),
+            RawExpr::IdentityMatrix { dimension } => {
+                let dimension = self.implicit_dimension(*dimension);
+                Ok(Shape::Matrix(dimension.clone(), dimension))
+            }
+            RawExpr::StandardBasis { index, dimension } => {
+                let dimension = self.implicit_dimension(*dimension);
+                let index_value = self.lower_nat(index)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "standard basis index is not linear natural arithmetic".to_owned(),
+                    )
+                })?;
+                self.projections.insert(index.clone(), index_value.clone());
+                self.assert_if_relevant(index_value.ge(1), &[&dimension]);
+                self.assert_if_relevant(index_value.le(&dimension), &[&dimension]);
+                Ok(Shape::Matrix(dimension, Int::from_u64(1)))
+            }
+            RawExpr::ZeroMatrix { rows, cols } => Ok(Shape::Matrix(
+                self.implicit_dimension(*rows),
+                self.implicit_dimension(*cols),
+            )),
             RawExpr::Variable(variable) => {
                 self.variable_types.get(variable).cloned().ok_or_else(|| {
                     ShapeError::InvalidTyping(format!(
@@ -454,11 +663,11 @@ impl ShapeContext<'_> {
                 match (op, shape) {
                     (Monop::Transpose, Shape::Matrix(rows, cols)) => Ok(Shape::Matrix(cols, rows)),
                     (Monop::Inverse, Shape::Matrix(rows, cols)) => {
-                        self.solver.assert(rows.eq(&cols));
+                        self.assert_dimensions_equal(&rows, &cols);
                         Ok(Shape::Matrix(rows, cols))
                     }
                     (Monop::Trace | Monop::Det, Shape::Matrix(rows, cols)) => {
-                        self.solver.assert(rows.eq(cols));
+                        self.assert_dimensions_equal(&rows, &cols);
                         Ok(Shape::Real)
                     }
                     (Monop::Norm1 | Monop::Norm2 | Monop::NormInfty | Monop::NormFrob, _) => {
@@ -487,7 +696,7 @@ impl ShapeContext<'_> {
                 self.infer(exponent)?;
                 let shape = self.infer(base)?;
                 if let Shape::Matrix(rows, cols) = &shape {
-                    self.solver.assert(rows.eq(cols));
+                    self.assert_dimensions_equal(rows, cols);
                 }
                 Ok(shape)
             }
@@ -552,8 +761,8 @@ impl ShapeContext<'_> {
                         "sequence upper bound is not linear natural arithmetic".to_owned(),
                     )
                 })?;
-                self.solver.assert(from.ge(1));
-                self.solver.assert(from.le(&to));
+                self.assert_if_relevant(from.ge(1), &[&from]);
+                self.assert_if_relevant(from.le(&to), &[&from, &to]);
                 let lengths =
                     indexed_sequence_lengths(body, &range.index_variable, self.variable_types)?;
                 if lengths.is_empty() {
@@ -562,15 +771,17 @@ impl ShapeContext<'_> {
                     ));
                 }
                 for length in lengths {
-                    self.solver.assert(to.le(length));
+                    self.assert_if_relevant(to.le(&length), &[&to, &length]);
                 }
-                self.projections.insert(range.from.clone(), from);
-                self.projections.insert(range.to.clone(), to);
+                if !self.contextual {
+                    self.projections.insert(range.from.clone(), from);
+                    self.projections.insert(range.to.clone(), to);
+                }
                 let shape = self.infer(body)?;
                 if matches!(op, SeqOp::Prod)
                     && let Shape::Matrix(rows, cols) = &shape
                 {
-                    self.solver.assert(rows.eq(cols));
+                    self.assert_dimensions_equal(rows, cols);
                 }
                 Ok(shape)
             }
@@ -618,8 +829,8 @@ impl ShapeContext<'_> {
                     .insert(expected_rows.clone(), row_value.clone());
                 self.projections
                     .insert(expected_cols.clone(), col_value.clone());
-                self.solver.assert(rows.eq(row_value));
-                self.solver.assert(cols.eq(col_value));
+                self.assert_dimensions_equal(rows, &row_value);
+                self.assert_dimensions_equal(cols, &col_value);
             }
             (Shape::Seq(element, length), TypeExpr::Seq(expected_element, expected_length)) => {
                 let RawExpr::Type(expected_element) = &expected_element.raw else {
@@ -634,10 +845,10 @@ impl ShapeContext<'_> {
                 })?;
                 self.projections
                     .insert(expected_length.clone(), length_value.clone());
-                self.solver.assert(length.eq(length_value));
+                self.assert_dimensions_equal(length, &length_value);
                 self.constrain_shape_type(element, expected_element)?;
             }
-            _ => self.solver.assert(Bool::from_bool(false)),
+            _ => self.assert_typing_failure(actual),
         }
         Ok(Shape::Bool)
     }
@@ -667,15 +878,15 @@ impl ShapeContext<'_> {
                     .insert(expected_rows.clone(), row_value.clone());
                 self.projections
                     .insert(expected_cols.clone(), col_value.clone());
-                self.solver.assert(rows.eq(row_value));
-                self.solver.assert(cols.eq(col_value));
+                self.assert_dimensions_equal(rows, &row_value);
+                self.assert_dimensions_equal(cols, &col_value);
                 Ok(())
             }
             (Shape::Seq(_, _), TypeExpr::Seq(_, _)) => Err(ShapeError::Unsupported(
                 "nested sequence constraints are not supported".to_owned(),
             )),
             _ => {
-                self.solver.assert(Bool::from_bool(false));
+                self.assert_typing_failure(actual);
                 Ok(())
             }
         }
@@ -684,12 +895,13 @@ impl ShapeContext<'_> {
     fn add_shapes(&mut self, left: Shape, right: Shape) -> Result<Shape, ShapeError> {
         match (&left, &right) {
             (Shape::Matrix(lr, lc), Shape::Matrix(rr, rc)) => {
-                self.solver.assert(lr.eq(rr));
-                self.solver.assert(lc.eq(rc));
+                self.assert_dimensions_equal(lr, rr);
+                self.assert_dimensions_equal(lc, rc);
                 Ok(left)
             }
             (Shape::Matrix(_, _), _) | (_, Shape::Matrix(_, _)) => {
-                self.solver.assert(Bool::from_bool(false));
+                self.assert_typing_failure(&left);
+                self.assert_typing_failure(&right);
                 Ok(left)
             }
             _ => scalar_shape_lub(left, right),
@@ -699,7 +911,7 @@ impl ShapeContext<'_> {
     fn multiply_shapes(&mut self, left: Shape, right: Shape) -> Result<Shape, ShapeError> {
         match (left, right) {
             (Shape::Matrix(rows, inner), Shape::Matrix(right_inner, cols)) => {
-                self.solver.assert(inner.eq(right_inner));
+                self.assert_dimensions_equal(&inner, &right_inner);
                 Ok(Shape::Matrix(rows, cols))
             }
             (matrix @ Shape::Matrix(_, _), scalar) | (scalar, matrix @ Shape::Matrix(_, _)) => {
@@ -713,15 +925,16 @@ impl ShapeContext<'_> {
     fn equal_shapes(&mut self, left: &Shape, right: &Shape) {
         match (left, right) {
             (Shape::Matrix(lr, lc), Shape::Matrix(rr, rc)) => {
-                self.solver.assert(lr.eq(rr));
-                self.solver.assert(lc.eq(rc));
+                self.assert_dimensions_equal(lr, rr);
+                self.assert_dimensions_equal(lc, rc);
             }
             (Shape::Matrix(rows, cols), scalar) | (scalar, Shape::Matrix(rows, cols)) => {
                 if require_scalar(scalar).is_ok() {
-                    self.solver.assert(rows.eq(1));
-                    self.solver.assert(cols.eq(1));
+                    self.assert_dimensions_equal(rows, &Int::from_u64(1));
+                    self.assert_dimensions_equal(cols, &Int::from_u64(1));
                 } else {
-                    self.solver.assert(Bool::from_bool(false));
+                    self.assert_typing_failure(left);
+                    self.assert_typing_failure(right);
                 }
             }
             _ => {}
@@ -731,8 +944,8 @@ impl ShapeContext<'_> {
     fn division_scalar(&mut self, shape: Shape) -> Shape {
         match shape {
             Shape::Matrix(rows, cols) => {
-                self.solver.assert(rows.eq(1));
-                self.solver.assert(cols.eq(1));
+                self.assert_dimensions_equal(&rows, &Int::from_u64(1));
+                self.assert_dimensions_equal(&cols, &Int::from_u64(1));
                 Shape::Real
             }
             shape => shape,
@@ -860,7 +1073,17 @@ fn collect_indexed_sequence_lengths(
             };
             lengths.insert(variable.clone(), length.clone());
         }
-        RawExpr::Type(_) | RawExpr::Hole | RawExpr::Variable(_) | RawExpr::NatLiteral(_) => {}
+        RawExpr::StandardBasis {
+            index: basis_index, ..
+        } => {
+            collect_indexed_sequence_lengths(basis_index, index, variable_types, lengths)?;
+        }
+        RawExpr::IdentityMatrix { .. }
+        | RawExpr::ZeroMatrix { .. }
+        | RawExpr::Type(_)
+        | RawExpr::Hole
+        | RawExpr::Variable(_)
+        | RawExpr::NatLiteral(_) => {}
         RawExpr::Matrix(matrix) => {
             for element in &matrix.elements {
                 collect_indexed_sequence_lengths(element, index, variable_types, lengths)?;
@@ -950,6 +1173,7 @@ fn collect_variables_bound(
                 variables.insert(variable.clone());
             }
         }
+        RawExpr::StandardBasis { index, .. } => collect_variables_bound(index, variables, bound),
         RawExpr::Type(ty) => collect_type_dimension_variables(ty, variables),
         RawExpr::Matrix(matrix) => {
             for expression in &matrix.elements {
@@ -990,7 +1214,10 @@ fn collect_variables_bound(
             body_bound.insert(range.index_variable.clone());
             collect_variables_bound(body, variables, &body_bound);
         }
-        RawExpr::Hole | RawExpr::NatLiteral(_) => {}
+        RawExpr::IdentityMatrix { .. }
+        | RawExpr::ZeroMatrix { .. }
+        | RawExpr::Hole
+        | RawExpr::NatLiteral(_) => {}
     }
 }
 
@@ -1015,6 +1242,7 @@ fn collect_range_bound_variables(expression: &Expr<()>, variables: &mut BTreeSet
             collect_variables(&range.to, variables);
             collect_range_bound_variables(body, variables);
         }
+        RawExpr::StandardBasis { index, .. } => collect_range_bound_variables(index, variables),
         RawExpr::Matrix(matrix) => {
             for element in &matrix.elements {
                 collect_range_bound_variables(element, variables);
@@ -1047,7 +1275,12 @@ fn collect_range_bound_variables(expression: &Expr<()>, variables: &mut BTreeSet
                 collect_range_bound_variables(expression, variables);
             }
         }
-        RawExpr::Type(_) | RawExpr::Hole | RawExpr::Variable(_) | RawExpr::NatLiteral(_) => {}
+        RawExpr::IdentityMatrix { .. }
+        | RawExpr::ZeroMatrix { .. }
+        | RawExpr::Type(_)
+        | RawExpr::Hole
+        | RawExpr::Variable(_)
+        | RawExpr::NatLiteral(_) => {}
     }
 }
 
@@ -1107,9 +1340,14 @@ fn model_u64(model: &z3::Model, expression: &Int) -> Result<u64, ShapeError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use ratex_parser::parse;
 
-    use super::{ShapeError, extract_environment_iterator};
+    use super::{
+        ShapeError, collect_implicit_dimensions, extract_environment_iterator,
+        extract_environment_iterator_with_context,
+    };
     use crate::{Annotation, Expr, Matrix, RawExpr, SeqType, Type, Variable, from_tex};
 
     fn expression(tex: &str) -> Expr<()> {
@@ -1276,6 +1514,169 @@ mod tests {
         assert_eq!(a_rows, 2);
         assert_eq!(b_cols, 3);
         assert_eq!(a_cols, b_rows);
+    }
+
+    #[test]
+    fn contextual_constants_have_independent_dimensions() {
+        let assumptions = [
+            expression(r"A \in \mathbb{R}^{2 \times 2}"),
+            expression(r"B \in \mathbb{R}^{3 \times 3}"),
+            expression(r"C \in \mathbb{R}^{2 \times 3}"),
+            expression(r"D \in \mathbb{R}^{3}"),
+        ];
+        let contexts = [
+            expression("A = I"),
+            expression("B = I"),
+            expression(r"C + \mathbb{0} = C"),
+            expression(r"D + \mathbb{0} = D"),
+        ];
+        let mut environments = extract_environment_iterator_with_context(
+            assumptions.into_iter(),
+            contexts.iter().cloned(),
+            3,
+        )
+        .unwrap();
+        let environment = environments.next().unwrap().unwrap();
+        assert!(environments.next().is_none());
+
+        let values = contexts
+            .iter()
+            .map(|expression| {
+                let mut dimensions = std::collections::BTreeSet::new();
+                collect_implicit_dimensions(expression, &mut dimensions);
+                dimensions
+                    .into_iter()
+                    .map(|dimension| environment.implicit_dimensions[&dimension])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], vec![2]);
+        assert_eq!(values[1], vec![3]);
+        assert_eq!(
+            values[2].iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([2, 3])
+        );
+        assert_eq!(
+            values[3].iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([1, 3])
+        );
+    }
+
+    #[test]
+    fn contextual_identity_rejects_a_rectangular_matrix() {
+        assert!(matches!(
+            extract_environment_iterator_with_context(
+                [expression(r"A \in \mathbb{R}^{2 \times 3}")].into_iter(),
+                [expression("A = I")].into_iter(),
+                3,
+            ),
+            Err(ShapeError::InvalidTyping(_))
+        ));
+        assert!(matches!(
+            extract_environment_iterator(
+                [
+                    expression(r"A \in \mathbb{R}^{2 \times 3}"),
+                    expression("A = I"),
+                ]
+                .into_iter(),
+                3,
+            ),
+            Err(ShapeError::Unsat(_))
+        ));
+    }
+
+    #[test]
+    fn implicit_dimensions_are_enumerated_and_blocked() {
+        let context = expression("I = I");
+        let mut dimensions = BTreeSet::new();
+        collect_implicit_dimensions(&context, &mut dimensions);
+        let dimensions: Vec<_> = dimensions.into_iter().collect();
+        let values: Vec<_> = extract_environment_iterator_with_context(
+            std::iter::empty::<Expr<()>>(),
+            [context].into_iter(),
+            3,
+        )
+        .unwrap()
+        .map(|environment| {
+            let environment = environment.unwrap();
+            dimensions
+                .iter()
+                .map(|dimension| environment.implicit_dimensions[dimension])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+        assert_eq!(values, vec![vec![1, 1], vec![2, 2], vec![3, 3]]);
+    }
+
+    #[test]
+    fn ordinary_context_does_not_constrain_environment_shapes() {
+        let environments = extract_environment_iterator_with_context(
+            [expression("A = A"), expression("B = B")].into_iter(),
+            [expression("A B = A")].into_iter(),
+            2,
+        )
+        .unwrap();
+        assert!(environments.map(Result::unwrap).any(|environment| {
+            let Type::Matrix(_, a_cols) = environment.types[&Variable::new("A")] else {
+                panic!("expected matrix A")
+            };
+            let Type::Matrix(b_rows, _) = environment.types[&Variable::new("B")] else {
+                panic!("expected matrix B")
+            };
+            a_cols != b_rows
+        }));
+    }
+
+    #[test]
+    fn standard_basis_index_is_checked_contextually() {
+        let valid = extract_environment_iterator_with_context(
+            [
+                expression(r"v \in \mathbb{R}^{3}"),
+                expression(r"i \in \mathbb{N}"),
+                expression("i = 2"),
+            ]
+            .into_iter(),
+            [expression("v = e_i")].into_iter(),
+            3,
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+        assert_eq!(valid.equalities[&expression("i")], 2);
+
+        let symbolic_index = expression("e_{i+1}");
+        let symbolic = extract_environment_iterator_with_context(
+            [
+                expression(r"v \in \mathbb{R}^{3}"),
+                expression(r"i \in \mathbb{N}"),
+                expression("i = 1"),
+            ]
+            .into_iter(),
+            [Expr::new(RawExpr::CmpChain(crate::CmpChain {
+                start: expression("v"),
+                assertions: vec![(crate::Cmp::Eq, symbolic_index.clone())],
+            }))]
+            .into_iter(),
+            3,
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+        let RawExpr::StandardBasis { index, .. } = &symbolic_index.raw else {
+            panic!("expected standard basis vector")
+        };
+        assert_eq!(symbolic.equalities[&index.without_metadata()], 2);
+
+        assert!(matches!(
+            extract_environment_iterator_with_context(
+                [expression(r"v \in \mathbb{R}^{2}")].into_iter(),
+                [expression("v = e_3")].into_iter(),
+                3,
+            ),
+            Err(ShapeError::InvalidTyping(_))
+        ));
     }
 
     #[test]
