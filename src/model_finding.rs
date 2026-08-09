@@ -754,8 +754,19 @@ pub(crate) fn render_md(node: &Node) -> String {
                         let number = start + u32::try_from(offset).unwrap();
                         let mut rendered = format!("{number}. {first}");
                         for child in blocks {
-                            rendered.push_str("\n\n   ");
-                            rendered.push_str(&child.replace('\n', "\n   "));
+                            let child = child
+                                .lines()
+                                .map(|line| {
+                                    if line.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("   {line}")
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            rendered.push_str("\n\n");
+                            rendered.push_str(&child);
                         }
                         rendered
                     })
