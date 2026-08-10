@@ -7,7 +7,10 @@ use markdown::{
     Constructs, ParseOptions,
     mdast::{Heading, InlineMath, List, ListItem, Node, Paragraph, Root, Text},
 };
-use z3::{Model as Z3Model, SatResult, Solver, ast::Dynamic};
+use z3::{
+    Model as Z3Model, SatResult, Solver,
+    ast::{Algebraic, Dynamic, Real},
+};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
@@ -399,37 +402,66 @@ fn scalar_model_value(model: &Z3Model, value: Dynamic) -> Result<Expr<()>, Model
         let Some(value) = model.get_const_interp(&value) else {
             return Ok(Expr::new(RawExpr::Hole));
         };
-        let (numerator, denominator) =
-            value
-                .as_rational()
-                .ok_or(ModelFindingError::UnsupportedModel(
-                    "algebraic irrational model values are not supported",
-                ))?;
-        if denominator <= 0 {
-            return Err(ModelFindingError::ModelValueOutOfRange(
-                "Z3 returned a rational with a nonpositive denominator",
-            ));
-        }
-        let numerator = signed_integer(numerator);
-        if denominator == 1 {
-            Ok(numerator)
+        if let Some((numerator, denominator)) = value.as_rational() {
+            rational_expression(numerator, denominator)
         } else {
-            Ok(Expr::new(RawExpr::Binop(
-                Binop::Div,
-                numerator,
-                Expr::new(RawExpr::NatLiteral(denominator.try_into().map_err(
-                    |_| {
-                        ModelFindingError::ModelValueOutOfRange(
-                            "rational denominator does not fit in u64",
-                        )
-                    },
-                )?)),
-            )))
+            square_root_expression(value)
         }
     } else {
         Err(ModelFindingError::UnsupportedModel(
             "model extraction requires an integer or real scalar",
         ))
+    }
+}
+
+fn square_root_expression(value: Real) -> Result<Expr<()>, ModelFindingError> {
+    let algebraic = Algebraic::try_from(value).map_err(|_| {
+        ModelFindingError::UnsupportedModel("real model value is not a concrete algebraic number")
+    })?;
+    let squared: Real = algebraic.power(2).into();
+    let (numerator, denominator) =
+        squared
+            .as_rational()
+            .ok_or(ModelFindingError::UnsupportedModel(
+                "algebraic model value is not a square root of a supported rational",
+            ))?;
+    let root = Expr::new(RawExpr::Binop(
+        Binop::Power,
+        rational_expression(numerator, denominator)?,
+        Expr::new(RawExpr::Binop(
+            Binop::Div,
+            Expr::new(RawExpr::NatLiteral(1)),
+            Expr::new(RawExpr::NatLiteral(2)),
+        )),
+    ));
+    if algebraic.is_negative() {
+        Ok(Expr::new(RawExpr::Monop(Monop::Neg, root)))
+    } else {
+        Ok(root)
+    }
+}
+
+fn rational_expression(numerator: i64, denominator: i64) -> Result<Expr<()>, ModelFindingError> {
+    if denominator <= 0 {
+        return Err(ModelFindingError::ModelValueOutOfRange(
+            "Z3 returned a rational with a nonpositive denominator",
+        ));
+    }
+    let numerator = signed_integer(numerator);
+    if denominator == 1 {
+        Ok(numerator)
+    } else {
+        Ok(Expr::new(RawExpr::Binop(
+            Binop::Div,
+            numerator,
+            Expr::new(RawExpr::NatLiteral(denominator.try_into().map_err(
+                |_| {
+                    ModelFindingError::ModelValueOutOfRange(
+                        "rational denominator does not fit in u64",
+                    )
+                },
+            )?)),
+        )))
     }
 }
 
@@ -804,6 +836,7 @@ mod tests {
     };
 
     use expect_test::expect;
+    use ratex_parser::parse;
     use z3::{
         SatResult, Solver,
         ast::{Int, Real},
@@ -1104,6 +1137,64 @@ Model
             panic!("expected an equality")
         };
         assert!(matches!(equality.assertions[0].1.raw, RawExpr::Hole));
+    }
+
+    #[test]
+    fn square_root_model_values_are_extracted_as_half_powers() {
+        fn real_rational(numerator: i64, denominator: i64) -> Real {
+            Real::from_int(&Int::from_i64(numerator)) / Real::from_int(&Int::from_i64(denominator))
+        }
+
+        for (numerator, denominator, positive, expected) in [
+            (2, 1, true, r"2^{\frac{1}{2}}"),
+            (2, 1, false, r"-2^{\frac{1}{2}}"),
+            (1, 2, true, r"\left(\frac{1}{2}\right)^{\frac{1}{2}}"),
+        ] {
+            let x = Real::new_const("x");
+            let solver = Solver::new();
+            solver.assert((&x * &x).eq(real_rational(numerator, denominator)));
+            if positive {
+                solver.assert(x.gt(real_rational(0, 1)));
+            } else {
+                solver.assert(x.lt(real_rational(0, 1)));
+            }
+            assert_eq!(solver.check(), SatResult::Sat);
+
+            let environment = Environment {
+                types: HashMap::from([(Variable::new("x"), Type::Real)]),
+                ..Environment::default()
+            };
+            let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+            let RawExpr::CmpChain(equality) = &extracted[0].raw else {
+                panic!("expected an equality")
+            };
+            let value = &equality.assertions[0].1;
+            assert_eq!(value.as_latex().to_string(), expected);
+            assert_eq!(
+                crate::from_tex::expr(&parse(expected).unwrap()).unwrap(),
+                *value
+            );
+        }
+    }
+
+    #[test]
+    fn other_algebraic_model_values_remain_unsupported() {
+        let x = Real::new_const("x");
+        let solver = Solver::new();
+        solver.assert((&x * &x * &x).eq(Real::from_int(&Int::from_i64(2))));
+        solver.assert(x.gt(Real::from_int(&Int::from_i64(0))));
+        assert_eq!(solver.check(), SatResult::Sat);
+
+        let environment = Environment {
+            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            ..Environment::default()
+        };
+        assert_eq!(
+            extract_model(&environment, &solver.get_model().unwrap()).unwrap_err(),
+            ModelFindingError::UnsupportedModel(
+                "algebraic model value is not a square root of a supported rational"
+            )
+        );
     }
 
     #[test]

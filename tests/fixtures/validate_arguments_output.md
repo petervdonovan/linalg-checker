@@ -13,7 +13,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 2. $x = 0$
 
@@ -31,7 +31,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 
 # Matrix argument
@@ -49,7 +49,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 2. $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
@@ -76,7 +76,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 2. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
 
@@ -87,7 +87,7 @@
 
    - $d = 1$
    - $n = 1$
-   - $\vec{z}_{1} = \begin{bmatrix}-1\end{bmatrix}$
+   - $\vec{z}_{1} = \begin{bmatrix}2\end{bmatrix}$
    </details>
 
 # Negating an inequality
@@ -107,8 +107,8 @@
 
    The negation of $-x < -y$ is satisfied by:
 
-   - $x = 0$
-   - $y = \frac{1}{2}$
+   - $x = \frac{-1}{2}$
+   - $y = 0$
    </details>
 2. $-x > -y$
 
@@ -135,7 +135,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 2. $I = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
@@ -144,7 +144,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 3. $\mathbb{0} = \begin{bmatrix}0 & 0\end{bmatrix}$
 
@@ -153,7 +153,7 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
@@ -162,15 +162,13 @@
 
    No counterexamples found up to a maximum dimension of 2.
 
-   No tracked premises appeared in the unsatisfiable cores.
+   No premises seemed necessary to show this.
    </details>
 
 # One-sided orthogonality
 
 ## Assumptions
 
-- $U \in \mathbb{R}^{2}$
-- $U = \begin{bmatrix}1 \\ 0\end{bmatrix}$
 - $U^\top U = I$
 
 ## Steps
@@ -182,5 +180,5 @@
 
    The negation of $U U^\top = I$ is satisfied by:
 
-   - $U = \begin{bmatrix}1 \\ 0\end{bmatrix}$
+   - $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
    </details>

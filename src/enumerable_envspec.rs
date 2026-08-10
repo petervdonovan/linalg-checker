@@ -52,8 +52,8 @@ pub struct EnvironmentIterator {
     dimensions: Vec<Int>,
     known_equalities: HashMap<Expr<()>, u64>,
     projections: Vec<(Expr<()>, Int)>,
-    dim_limit: u64,
-    max_dimension: u64,
+    dimension_sum: u64,
+    max_dimension_sum: u64,
     dimensionless_yielded: bool,
     finished: bool,
 }
@@ -117,6 +117,12 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
         .chain(implicit_dimensions.values().cloned())
         .collect();
     let finished = !dimensions.is_empty() && max_dimension == 0;
+    let dimension_count = u64::try_from(dimensions.len()).map_err(|_| {
+        ShapeError::Unsupported("too many environment dimensions to enumerate".to_owned())
+    })?;
+    let max_dimension_sum = dimension_count.checked_mul(max_dimension).ok_or_else(|| {
+        ShapeError::Unsupported("maximum environment dimension sum overflows u64".to_owned())
+    })?;
     let mut iterator = EnvironmentIterator {
         solver,
         variable_types,
@@ -124,13 +130,17 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
         dimensions,
         known_equalities,
         projections,
-        dim_limit: 1,
-        max_dimension,
+        dimension_sum: dimension_count,
+        max_dimension_sum,
         dimensionless_yielded: false,
         finished,
     };
     if !iterator.dimensions.is_empty() && !iterator.finished {
-        iterator.push_dim_limit();
+        let max_dimension = Int::from_u64(max_dimension);
+        for dimension in &iterator.dimensions {
+            iterator.solver.assert(dimension.le(&max_dimension));
+        }
+        iterator.push_dimension_sum();
     }
     Ok(iterator)
 }
@@ -255,18 +265,10 @@ fn check_contextual_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
 }
 
 impl EnvironmentIterator {
-    fn push_dim_limit(&mut self) {
+    fn push_dimension_sum(&mut self) {
         self.solver.push();
-        let limit = Int::from_u64(self.dim_limit);
-        for dimension in &self.dimensions {
-            self.solver.assert(dimension.le(&limit));
-        }
-        let boundary: Vec<_> = self
-            .dimensions
-            .iter()
-            .map(|dimension| dimension.eq(&limit))
-            .collect();
-        self.solver.assert(Bool::or(&boundary));
+        self.solver
+            .assert(Int::add(&self.dimensions).eq(Int::from_u64(self.dimension_sum)));
     }
 
     fn environment_from_model(&self, model: &z3::Model) -> Result<Environment, ShapeError> {
@@ -289,6 +291,16 @@ impl EnvironmentIterator {
                 .insert(expression.clone(), model_u64(model, projection)?);
         }
         Ok(environment)
+    }
+
+    fn advance_dimension_sum(&mut self) {
+        self.solver.pop(1);
+        if self.dimension_sum == self.max_dimension_sum {
+            self.finished = true;
+        } else {
+            self.dimension_sum = self.dimension_sum.checked_add(1).unwrap();
+            self.push_dimension_sum();
+        }
     }
 }
 
@@ -329,28 +341,25 @@ impl Iterator for EnvironmentIterator {
                             return Some(Err(error));
                         }
                     };
-                    let blocker: Vec<_> = self
+                    let blocker = self
                         .dimensions
                         .iter()
                         .chain(self.projections.iter().map(|(_, value)| value))
-                        .map(|dimension| {
+                        .map(|expression| {
                             let value = model
-                                .eval(dimension, false)
+                                .eval(expression, false)
                                 .expect("environment dimension must have a model value");
-                            dimension.eq(value).not()
+                            expression.eq(value).not()
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
                     self.solver.assert(Bool::or(&blocker));
                     return Some(Ok(environment));
                 }
                 SatResult::Unsat => {
-                    self.solver.pop(1);
-                    if self.dim_limit == self.max_dimension {
-                        self.finished = true;
+                    self.advance_dimension_sum();
+                    if self.finished {
                         return None;
                     }
-                    self.dim_limit = self.dim_limit.checked_add(1).unwrap();
-                    self.push_dim_limit();
                 }
                 SatResult::Unknown => {
                     self.finished = true;
@@ -1370,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn enumerates_by_increasing_dimension_limit() {
+    fn enumerates_by_increasing_total_dimension() {
         let mut environments = environments(&[r"A \in \mathbb{R}^{n \times d + p}"]);
         let first = environments.next().unwrap().unwrap();
         assert_eq!(first.types[&Variable::new("A")], Type::Matrix(1, 1));
@@ -1388,6 +1397,37 @@ mod tests {
                 .iter()
                 .all(|ty| matches!(ty, Type::Matrix(rows, cols) if (*rows).max(*cols) == 2))
         );
+    }
+
+    #[test]
+    fn enumeration_extends_coordinatewise_dimension_order() {
+        let shapes = extract_environment_iterator([expression("U = U")].into_iter(), 2)
+            .unwrap()
+            .map(|environment| {
+                let environment = environment.unwrap();
+                let Type::Matrix(rows, cols) = environment.types[&Variable::new("U")] else {
+                    panic!("expected a matrix")
+                };
+                (rows, cols)
+            })
+            .collect::<Vec<_>>();
+
+        for (left_index, left) in shapes.iter().enumerate() {
+            for (right_index, right) in shapes.iter().enumerate() {
+                if left.0 <= right.0 && left.1 <= right.1 && left != right {
+                    assert!(left_index < right_index, "{left:?} must precede {right:?}");
+                }
+            }
+        }
+        let tall = shapes
+            .iter()
+            .position(|shape| *shape == (2, 1))
+            .expect("missing 2 by 1 matrix environment");
+        let square = shapes
+            .iter()
+            .position(|shape| *shape == (2, 2))
+            .expect("missing 2 by 2 matrix environment");
+        assert!(tall < square);
     }
 
     #[test]

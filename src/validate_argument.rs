@@ -144,6 +144,9 @@ impl Argument {
                 EnvironmentResult::Unsat => {}
                 EnvironmentResult::Unknown => assumption_unknown = true,
             }
+            if self.steps.iter().all(ArgumentStep::has_counterexample) {
+                break;
+            }
         }
 
         if satisfiable_assumption_count == 0 && !assumption_unknown {
@@ -161,9 +164,9 @@ impl Argument {
         assert_environment_equalities(&solver, &environment)?;
 
         let mut tracked = Vec::new();
-        for assumption in &self.assumptions {
+        for (index, assumption) in self.assumptions.iter().enumerate() {
             let assertion = lower_boolean(&environment, assumption)?;
-            let tracker = Bool::fresh_const("argument_assumption");
+            let tracker = Bool::new_const(format!("argument_assumption_{index}"));
             solver.assert_and_track(assertion, &tracker);
             tracked.push((tracker, assumption.clone()));
         }
@@ -236,7 +239,7 @@ impl Argument {
                         environment: Rc::clone(&environment),
                         supporting_facts,
                     });
-                    track_step(&mut solver, assertion, sentence, &mut tracked);
+                    track_step(&mut solver, index, assertion, sentence, &mut tracked);
                 }
                 SatResult::Unknown => {
                     solver.pop(1);
@@ -246,7 +249,7 @@ impl Argument {
                         .push(StepCheck::Unknown {
                             environment: Some(Rc::clone(&environment)),
                         });
-                    track_step(&mut solver, assertion, sentence, &mut tracked);
+                    track_step(&mut solver, index, assertion, sentence, &mut tracked);
                 }
             }
         }
@@ -310,11 +313,12 @@ fn assert_natural_constraints(
 
 fn track_step(
     solver: &mut Solver,
+    index: usize,
     assertion: Bool,
     sentence: Expr<()>,
     tracked: &mut Vec<(Bool, Expr<()>)>,
 ) {
-    let tracker = Bool::fresh_const("argument_step");
+    let tracker = Bool::new_const(format!("argument_step_{index}"));
     solver.assert_and_track(assertion, &tracker);
     tracked.push((tracker, sentence));
 }
@@ -558,7 +562,7 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
         .cloned()
         .collect();
     let explanation = if supporting_facts.is_empty() {
-        "No tracked premises appeared in the unsatisfiable cores.".to_owned()
+        "No premises seemed necessary to show this.".to_owned()
     } else {
         format!(
             "This may follow from the following facts:\n\n{}",

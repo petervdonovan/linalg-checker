@@ -143,7 +143,9 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
             Precedence::Comparison
         }
         crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
-        crate::RawExpr::Finop(Finop::Times, _) => Precedence::Multiplication,
+        crate::RawExpr::Finop(Finop::Times, _) | crate::RawExpr::Binop(Binop::Div, _, _) => {
+            Precedence::Multiplication
+        }
         crate::RawExpr::Monop(Monop::Neg, _) => Precedence::Prefix,
         crate::RawExpr::Monop(Monop::Inverse | Monop::Transpose, _)
         | crate::RawExpr::Binop(Binop::Power, _, _) => Precedence::Power,
@@ -729,10 +731,10 @@ mod tests {
         };
 
         expect![
-            "\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}\nx \\left(-y\\right)"
+            "\\left(x + y\\right) z\n\\left(x + y\\right)^{2}\n-\\left(x + y\\right)\n\\left(x + y\\right)^{-1}\nx \\left(-y\\right)\n\\left(\\frac{1}{2}\\right)^{\\frac{1}{2}}"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             as_latex(RawExpr::Finop(
                 Finop::Times,
                 vec![sum(), variable_expr("z")],
@@ -750,6 +752,19 @@ mod tests {
                     variable_expr("x"),
                     Expr::new(RawExpr::Monop(Monop::Neg, variable_expr("y"))),
                 ],
+            )),
+            as_latex(RawExpr::Binop(
+                Binop::Power,
+                Expr::new(RawExpr::Binop(
+                    Binop::Div,
+                    Expr::new(RawExpr::NatLiteral(1)),
+                    Expr::new(RawExpr::NatLiteral(2)),
+                )),
+                Expr::new(RawExpr::Binop(
+                    Binop::Div,
+                    Expr::new(RawExpr::NatLiteral(1)),
+                    Expr::new(RawExpr::NatLiteral(2)),
+                )),
             )),
         ));
     }
