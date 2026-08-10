@@ -65,3 +65,14 @@
 ## Steps
 
 1. $U U^\top = I$
+
+# Logic-chain preprocessing
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x = 0$
+
+## Steps
+
+1. $x = 0 \iff x \le 0 \implies x = x$

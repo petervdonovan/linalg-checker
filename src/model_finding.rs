@@ -16,6 +16,7 @@ use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
     enumerable_envspec::ShapeError,
     to_z3::{ToZ3Error, Z3Object, lower_sequence_element, to_z3},
+    visit_mut::VisitContext,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,8 +268,9 @@ pub(crate) fn solve_environment<'a>(
 pub(crate) fn lower_boolean(
     environment: &Environment,
     assertion: &Expr<()>,
+    context: VisitContext,
 ) -> Result<z3::ast::Bool, ModelFindingError> {
-    let Z3Object::Z3(assertion) = to_z3(environment, assertion)? else {
+    let Z3Object::Z3(assertion) = to_z3(environment, assertion, context)? else {
         return Err(ModelFindingError::NonBooleanAssertion);
     };
     assertion
@@ -281,7 +283,13 @@ fn assert_boolean(
     environment: &Environment,
     assertion: &Expr<()>,
 ) -> Result<(), ModelFindingError> {
-    solver.assert(lower_boolean(environment, assertion)?);
+    solver.assert(lower_boolean(
+        environment,
+        assertion,
+        VisitContext {
+            logical_polarity: true,
+        },
+    )?);
     Ok(())
 }
 
@@ -294,7 +302,13 @@ pub(crate) fn assert_environment_equalities(
             start: expression.clone(),
             assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
         }));
-        match lower_boolean(environment, &equality) {
+        match lower_boolean(
+            environment,
+            &equality,
+            VisitContext {
+                logical_polarity: true,
+            },
+        ) {
             Ok(equality) => solver.assert(equality),
             Err(ModelFindingError::Lowering(ToZ3Error::MissingVariableType(_))) => {
                 // Some equalities are compile-time facts used only to concretize syntax.
@@ -351,7 +365,16 @@ fn extract_variable(
         )),
         _ => {
             let left = Expr::new(RawExpr::Variable(variable.clone()));
-            let right = z3_object_model_value(model, to_z3(environment, &left)?)?;
+            let right = z3_object_model_value(
+                model,
+                to_z3(
+                    environment,
+                    &left,
+                    VisitContext {
+                        logical_polarity: true,
+                    },
+                )?,
+            )?;
             Ok(vec![model_equality(left, right)])
         }
     }

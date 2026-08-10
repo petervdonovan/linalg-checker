@@ -7,8 +7,11 @@ use std::{
 use z3::ast::{Bool, Int, Real};
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, LogicChain, Matrix, Monop,
-    Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
+    Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
+    deep_clone::deep_clone,
+    logic_lowering::LogicLowering,
+    visit_mut::{VisitContext, VisitMut},
 };
 
 #[derive(Clone)]
@@ -420,8 +423,25 @@ fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
     }
 }
 
-pub fn to_z3<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
-    lower(γ, e)
+/// Lowers an expression after running the ordered core-language preprocessing
+/// pipeline.
+///
+/// `context.logical_polarity` must agree with the logical context in which the
+/// caller uses the returned expression. In particular, callers that pass
+/// negative polarity remain responsible for applying the corresponding Z3
+/// negation; this function does not insert one.
+pub fn to_z3<Metadata: Clone>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+    context: VisitContext,
+) -> Result<Z3Object, ToZ3Error> {
+    let mut expression = deep_clone(expression);
+    preprocess(&mut expression, context);
+    lower(environment, &expression)
+}
+
+fn preprocess<Metadata: Clone>(expression: &mut Expr<Metadata>, context: VisitContext) {
+    LogicLowering.visit_expr_mut(context, expression);
 }
 
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
@@ -479,6 +499,8 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
         RawExpr::Finop(Finop::Times, expressions) => {
             lower_finite(γ, expressions, Mul::mul, "multiplication")
         }
+        RawExpr::Finop(Finop::And, expressions) => lower_boolean_finite(γ, expressions, Finop::And),
+        RawExpr::Finop(Finop::Or, expressions) => lower_boolean_finite(γ, expressions, Finop::Or),
         RawExpr::Matrix(matrix) => {
             let expected_elements = matrix
                 .rows
@@ -499,14 +521,71 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
         }
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
         RawExpr::Seqop(op, range, body) => lower_sequence(γ, *op, range, body),
-        RawExpr::LogicChain(_) => Err(ToZ3Error::Unsupported(
-            "logic chains are not supported by to_z3",
-        )),
+        RawExpr::LogicChain(chain) => lower_logic_chain(γ, chain),
         RawExpr::Monop(_, _)
         | RawExpr::Binop(_, _, _)
         | RawExpr::Triop(_, _, _, _)
         | RawExpr::Finop(_, _) => Err(ToZ3Error::Unsupported(
             "expression is not supported by to_z3",
+        )),
+    }
+}
+
+fn lower_boolean<Metadata>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+) -> Result<Bool, ToZ3Error> {
+    let Z3Object::Z3(expression) = lower(environment, expression)? else {
+        return Err(ToZ3Error::InvalidOperands(
+            "logical operations require Boolean operands",
+        ));
+    };
+    expression.as_bool().ok_or(ToZ3Error::InvalidOperands(
+        "logical operations require Boolean operands",
+    ))
+}
+
+fn lower_boolean_finite<Metadata>(
+    environment: &Environment,
+    expressions: &[Expr<Metadata>],
+    op: Finop,
+) -> Result<Z3Object, ToZ3Error> {
+    if expressions.is_empty() {
+        return Err(ToZ3Error::Empty(match op {
+            Finop::And => "conjunction requires at least one operand",
+            Finop::Or => "disjunction requires at least one operand",
+            _ => unreachable!("lower_boolean_finite only accepts Boolean finite operators"),
+        }));
+    }
+    let expressions = expressions
+        .iter()
+        .map(|expression| lower_boolean(environment, expression))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Z3Object::Z3(match op {
+        Finop::And => Bool::and(&expressions).into(),
+        Finop::Or => Bool::or(&expressions).into(),
+        _ => unreachable!("lower_boolean_finite only accepts Boolean finite operators"),
+    }))
+}
+
+fn lower_logic_chain<Metadata>(
+    environment: &Environment,
+    chain: &LogicChain<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
+    match chain.assertions.as_slice() {
+        [] => Ok(Z3Object::Z3(
+            lower_boolean(environment, &chain.start)?.into(),
+        )),
+        [(Logic::Imp, consequent)] => Ok(Z3Object::Z3(
+            lower_boolean(environment, &chain.start)?
+                .implies(lower_boolean(environment, consequent)?)
+                .into(),
+        )),
+        [(Logic::Iff, _)] => Err(ToZ3Error::Unsupported(
+            "biconditional must be lowered before to_z3",
+        )),
+        _ => Err(ToZ3Error::Unsupported(
+            "multi-edge logic chains must be lowered before to_z3",
         )),
     }
 }
@@ -1073,28 +1152,43 @@ mod tests {
 
     use expect_test::expect;
     use ratex_parser::parse;
-    use z3::{SatResult, Solver, SortKind, ast::Int};
+    use z3::{
+        SatResult, Solver, SortKind,
+        ast::{Bool, Int},
+    };
 
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, SeqType, Type, TypeExpr,
         Variable, from_tex,
         to_z3::{Environment, ToZ3Error, Z3Object, to_z3 as lower_to_z3},
+        visit_mut::VisitContext,
+    };
+
+    const POSITIVE: VisitContext = VisitContext {
+        logical_polarity: true,
+    };
+
+    const NEGATIVE: VisitContext = VisitContext {
+        logical_polarity: false,
     };
 
     fn expression(tex: &str) -> Expr<()> {
         from_tex::expr(&parse(tex).unwrap()).unwrap()
     }
 
-    fn to_z3<Metadata>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
-        lower_to_z3(&environment, &expression).unwrap()
+    fn to_z3<Metadata: Clone>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
+        lower_to_z3(&environment, &expression, POSITIVE).unwrap()
     }
 
-    fn assert_lowering_error<Metadata>(
+    fn assert_lowering_error<Metadata: Clone>(
         environment: Environment,
         expression: Expr<Metadata>,
         expected: ToZ3Error,
     ) {
-        assert_eq!(lower_to_z3(&environment, &expression).err(), Some(expected));
+        assert_eq!(
+            lower_to_z3(&environment, &expression, POSITIVE).err(),
+            Some(expected)
+        );
     }
 
     fn scalar(environment: Environment, expression: Expr<()>) -> z3::ast::Dynamic {
@@ -1441,6 +1535,117 @@ mod tests {
             Expr::<()>::new(RawExpr::Finop(Finop::Plus, vec![])),
             ToZ3Error::Empty("addition requires at least one operand"),
         );
+    }
+
+    #[test]
+    fn test_boolean_finite_operations_and_single_implication() {
+        let environment = Environment {
+            types: ["p", "q", "r"]
+                .into_iter()
+                .map(|name| (Variable::new(name), Type::Bool))
+                .collect(),
+            ..Environment::default()
+        };
+        let actual = scalar(
+            environment,
+            expression(r"p \land (q \lor r) \land (p \implies q)"),
+        )
+        .as_bool()
+        .unwrap();
+        let p = Bool::new_const("p");
+        let q = Bool::new_const("q");
+        let r = Bool::new_const("r");
+        let expected = Bool::and(&[p.clone(), Bool::or(&[q.clone(), r]), p.implies(q)]);
+        let solver = Solver::new();
+        solver.assert(actual.eq(expected).not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_invalid_boolean_operations_return_errors() {
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Finop(Finop::And, Vec::new())),
+            ToZ3Error::Empty("conjunction requires at least one operand"),
+        );
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Finop(
+                Finop::Or,
+                vec![Expr::new(RawExpr::NatLiteral(1))],
+            )),
+            ToZ3Error::InvalidOperands("logical operations require Boolean operands"),
+        );
+    }
+
+    #[test]
+    fn test_public_lowering_preprocesses_logic_chains() {
+        let environment = Environment {
+            types: ["p", "q", "r"]
+                .into_iter()
+                .map(|name| (Variable::new(name), Type::Bool))
+                .collect(),
+            ..Environment::default()
+        };
+        let actual = scalar(environment, expression(r"p \iff q \implies r"))
+            .as_bool()
+            .unwrap();
+        let p = Bool::new_const("p");
+        let q = Bool::new_const("q");
+        let r = Bool::new_const("r");
+        let expected = Bool::and(&[
+            p.clone().implies(q.clone()),
+            q.clone().implies(p),
+            q.implies(r),
+        ]);
+        let solver = Solver::new();
+        solver.assert(actual.eq(expected).not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_core_lowering_rejects_unprocessed_logic_chains() {
+        let environment = Environment {
+            types: ["p", "q", "r"]
+                .into_iter()
+                .map(|name| (Variable::new(name), Type::Bool))
+                .collect(),
+            ..Environment::default()
+        };
+        assert_eq!(
+            super::lower(&environment, &expression(r"p \iff q")).err(),
+            Some(ToZ3Error::Unsupported(
+                "biconditional must be lowered before to_z3"
+            ))
+        );
+        assert_eq!(
+            super::lower(&environment, &expression(r"p \implies q \implies r")).err(),
+            Some(ToZ3Error::Unsupported(
+                "multi-edge logic chains must be lowered before to_z3"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_negative_polarity_does_not_negate_the_result() {
+        let environment = Environment {
+            types: [(Variable::new("p"), Type::Bool)].into_iter().collect(),
+            ..Environment::default()
+        };
+        let expression = expression("p");
+        let Z3Object::Z3(positive) = lower_to_z3(&environment, &expression, POSITIVE).unwrap()
+        else {
+            panic!("expected a Boolean scalar")
+        };
+        let positive = positive.as_bool().unwrap();
+        let Z3Object::Z3(negative) = lower_to_z3(&environment, &expression, NEGATIVE).unwrap()
+        else {
+            panic!("expected a Boolean scalar")
+        };
+        let negative = negative.as_bool().unwrap();
+        let solver = Solver::new();
+        solver.assert(positive.eq(negative).not());
+        assert_eq!(solver.check(), SatResult::Unsat);
     }
 
     #[test]

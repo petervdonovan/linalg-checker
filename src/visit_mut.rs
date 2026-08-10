@@ -34,6 +34,10 @@ impl VisitContext {
 /// The default implementation expects every visited [`Expr`] to be uniquely
 /// owned. It panics if the expression's internal `Rc` is shared.
 pub trait VisitMut<Metadata> {
+    fn side_conditions(&self) -> Vec<Expr<Metadata>> {
+        vec![]
+    }
+
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
         visit_expr_mut(self, context, node);
     }

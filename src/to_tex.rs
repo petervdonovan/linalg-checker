@@ -128,6 +128,8 @@ fn grouped_expr<Metadata>(
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
     Logic,
+    Or,
+    And,
     Comparison,
     Addition,
     Multiplication,
@@ -139,6 +141,8 @@ enum Precedence {
 fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     match &e.raw {
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
+        crate::RawExpr::Finop(Finop::Or, _) => Precedence::Or,
+        crate::RawExpr::Finop(Finop::And, _) => Precedence::And,
         crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf, _, _) => {
             Precedence::Comparison
         }
@@ -337,13 +341,16 @@ where
         if index > 0 {
             write!(f, "{}", finop_separator(op))?;
         }
-        grouped_expr(
-            f,
-            expression,
-            matches!(op, Finop::Times)
-                && (precedence(expression) < Precedence::Multiplication
-                    || matches!(&expression.raw, crate::RawExpr::Monop(Monop::Neg, _))),
-        )?;
+        let grouped = match op {
+            Finop::Times => {
+                precedence(expression) < Precedence::Multiplication
+                    || matches!(&expression.raw, crate::RawExpr::Monop(Monop::Neg, _))
+            }
+            Finop::And => precedence(expression) < Precedence::And,
+            Finop::Or => precedence(expression) < Precedence::Or,
+            _ => false,
+        };
+        grouped_expr(f, expression, grouped)?;
     }
 
     match op {
@@ -428,6 +435,8 @@ fn finop_separator(op: &Finop) -> &'static str {
     match op {
         Finop::Plus => " + ",
         Finop::Times => " ",
+        Finop::And => r" \land ",
+        Finop::Or => r" \lor ",
         Finop::Max | Finop::Min => ", ",
     }
 }

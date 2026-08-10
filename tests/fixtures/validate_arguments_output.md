@@ -182,3 +182,24 @@
 
    - $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
    </details>
+
+# Logic-chain preprocessing
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x = 0$
+
+## Steps
+
+1. $x = 0 \iff x \le 0 \implies x = x$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   This may follow from the following facts:
+
+   - $x = 0$
+   </details>

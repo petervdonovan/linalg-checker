@@ -75,7 +75,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_logic(&mut self) -> Result<Expr<()>, FromTexError> {
-        let start = self.parse_comparison()?;
+        let start = self.parse_or()?;
         let mut assertions = Vec::new();
 
         loop {
@@ -85,7 +85,7 @@ impl<'a> Cursor<'a> {
             };
             self.position += 1;
             self.skip_ignorable();
-            assertions.push((op, self.parse_comparison()?));
+            assertions.push((op, self.parse_or()?));
         }
 
         if assertions.is_empty() {
@@ -95,6 +95,42 @@ impl<'a> Cursor<'a> {
                 start,
                 assertions,
             })))
+        }
+    }
+
+    fn parse_or(&mut self) -> Result<Expr<()>, FromTexError> {
+        let first = self.parse_and()?;
+        let mut expressions = Vec::new();
+        push_associative(&mut expressions, first, FinopKind::Or);
+
+        while matches!(self.current_atom_text(), Some(r"\lor" | r"\vee")) {
+            self.position += 1;
+            let expression = self.parse_and()?;
+            push_associative(&mut expressions, expression, FinopKind::Or);
+        }
+
+        if expressions.len() == 1 {
+            Ok(expressions.pop().unwrap())
+        } else {
+            Ok(Expr::new(RawExpr::Finop(Finop::Or, expressions)))
+        }
+    }
+
+    fn parse_and(&mut self) -> Result<Expr<()>, FromTexError> {
+        let first = self.parse_comparison()?;
+        let mut expressions = Vec::new();
+        push_associative(&mut expressions, first, FinopKind::And);
+
+        while matches!(self.current_atom_text(), Some(r"\land" | r"\wedge")) {
+            self.position += 1;
+            let expression = self.parse_comparison()?;
+            push_associative(&mut expressions, expression, FinopKind::And);
+        }
+
+        if expressions.len() == 1 {
+            Ok(expressions.pop().unwrap())
+        } else {
+            Ok(Expr::new(RawExpr::Finop(Finop::And, expressions)))
         }
     }
 
@@ -922,12 +958,16 @@ fn variable_mut<'a>(
 enum FinopKind {
     Plus,
     Times,
+    And,
+    Or,
 }
 
 fn push_associative(expressions: &mut Vec<Expr<()>>, expression: Expr<()>, kind: FinopKind) {
     match (&expression.raw, kind) {
         (RawExpr::Finop(Finop::Plus, nested), FinopKind::Plus)
-        | (RawExpr::Finop(Finop::Times, nested), FinopKind::Times) => {
+        | (RawExpr::Finop(Finop::Times, nested), FinopKind::Times)
+        | (RawExpr::Finop(Finop::And, nested), FinopKind::And)
+        | (RawExpr::Finop(Finop::Or, nested), FinopKind::Or) => {
             expressions.extend(nested.iter().cloned())
         }
         _ => expressions.push(expression),
@@ -942,7 +982,7 @@ mod tests {
     use ratex_parser::parse;
 
     use super::FromTexError;
-    use crate::{Binop, Expr, RawExpr, Type, TypeExpr};
+    use crate::{Binop, Expr, Finop, RawExpr, Type, TypeExpr};
 
     struct Latex(Expr<()>);
 
@@ -1201,6 +1241,26 @@ mod tests {
             round_trip(r"a \neq b").unwrap(),
             round_trip(r"P \implies Q \iff R").unwrap(),
             round_trip(r"a + b < c d \implies P").unwrap(),
+        ));
+    }
+
+    #[test]
+    fn parses_boolean_finite_operators_with_standard_precedence() {
+        expect!["P \\lor Q \\land R \\lor S\nP \\land \\left(Q \\lor R\\right)"].assert_eq(
+            &format!(
+                "{}\n{}",
+                round_trip(r"P \lor Q \land R \lor S").unwrap(),
+                round_trip(r"P \land (Q \lor R)").unwrap(),
+            ),
+        );
+
+        let parsed = parse(r"P \lor Q \land R \lor S").unwrap();
+        let expression = super::expr(&parsed).unwrap();
+        assert!(matches!(
+            &expression.raw,
+            RawExpr::Finop(Finop::Or, expressions)
+                if expressions.len() == 3
+                    && matches!(expressions[1].raw, RawExpr::Finop(Finop::And, _))
         ));
     }
 

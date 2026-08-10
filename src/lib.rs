@@ -1,11 +1,12 @@
 #![allow(mixed_script_confusables)]
 
+mod deep_clone;
 pub mod enumerable_envspec;
 pub mod find_model;
 pub mod find_model_given_environment;
 pub mod from_tex;
+pub mod logic_lowering;
 mod model_finding;
-pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
 pub mod validate_argument;
@@ -220,6 +221,8 @@ pub enum Finop {
     // Span,
     Plus, // normalize by associativity
     Times,
+    And,
+    Or,
     Max,
     Min,
 }
@@ -354,6 +357,11 @@ pub struct CmpChain<Metadata> {
     pub start: Expr<Metadata>,
     pub assertions: Vec<(Cmp, Expr<Metadata>)>,
 }
+/// A sequence of adjacent logical relationships.
+///
+/// The chain `P implies Q implies R` means `(P implies Q) and
+/// (Q implies R)`. It is neither associative implication nor an assertion
+/// that `P` is true.
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct LogicChain<Metadata> {
     pub start: Expr<Metadata>,

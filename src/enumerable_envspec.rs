@@ -748,6 +748,21 @@ impl ShapeContext<'_> {
                 }
                 Ok(result)
             }
+            RawExpr::Finop(Finop::And | Finop::Or, expressions) => {
+                if expressions.is_empty() {
+                    return Err(ShapeError::InvalidTyping(
+                        "logical finite operations require at least one operand".to_owned(),
+                    ));
+                }
+                for expression in expressions {
+                    if !matches!(self.infer(expression)?, Shape::Bool) {
+                        return Err(ShapeError::InvalidTyping(
+                            "logical operations require Boolean operands".to_owned(),
+                        ));
+                    }
+                }
+                Ok(Shape::Bool)
+            }
             RawExpr::CmpChain(chain) => {
                 let mut previous = self.infer(&chain.start)?;
                 for (_, current) in &chain.assertions {
@@ -758,9 +773,17 @@ impl ShapeContext<'_> {
                 Ok(Shape::Bool)
             }
             RawExpr::LogicChain(chain) => {
-                self.infer(&chain.start)?;
+                if !matches!(self.infer(&chain.start)?, Shape::Bool) {
+                    return Err(ShapeError::InvalidTyping(
+                        "logical operations require Boolean operands".to_owned(),
+                    ));
+                }
                 for (_, expression) in &chain.assertions {
-                    self.infer(expression)?;
+                    if !matches!(self.infer(expression)?, Shape::Bool) {
+                        return Err(ShapeError::InvalidTyping(
+                            "logical operations require Boolean operands".to_owned(),
+                        ));
+                    }
                 }
                 Ok(Shape::Bool)
             }
@@ -1877,6 +1900,14 @@ mod tests {
                 [expression(r"b \in \mathbb{B}"), expression("b + 1 = 2")].into_iter(),
                 10,
             ),
+            Err(ShapeError::InvalidTyping(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_boolean_logical_operands() {
+        assert!(matches!(
+            extract_environment_iterator([expression(r"a \land b")].into_iter(), 2),
             Err(ShapeError::InvalidTyping(_))
         ));
     }

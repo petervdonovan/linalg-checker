@@ -17,6 +17,14 @@ use crate::{
         lower_boolean, parse_expression_item, parse_expression_section, render_md, root,
         root_children, section_start,
     },
+    visit_mut::VisitContext,
+};
+
+const POSITIVE: VisitContext = VisitContext {
+    logical_polarity: true,
+};
+const NEGATIVE: VisitContext = VisitContext {
+    logical_polarity: false,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +173,7 @@ impl Argument {
 
         let mut tracked = Vec::new();
         for (index, assumption) in self.assumptions.iter().enumerate() {
-            let assertion = lower_boolean(&environment, assumption)?;
+            let assertion = lower_boolean(&environment, assumption, POSITIVE)?;
             let tracker = Bool::new_const(format!("argument_assumption_{index}"));
             solver.assert_and_track(assertion, &tracker);
             tracked.push((tracker, assumption.clone()));
@@ -196,7 +204,7 @@ impl Argument {
                 continue;
             }
             let sentence = self.steps[index].sentence.clone();
-            let assertion = match lower_boolean(&environment, &sentence) {
+            let negative_assertion = match lower_boolean(&environment, &sentence, NEGATIVE) {
                 Ok(assertion) => assertion,
                 Err(error) => {
                     self.steps[index].validation.checks.push(StepCheck::Error {
@@ -208,7 +216,7 @@ impl Argument {
             };
 
             solver.push();
-            solver.assert(assertion.not());
+            solver.assert(negative_assertion.not());
             match solver.check() {
                 SatResult::Sat => {
                     let result = solver
@@ -235,21 +243,55 @@ impl Argument {
                 SatResult::Unsat => {
                     let supporting_facts = core_facts(&solver, &tracked);
                     solver.pop(1);
+                    let positive_assertion = match lower_boolean(&environment, &sentence, POSITIVE)
+                    {
+                        Ok(assertion) => assertion,
+                        Err(error) => {
+                            self.steps[index].validation.checks.push(StepCheck::Error {
+                                environment: Rc::clone(&environment),
+                                error,
+                            });
+                            continue;
+                        }
+                    };
                     self.steps[index].validation.checks.push(StepCheck::Unsat {
                         environment: Rc::clone(&environment),
                         supporting_facts,
                     });
-                    track_step(&mut solver, index, assertion, sentence, &mut tracked);
+                    track_step(
+                        &mut solver,
+                        index,
+                        positive_assertion,
+                        sentence,
+                        &mut tracked,
+                    );
                 }
                 SatResult::Unknown => {
                     solver.pop(1);
+                    let positive_assertion = match lower_boolean(&environment, &sentence, POSITIVE)
+                    {
+                        Ok(assertion) => assertion,
+                        Err(error) => {
+                            self.steps[index].validation.checks.push(StepCheck::Error {
+                                environment: Rc::clone(&environment),
+                                error,
+                            });
+                            continue;
+                        }
+                    };
                     self.steps[index]
                         .validation
                         .checks
                         .push(StepCheck::Unknown {
                             environment: Some(Rc::clone(&environment)),
                         });
-                    track_step(&mut solver, index, assertion, sentence, &mut tracked);
+                    track_step(
+                        &mut solver,
+                        index,
+                        positive_assertion,
+                        sentence,
+                        &mut tracked,
+                    );
                 }
             }
         }
@@ -306,7 +348,7 @@ fn assert_natural_constraints(
             Expr::new(RawExpr::Variable(variable.clone())),
             Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
         ));
-        solver.assert(lower_boolean(environment, &type_assertion)?);
+        solver.assert(lower_boolean(environment, &type_assertion, POSITIVE)?);
     }
     Ok(())
 }
@@ -649,6 +691,38 @@ mod tests {
         assert!(rendered.contains("✅ likely"));
         assert!(rendered.contains("❌ counterexample found"));
         assert!(rendered.contains("maximum dimension of 0"));
+    }
+
+    #[test]
+    fn lowers_a_logic_chain_negatively_then_tracks_it_positively() {
+        let mut argument = Argument::parse_str(
+            r#"# Logic chain
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $y \in \mathbb{R}$
+- $z \in \mathbb{R}$
+- $x = 0$
+- $y = 0$
+- $z = 0$
+
+## Steps
+
+1. $x = 0 \iff y = 0 \implies z = 0$
+2. $z = 0$"#,
+        );
+
+        argument.validate(0).unwrap();
+
+        assert!(matches!(
+            argument.steps[0].validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
+        assert!(matches!(
+            argument.steps[1].validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
     }
 
     #[test]
