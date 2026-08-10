@@ -271,6 +271,13 @@ fn binop<
             e1(f)?;
             write!(f, r" \rangle")
         }
+        Binop::Cast => {
+            write!(f, r"\operatorname{{cast}}(")?;
+            e0(f)?;
+            write!(f, ", ")?;
+            e1(f)?;
+            write!(f, ")")
+        }
         Binop::ElementOf => {
             e0(f)?;
             write!(f, r" \in ")?;
@@ -470,6 +477,18 @@ mod tests {
             Binop::ElementOf,
             variable_expr("A"),
             Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(2, 3)))),
+        )));
+    }
+
+    #[test]
+    fn test_cast() {
+        expect![r"\operatorname{cast}(\mathbb{R}, x + y)"].assert_eq(&as_latex(RawExpr::Binop(
+            Binop::Cast,
+            Expr::new(RawExpr::Type(TypeExpr::Real)),
+            Expr::new(RawExpr::Finop(
+                Finop::Plus,
+                vec![variable_expr("x"), variable_expr("y")],
+            )),
         )));
     }
 

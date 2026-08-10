@@ -20,7 +20,7 @@ Not solved yet
 ## Assumptions
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $B \in \mathbb{R}^{1 \times 1}$
+- $B \in \mathbb{R}$
 - $C \in \mathbb{R}^{2 \times 2}$
 - $D \in \mathbb{R}^{2}$
 

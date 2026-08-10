@@ -23,6 +23,7 @@ pub enum ToZ3Error {
     MissingVariableType(Variable),
     MissingImplicitDimension(ImplicitDimension),
     MissingPowerExponent,
+    MissingCastDimension,
     InvalidOperands(&'static str),
     Shape(&'static str),
     Empty(&'static str),
@@ -49,6 +50,9 @@ impl Display for ToZ3Error {
             }
             Self::MissingPowerExponent => {
                 f.write_str("power exponent is missing from the equality environment")
+            }
+            Self::MissingCastDimension => {
+                f.write_str("cast dimension is missing from the equality environment")
             }
             Self::DimensionOverflow => f.write_str("matrix dimensions overflow usize"),
             Self::InvalidMatrixLiteral => {
@@ -467,6 +471,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             lower_power(γ, base, exponent)
         }
         RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
+        RawExpr::Binop(Binop::Cast, target, value) => lower_cast(γ, target, value),
         RawExpr::Binop(Binop::SingleSubscript, base, index) => lower_subscript(γ, base, index),
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
@@ -504,6 +509,76 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             "expression is not supported by to_z3",
         )),
     }
+}
+
+fn lower_cast<Metadata>(
+    environment: &Environment,
+    target: &Expr<Metadata>,
+    value: &Expr<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
+    let RawExpr::Type(target) = &target.raw else {
+        return Err(ToZ3Error::InvalidOperands(
+            "cast target must be a type expression",
+        ));
+    };
+    let value = lower(environment, value)?;
+    match target {
+        TypeExpr::Real => match value {
+            Z3Object::Z3(value) if value.as_real().is_some() => Ok(Z3Object::Z3(value)),
+            Z3Object::Matrix(mut matrix)
+                if matrix.rows == 1
+                    && matrix.cols == 1
+                    && matrix.elements.len() == 1
+                    && matches!(matrix.elements[0], Z3Object::Z3(ref cell) if cell.as_real().is_some()) =>
+            {
+                Ok(matrix.elements.pop().unwrap())
+            }
+            _ => Err(ToZ3Error::InvalidOperands(
+                "a cast to real requires a real scalar or real-valued 1x1 matrix",
+            )),
+        },
+        TypeExpr::Matrix(rows, cols) => {
+            if concrete_cast_dimension(environment, rows)? != 1
+                || concrete_cast_dimension(environment, cols)? != 1
+            {
+                return Err(ToZ3Error::Shape(
+                    "a real scalar can only be cast to a 1x1 matrix",
+                ));
+            }
+            let Z3Object::Z3(value) = value else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "a cast to a matrix requires a real scalar",
+                ));
+            };
+            if value.as_real().is_none() {
+                return Err(ToZ3Error::InvalidOperands(
+                    "a cast to a matrix requires a real scalar",
+                ));
+            }
+            Ok(Z3Object::Matrix(Matrix {
+                rows: 1,
+                cols: 1,
+                elements: vec![Z3Object::Z3(value)],
+            }))
+        }
+        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _) => Err(
+            ToZ3Error::Unsupported("only real and 1x1 matrix casts are supported"),
+        ),
+    }
+}
+
+fn concrete_cast_dimension<Metadata>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+) -> Result<u64, ToZ3Error> {
+    if let RawExpr::NatLiteral(value) = expression.raw {
+        return Ok(value);
+    }
+    environment
+        .equalities
+        .get(&expression.without_metadata())
+        .copied()
+        .ok_or(ToZ3Error::MissingCastDimension)
 }
 
 fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
@@ -1233,6 +1308,119 @@ mod tests {
             Environment::default(),
             Expr::<()>::new(RawExpr::Type(TypeExpr::Real)),
             ToZ3Error::Unsupported("type expressions are not supported by to_z3"),
+        );
+    }
+
+    #[test]
+    fn test_real_and_one_by_one_matrix_casts() {
+        let matrix_variable = Variable::new("A");
+        let real_variable = Variable::new("x");
+        let matrix_environment = Environment {
+            types: HashMap::from([(matrix_variable, Type::Matrix(1, 1))]),
+            ..Environment::default()
+        };
+        let real_environment = Environment {
+            types: HashMap::from([(real_variable, Type::Real)]),
+            ..Environment::default()
+        };
+
+        let extracted = scalar(
+            matrix_environment,
+            expression(r"\operatorname{cast}(\mathbb{R}, A)"),
+        );
+        assert_eq!(extracted.sort_kind(), SortKind::Real);
+        assert!(extracted.to_string().contains("A_{1,1}"));
+
+        let unchanged = scalar(
+            real_environment,
+            expression(r"\operatorname{cast}(\mathbb{R}, x)"),
+        );
+        assert_eq!(unchanged.sort_kind(), SortKind::Real);
+        assert_eq!(unchanged.to_string(), "x");
+    }
+
+    #[test]
+    fn test_real_cast_to_symbolic_one_by_one_matrix() {
+        let target = Expr::new(RawExpr::Type(TypeExpr::Matrix(
+            expression("m"),
+            expression("n"),
+        )));
+        let cast = Expr::new(RawExpr::Binop(Binop::Cast, target, expression("x")));
+        let environment = Environment {
+            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            equalities: HashMap::from([(expression("m"), 1), (expression("n"), 1)]),
+            implicit_dimensions: HashMap::new(),
+        };
+        let cast = matrix(environment, cast);
+        assert_eq!((cast.rows, cast.cols), (1, 1));
+        assert_eq!(matrix_strings(&cast), ["x"]);
+    }
+
+    #[test]
+    fn test_invalid_casts_return_errors() {
+        let matrix_variable = Variable::new("A");
+        assert_lowering_error(
+            Environment {
+                types: HashMap::from([(matrix_variable, Type::Matrix(2, 2))]),
+                ..Environment::default()
+            },
+            expression(r"\operatorname{cast}(\mathbb{R}, A)"),
+            ToZ3Error::InvalidOperands(
+                "a cast to real requires a real scalar or real-valued 1x1 matrix",
+            ),
+        );
+        assert_lowering_error(
+            Environment {
+                types: HashMap::from([(Variable::new("n"), Type::Nat)]),
+                ..Environment::default()
+            },
+            expression(r"\operatorname{cast}(\mathbb{R}, n)"),
+            ToZ3Error::InvalidOperands(
+                "a cast to real requires a real scalar or real-valued 1x1 matrix",
+            ),
+        );
+        assert_lowering_error(
+            Environment {
+                types: HashMap::from([(Variable::new("x"), Type::Real)]),
+                ..Environment::default()
+            },
+            expression(r"\operatorname{cast}(\mathbb{N}, x)"),
+            ToZ3Error::Unsupported("only real and 1x1 matrix casts are supported"),
+        );
+
+        let matrix_target = |rows, cols| {
+            Expr::new(RawExpr::Type(TypeExpr::Matrix(
+                expression(rows),
+                expression(cols),
+            )))
+        };
+        let value = || expression("x");
+        let environment = || Environment {
+            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            ..Environment::default()
+        };
+        assert_lowering_error(
+            environment(),
+            Expr::new(RawExpr::Binop(
+                Binop::Cast,
+                matrix_target("2", "1"),
+                value(),
+            )),
+            ToZ3Error::Shape("a real scalar can only be cast to a 1x1 matrix"),
+        );
+        assert_lowering_error(
+            environment(),
+            Expr::new(RawExpr::Binop(
+                Binop::Cast,
+                matrix_target("m", "n"),
+                value(),
+            )),
+            ToZ3Error::MissingCastDimension,
+        );
+        assert_lowering_error(
+            environment(),
+            Expr::new(RawExpr::Binop(Binop::Cast, expression("T"), value())),
+            ToZ3Error::InvalidOperands("cast target must be a type expression"),
         );
     }
 

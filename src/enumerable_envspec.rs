@@ -690,6 +690,7 @@ impl ShapeContext<'_> {
                 }
             }
             RawExpr::Binop(Binop::ElementOf, left, right) => self.constrain_membership(left, right),
+            RawExpr::Binop(Binop::Cast, target, value) => self.infer_cast(target, value),
             RawExpr::Binop(Binop::SingleSubscript, left, index) => {
                 let Shape::Seq(element, _) = self.infer(left)? else {
                     return Err(ShapeError::InvalidTyping(
@@ -864,6 +865,46 @@ impl ShapeContext<'_> {
             _ => self.assert_typing_failure(actual),
         }
         Ok(Shape::Bool)
+    }
+
+    fn infer_cast(&mut self, target: &Expr<()>, value: &Expr<()>) -> Result<Shape, ShapeError> {
+        let RawExpr::Type(target) = &target.raw else {
+            return Err(ShapeError::InvalidTyping(
+                "cast target must be a type expression".to_owned(),
+            ));
+        };
+        let value = self.infer(value)?;
+        match (target, value) {
+            (TypeExpr::Real, Shape::Real) => Ok(Shape::Real),
+            (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
+                self.assert_dimensions_equal(&rows, &Int::from_u64(1));
+                self.assert_dimensions_equal(&cols, &Int::from_u64(1));
+                Ok(Shape::Real)
+            }
+            (TypeExpr::Matrix(rows, cols), Shape::Real) => {
+                let rows_value = self.lower_nat(rows)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "cast matrix row dimension is not linear natural arithmetic".to_owned(),
+                    )
+                })?;
+                let cols_value = self.lower_nat(cols)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "cast matrix column dimension is not linear natural arithmetic".to_owned(),
+                    )
+                })?;
+                self.projections.insert(rows.clone(), rows_value.clone());
+                self.projections.insert(cols.clone(), cols_value.clone());
+                self.assert_dimensions_equal(&rows_value, &Int::from_u64(1));
+                self.assert_dimensions_equal(&cols_value, &Int::from_u64(1));
+                Ok(Shape::Matrix(rows_value, cols_value))
+            }
+            (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => Err(
+                ShapeError::Unsupported("only real and 1x1 matrix casts are supported".to_owned()),
+            ),
+            (TypeExpr::Real | TypeExpr::Matrix(_, _), _) => Err(ShapeError::InvalidTyping(
+                "cast requires a real scalar or a 1x1 matrix operand".to_owned(),
+            )),
+        }
     }
 
     fn constrain_shape_type(
@@ -1380,6 +1421,51 @@ mod tests {
         assert_eq!(environment.types[&Variable::new("a")], Type::Real);
         assert_eq!(environment.types[&Variable::new("n")], Type::Nat);
         assert_eq!(environment.types[&Variable::new("x")], Type::Real);
+    }
+
+    #[test]
+    fn casts_constrain_symbolic_matrix_targets_to_one_by_one() {
+        let environment = environments(&[
+            r"x \in \mathbb{R}",
+            r"A = \operatorname{cast}(\mathbb{R}^{m \times n}, x)",
+        ])
+        .next()
+        .unwrap()
+        .unwrap();
+        assert_eq!(environment.types[&Variable::new("A")], Type::Matrix(1, 1));
+        assert_eq!(environment.equalities[&expression("m")], 1);
+        assert_eq!(environment.equalities[&expression("n")], 1);
+    }
+
+    #[test]
+    fn casts_to_real_constrain_matrix_operands_to_one_by_one() {
+        let environment = environments(&[
+            r"A \in \mathbb{R}^{m \times n}",
+            r"x \in \mathbb{R}",
+            r"x = \operatorname{cast}(\mathbb{R}, A)",
+        ])
+        .next()
+        .unwrap()
+        .unwrap();
+        assert_eq!(environment.types[&Variable::new("A")], Type::Matrix(1, 1));
+        assert_eq!(environment.types[&Variable::new("x")], Type::Real);
+        assert_eq!(environment.equalities[&expression("m")], 1);
+        assert_eq!(environment.equalities[&expression("n")], 1);
+    }
+
+    #[test]
+    fn casts_reject_unsupported_types() {
+        assert!(matches!(
+            extract_environment_iterator(
+                [
+                    expression(r"x \in \mathbb{R}"),
+                    expression(r"\operatorname{cast}(\mathbb{N}, x)")
+                ]
+                .into_iter(),
+                2,
+            ),
+            Err(ShapeError::Unsupported(_))
+        ));
     }
 
     #[test]

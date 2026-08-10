@@ -9,6 +9,7 @@ pub mod normalize;
 pub mod to_tex;
 pub mod to_z3;
 pub mod validate_argument;
+pub mod visit_mut;
 
 use std::{
     collections::HashMap,
@@ -159,6 +160,7 @@ impl Variable {
 }
 
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum Annotation {
     Hat,
     Tilde,
@@ -166,6 +168,7 @@ pub enum Annotation {
     Prime,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Cmp {
     Eq,
     Ne,
@@ -175,11 +178,13 @@ pub enum Cmp {
     Ge,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Logic {
     Iff,
     Imp,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Monop {
     Trace,
     Det,
@@ -193,20 +198,24 @@ pub enum Monop {
     // Dim,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Binop {
     // plus and times are associative, hence finops not binops
     Div,
     Power,
     // dotprod omitted
     InnerProd,
+    Cast,
     ElementOf,
     SingleSubscript,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Triop {
     DoubleSubscript,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum Finop {
     // Span,
     Plus, // normalize by associativity
@@ -215,6 +224,7 @@ pub enum Finop {
     Min,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
 pub enum SeqOp {
     Sum,
     Prod,

@@ -266,6 +266,26 @@ impl<'a> Cursor<'a> {
                     index: self.position,
                     message: "operator name is not plain text".to_owned(),
                 })?;
+                if name == "cast" {
+                    let start = self.position;
+                    self.position += 1;
+                    let arguments = self.take_parenthesized()?;
+                    let parts = split_top_level(arguments, ",");
+                    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+                        return Err(FromTexError::Malformed {
+                            index: start,
+                            message: "cast requires a type and an expression".to_owned(),
+                        });
+                    }
+                    let ty = expr(parts[0])?;
+                    if !matches!(ty.raw, RawExpr::Type(_)) {
+                        return Err(FromTexError::Malformed {
+                            index: start,
+                            message: "cast target must be a type expression".to_owned(),
+                        });
+                    }
+                    return Ok(Expr::new(RawExpr::Binop(Binop::Cast, ty, expr(parts[1])?)));
+                }
                 let op = match name.as_str() {
                     "tr" => Monop::Trace,
                     "det" => Monop::Det,
@@ -981,12 +1001,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_casts() {
+        expect![
+            "\\operatorname{cast}(\\mathbb{R}, A)\n\\operatorname{cast}(\\mathbb{R}^{m \\times n}, x + y)"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}",
+            round_trip(r"\operatorname{cast}(\mathbb{R}, A)").unwrap(),
+            round_trip(r"\operatorname{cast}(\mathbb{R}^{m \times n}, x + y)").unwrap(),
+        ));
+
+        for malformed in [
+            r"\operatorname{cast}(x, A)",
+            r"\operatorname{cast}(\mathbb{R})",
+            r"\operatorname{cast}(\mathbb{R}, A, B)",
+        ] {
+            assert!(matches!(
+                round_trip(malformed),
+                Err(FromTexError::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn one_by_one_matrix_type_canonicalizes_to_real() {
         let expression: Expr<()> = Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(1, 1))));
         let parsed = parse(&expression.as_latex().to_string()).unwrap();
         assert!(matches!(
             super::expr(&parsed).unwrap().raw,
             RawExpr::Type(TypeExpr::Real)
+        ));
+    }
+
+    #[test]
+    fn one_by_one_matrix_cast_target_canonicalizes_to_real() {
+        let expression: Expr<()> = Expr::new(RawExpr::Binop(
+            Binop::Cast,
+            Expr::new(RawExpr::Type(TypeExpr::Matrix(
+                Expr::new(RawExpr::NatLiteral(1)),
+                Expr::new(RawExpr::NatLiteral(1)),
+            ))),
+            Expr::new(RawExpr::Variable(crate::Variable::new("x"))),
+        ));
+        let parsed = parse(&expression.as_latex().to_string()).unwrap();
+        assert!(matches!(
+            &super::expr(&parsed).unwrap().raw,
+            RawExpr::Binop(Binop::Cast, target, _)
+                if matches!(target.raw, RawExpr::Type(TypeExpr::Real))
         ));
     }
 
