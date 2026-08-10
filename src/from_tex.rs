@@ -277,6 +277,13 @@ impl<'a> Cursor<'a> {
             }
             ParseNode::Op {
                 name: Some(name), ..
+            } if name == r"\det" => {
+                self.position += 1;
+                let argument = self.take_parenthesized()?;
+                Ok(Expr::new(RawExpr::Monop(Monop::Det, expr(argument)?)))
+            }
+            ParseNode::Op {
+                name: Some(name), ..
             } if name == r"\max" || name == r"\min" => {
                 let op = if name == r"\max" {
                     Finop::Max
@@ -1087,12 +1094,15 @@ mod tests {
     #[test]
     fn parses_unary_and_finite_operators() {
         expect![
-            "\\operatorname{tr}(x)\n\\operatorname{det}(x)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
+            "\\operatorname{tr}(x)\n\\det(x)\n\\det(x)\n\\operatorname{tr}(A + B)\n\\det(A^\\top)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             round_trip(r"\operatorname{tr}(x)").unwrap(),
             round_trip(r"\operatorname{det}(x)").unwrap(),
+            round_trip(r"\det(x)").unwrap(),
+            round_trip(r"\operatorname{tr}(A + B)").unwrap(),
+            round_trip(r"\det(A^\top)").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{1}").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{2}").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{\infty}").unwrap(),

@@ -245,6 +245,95 @@ fn multiply_matrices(
     }))
 }
 
+fn numeric_square_matrix(
+    value: Z3Object,
+    nonmatrix: &'static str,
+    empty: &'static str,
+    nonsquare: &'static str,
+    nonnumeric: &'static str,
+) -> Result<Matrix<Z3Object>, ToZ3Error> {
+    let Z3Object::Matrix(matrix) = value else {
+        return Err(ToZ3Error::InvalidOperands(nonmatrix));
+    };
+    let expected_elements = matrix
+        .rows
+        .checked_mul(matrix.cols)
+        .ok_or(ToZ3Error::DimensionOverflow)?;
+    if matrix.elements.len() != expected_elements {
+        return Err(ToZ3Error::InvalidMatrixLiteral);
+    }
+    if matrix.rows == 0 {
+        return Err(ToZ3Error::Empty(empty));
+    }
+    if matrix.rows != matrix.cols {
+        return Err(ToZ3Error::Shape(nonsquare));
+    }
+    if matrix.elements.iter().any(|element| {
+        !matches!(
+            element,
+            Z3Object::Z3(expression)
+                if expression.as_int().is_some() || expression.as_real().is_some()
+        )
+    }) {
+        return Err(ToZ3Error::InvalidOperands(nonnumeric));
+    }
+    Ok(matrix)
+}
+
+fn trace(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
+    let matrix = numeric_square_matrix(
+        value,
+        "trace requires a matrix",
+        "trace requires a nonempty matrix",
+        "trace requires a square matrix",
+        "trace requires numeric scalar matrix cells",
+    )?;
+    let mut diagonal =
+        (0..matrix.rows).map(|index| matrix.elements[index * matrix.cols + index].clone());
+    let first = diagonal
+        .next()
+        .ok_or(ToZ3Error::Empty("trace requires a nonempty matrix"))?;
+    diagonal.try_fold(first, Add::add)
+}
+
+fn determinant(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
+    determinant_square(&numeric_square_matrix(
+        value,
+        "determinant requires a matrix",
+        "determinant requires a nonempty matrix",
+        "determinant requires a square matrix",
+        "determinant requires numeric scalar matrix cells",
+    )?)
+}
+
+fn determinant_square(matrix: &Matrix<Z3Object>) -> Result<Z3Object, ToZ3Error> {
+    if matrix.rows == 1 {
+        return Ok(matrix.elements[0].clone());
+    }
+
+    let mut terms = (0..matrix.cols).map(|col| {
+        let mut minor = Vec::with_capacity((matrix.rows - 1) * (matrix.cols - 1));
+        for row in 1..matrix.rows {
+            for minor_col in 0..matrix.cols {
+                if minor_col != col {
+                    minor.push(matrix.elements[row * matrix.cols + minor_col].clone());
+                }
+            }
+        }
+        let term = matrix.elements[col].clone()
+            * determinant_square(&Matrix {
+                rows: matrix.rows - 1,
+                cols: matrix.cols - 1,
+                elements: minor,
+            })?;
+        if col % 2 == 0 { term } else { -term? }
+    });
+    let first = terms
+        .next()
+        .ok_or(ToZ3Error::Empty("determinant requires a nonempty matrix"))??;
+    terms.try_fold(first, |sum, term| sum + term?)
+}
+
 fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ3Error> {
     let left = comparison_scalar(left)?;
     let right = comparison_scalar(right)?;
@@ -364,6 +453,8 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             lower_typed_name(variable.z3_name(), τ)
         }
         RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(Int::from_u64(*value).into())),
+        RawExpr::Monop(Monop::Trace, inner) => trace(lower(γ, inner)?),
+        RawExpr::Monop(Monop::Det, inner) => determinant(lower(γ, inner)?),
         RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
         RawExpr::Monop(Monop::Transpose, inner) => transpose(lower(γ, inner)?),
         RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
@@ -949,6 +1040,21 @@ mod tests {
         matrix.elements.iter().map(ToString::to_string).collect()
     }
 
+    fn assert_scalar_value(environment: Environment, expression: Expr<()>, expected: i64) {
+        let value = scalar(environment, expression);
+        let expected = Int::from_i64(expected);
+        let equality = if let Some(value) = value.as_int() {
+            value.eq(expected)
+        } else if let Some(value) = value.as_real() {
+            value.eq(z3::ast::Real::from_int(&expected))
+        } else {
+            panic!("expected a numeric scalar")
+        };
+        let solver = Solver::new();
+        solver.assert(equality.not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
     #[test]
     fn test_variable_sorts() {
         for (name, τ, expected_sort) in [
@@ -1221,6 +1327,177 @@ mod tests {
             )
             .to_string(),
         );
+    }
+
+    #[test]
+    fn test_trace_of_symbolic_literal_and_mixed_matrices() {
+        let a = Variable::new("A");
+        let environment = Environment {
+            types: HashMap::from([(a, Type::Matrix(2, 2))]),
+            ..Environment::default()
+        };
+        expect!["(+ |A_{1,1}| |A_{2,2}|)"]
+            .assert_eq(&scalar(environment, expression(r"\operatorname{tr}(A)")).to_string());
+        assert_scalar_value(
+            Environment::default(),
+            expression(r"\operatorname{tr}(\begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix})"),
+            5,
+        );
+
+        let x = Variable::new("x");
+        let mixed = scalar(
+            Environment {
+                types: HashMap::from([(x, Type::Real)]),
+                ..Environment::default()
+            },
+            expression(r"\operatorname{tr}(\begin{bmatrix}x & 2 \\ 3 & 4\end{bmatrix})"),
+        );
+        assert_eq!(mixed.sort_kind(), SortKind::Real);
+    }
+
+    #[test]
+    fn test_determinants_of_small_matrices() {
+        for (matrix, expected) in [
+            (r"\begin{bmatrix}7\end{bmatrix}", 7),
+            (r"\begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix}", -2),
+            (
+                r"\begin{bmatrix}1 & 2 & 3 \\ 0 & 1 & 4 \\ 5 & 6 & 0\end{bmatrix}",
+                1,
+            ),
+        ] {
+            assert_scalar_value(
+                Environment::default(),
+                expression(&format!(r"\det({matrix})")),
+                expected,
+            );
+        }
+
+        let x = Variable::new("x");
+        let mixed = scalar(
+            Environment {
+                types: HashMap::from([(x, Type::Real)]),
+                ..Environment::default()
+            },
+            expression(r"\det(\begin{bmatrix}x & 2 \\ 3 & 4\end{bmatrix})"),
+        );
+        assert_eq!(mixed.sort_kind(), SortKind::Real);
+    }
+
+    #[test]
+    fn test_trace_and_determinant_of_identity_and_zero() {
+        let identity = expression("I");
+        let zero = expression(r"\mathbb{0}");
+        let RawExpr::IdentityMatrix {
+            dimension: identity_dimension,
+        } = identity.raw
+        else {
+            panic!("expected identity matrix")
+        };
+        let RawExpr::ZeroMatrix { rows, cols } = zero.raw else {
+            panic!("expected zero matrix")
+        };
+        let environment = || Environment {
+            implicit_dimensions: HashMap::from([(identity_dimension, 2), (rows, 2), (cols, 2)]),
+            ..Environment::default()
+        };
+        let unary = |op, inner| Expr::new(RawExpr::Monop(op, inner));
+
+        assert_scalar_value(environment(), unary(Monop::Trace, identity.clone()), 2);
+        assert_scalar_value(environment(), unary(Monop::Det, identity), 1);
+        assert_scalar_value(environment(), unary(Monop::Trace, zero.clone()), 0);
+        assert_scalar_value(environment(), unary(Monop::Det, zero), 0);
+    }
+
+    #[test]
+    fn test_trace_and_determinant_reject_invalid_operands() {
+        for (tex, error) in [
+            (
+                r"\operatorname{tr}(1)",
+                ToZ3Error::InvalidOperands("trace requires a matrix"),
+            ),
+            (
+                r"\det(1)",
+                ToZ3Error::InvalidOperands("determinant requires a matrix"),
+            ),
+            (
+                r"\operatorname{tr}(\begin{bmatrix}1 & 2\end{bmatrix})",
+                ToZ3Error::Shape("trace requires a square matrix"),
+            ),
+            (
+                r"\det(\begin{bmatrix}1 & 2\end{bmatrix})",
+                ToZ3Error::Shape("determinant requires a square matrix"),
+            ),
+            (
+                r"\operatorname{tr}(\begin{bmatrix}\end{bmatrix})",
+                ToZ3Error::Empty("trace requires a nonempty matrix"),
+            ),
+            (
+                r"\det(\begin{bmatrix}\end{bmatrix})",
+                ToZ3Error::Empty("determinant requires a nonempty matrix"),
+            ),
+        ] {
+            assert_lowering_error(Environment::default(), expression(tex), error);
+        }
+
+        let boolean: Expr<()> = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: Expr::new(RawExpr::NatLiteral(1)),
+            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(1)))],
+        }));
+        let nested: Expr<()> = Expr::new(RawExpr::Matrix(Matrix {
+            rows: 1,
+            cols: 1,
+            elements: vec![Expr::new(RawExpr::NatLiteral(1))],
+        }));
+        for (op, cell, message) in [
+            (
+                Monop::Trace,
+                boolean.clone(),
+                "trace requires numeric scalar matrix cells",
+            ),
+            (
+                Monop::Det,
+                boolean,
+                "determinant requires numeric scalar matrix cells",
+            ),
+            (
+                Monop::Trace,
+                nested.clone(),
+                "trace requires numeric scalar matrix cells",
+            ),
+            (
+                Monop::Det,
+                nested,
+                "determinant requires numeric scalar matrix cells",
+            ),
+        ] {
+            assert_lowering_error(
+                Environment::default(),
+                Expr::new(RawExpr::Monop(
+                    op,
+                    Expr::new(RawExpr::Matrix(Matrix {
+                        rows: 1,
+                        cols: 1,
+                        elements: vec![cell],
+                    })),
+                )),
+                ToZ3Error::InvalidOperands(message),
+            );
+        }
+
+        for op in [Monop::Trace, Monop::Det] {
+            assert_lowering_error(
+                Environment::default(),
+                Expr::<()>::new(RawExpr::Monop(
+                    op,
+                    Expr::new(RawExpr::Matrix(Matrix {
+                        rows: 2,
+                        cols: 2,
+                        elements: vec![Expr::new(RawExpr::NatLiteral(1))],
+                    })),
+                )),
+                ToZ3Error::InvalidMatrixLiteral,
+            );
+        }
     }
 
     #[test]

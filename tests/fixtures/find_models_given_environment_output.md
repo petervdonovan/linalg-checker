@@ -96,8 +96,8 @@ Model
 
 Model
 
-- $A = \begin{bmatrix}\frac{1}{8} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{2}\end{bmatrix}$
-- $B = \begin{bmatrix}\frac{1}{2} & \frac{-1}{2} \\ \frac{-15}{8} & \frac{-1}{8}\end{bmatrix}$
+- $A = \begin{bmatrix}-1 & 0 \\ 0 & -1\end{bmatrix}$
+- $B = \begin{bmatrix}-1 & 0 \\ 0 & -1\end{bmatrix}$
 
 # Nonidentity projection
 

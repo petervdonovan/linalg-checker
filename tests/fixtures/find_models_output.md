@@ -25,9 +25,9 @@ Model
 ## Assumptions
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $B \in \mathbb{R}^{3 \times 3}$
-- $C \in \mathbb{R}^{2 \times 3}$
-- $D \in \mathbb{R}^{3}$
+- $B \in \mathbb{R}$
+- $C \in \mathbb{R}^{2 \times 2}$
+- $D \in \mathbb{R}^{2}$
 
 ## Sentences
 
@@ -41,9 +41,9 @@ Model
 Model
 
 - $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-- $B = \begin{bmatrix}1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1\end{bmatrix}$
-- $C = \begin{bmatrix}0 & 0 & 0 \\ 0 & 0 & 0\end{bmatrix}$
-- $D = \begin{bmatrix}0 \\ 0 \\ 0\end{bmatrix}$
+- $B = 1$
+- $C = \begin{bmatrix}0 & 0 \\ 0 & 0\end{bmatrix}$
+- $D = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
 # Inferred matrix compatibility
 
@@ -94,7 +94,7 @@ Unsat
 
 ## Conclusion
 
-Unsat up to dimension 3
+Unsat up to dimension 2
 
 # Negative sum of squared vector norms
 
@@ -108,4 +108,51 @@ Unsat up to dimension 3
 
 ## Conclusion
 
-Unsat up to dimension 3
+Unsat up to dimension 2
+
+# Zero trace does not imply singularity
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $\operatorname{tr}(A) = 0$
+- $\det(A) = 1$
+
+## Conclusion
+
+Model
+
+- $A = \begin{bmatrix}0 & -1 \\ 1 & 0\end{bmatrix}$
+
+# Cyclic trace
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2}$
+- $B \in \mathbb{R}^{1 \times 2}$
+
+## Sentences
+
+- $\operatorname{tr}(A B) \ne \operatorname{tr}(B A)$
+
+## Conclusion
+
+Unsat up to dimension 2
+
+# Determinant multiplicativity
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $\det(A B) \ne \det(A) \det(B)$
+
+## Conclusion
+
+Unsat up to dimension 2

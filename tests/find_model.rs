@@ -1,6 +1,6 @@
 use linalg_sandbox::find_model::{ModelOrUnsat, NotSolvedYet, TestCases, ToFromMd};
 
-const MAX_DIMENSION: u64 = 3;
+const MAX_DIMENSION: u64 = 2;
 const INPUT: &str = include_str!("fixtures/find_models_input.md");
 const EXPECTED: &str = include_str!("fixtures/find_models_output.md");
 

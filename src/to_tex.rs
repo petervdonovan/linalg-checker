@@ -218,7 +218,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
 ) -> fmt::Result {
     match op {
         Monop::Trace => write!(f, r"\operatorname{{tr}}(")?,
-        Monop::Det => write!(f, r"\operatorname{{det}}(")?,
+        Monop::Det => write!(f, r"\det(")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
         Monop::Transpose => {}
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_unary_operators() {
-        expect!["\\operatorname{tr}(x)\n\\operatorname{det}(x)\n-x\nx^{-1}"].assert_eq(&format!(
+        expect!["\\operatorname{tr}(x)\n\\det(x)\n-x\nx^{-1}"].assert_eq(&format!(
             "{}\n{}\n{}\n{}",
             as_latex(RawExpr::Monop(
                 Monop::Trace,

@@ -679,6 +679,10 @@ impl ShapeContext<'_> {
                         self.assert_dimensions_equal(&rows, &cols);
                         Ok(Shape::Real)
                     }
+                    (Monop::Trace | Monop::Det, shape) => {
+                        self.assert_typing_failure(&shape);
+                        Ok(Shape::Real)
+                    }
                     (Monop::Norm1 | Monop::Norm2 | Monop::NormInfty | Monop::NormFrob, _) => {
                         Ok(Shape::Real)
                     }
@@ -1789,5 +1793,35 @@ mod tests {
             ),
             Err(ShapeError::InvalidTyping(_))
         ));
+    }
+
+    #[test]
+    fn trace_and_determinant_require_square_matrices() {
+        for assertion in [r"\operatorname{tr}(A) = 0", r"\det(A) = 0"] {
+            let environment = extract_environment_iterator([expression(assertion)].into_iter(), 2)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            let Type::Matrix(rows, cols) = environment.types[&Variable::new("A")] else {
+                panic!("expected a matrix")
+            };
+            assert_eq!(rows, cols);
+        }
+
+        for assumptions in [
+            [r"a \in \mathbb{R}", r"\operatorname{tr}(a) = 0"],
+            [r"a \in \mathbb{R}", r"\det(a) = 0"],
+            [
+                r"A \in \mathbb{R}^{1 \times 2}",
+                r"\operatorname{tr}(A) = 0",
+            ],
+            [r"A \in \mathbb{R}^{1 \times 2}", r"\det(A) = 0"],
+        ] {
+            assert!(matches!(
+                extract_environment_iterator(assumptions.into_iter().map(expression), 2,),
+                Err(ShapeError::Unsat(_))
+            ));
+        }
     }
 }
