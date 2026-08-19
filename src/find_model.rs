@@ -175,7 +175,7 @@ impl TestCase<NotSolvedYet> {
                         assumptions.iter().chain(sentences.iter()),
                     )? {
                         ModelOrUnsat::Unsat => {}
-                        result @ (ModelOrUnsat::Model(_) | ModelOrUnsat::Unknown) => {
+                        result @ (ModelOrUnsat::Model(_, _) | ModelOrUnsat::Unknown) => {
                             conclusion = Some(result);
                             break;
                         }

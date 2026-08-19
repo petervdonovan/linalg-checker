@@ -6,8 +6,23 @@
 
 use crate::{
     Binop, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix, MetaExpr, Monop,
-    Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
+    Range, RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
 };
+
+#[derive(Debug)]
+pub enum Existence<Metadata> {
+    Guaranteed,
+    Checkable(Vec<Expr<Metadata>>),
+    Assumed,
+}
+
+#[derive(Debug)]
+pub struct SideCondition<Metadata> {
+    pub introduced_variable: Variable,
+    pub introduced_type: Type,
+    pub defining_assertions: Vec<Expr<Metadata>>,
+    pub existence: Existence<Metadata>,
+}
 
 /// Context inherited while traversing an expression tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +49,7 @@ impl VisitContext {
 /// The default implementation expects every visited [`Expr`] to be uniquely
 /// owned. It panics if the expression's internal `Rc` is shared.
 pub trait VisitMut<Metadata> {
-    fn side_conditions(&self) -> Vec<Expr<Metadata>> {
+    fn side_conditions(&mut self) -> Vec<SideCondition<Metadata>> {
         vec![]
     }
 

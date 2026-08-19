@@ -13,10 +13,11 @@ use crate::{
     Binop, Environment, Expr, Model, RawExpr, Type, TypeExpr,
     enumerable_envspec::{ShapeError, extract_environment_iterator_with_context},
     model_finding::{
-        assert_environment_equalities, expression_list, extract_model, heading, heading_text,
-        lower_boolean, parse_expression_item, parse_expression_section, render_md, root,
-        root_children, section_start,
+        assert_definitions, assert_environment_equalities, expression_list, extract_model, heading,
+        heading_text, lower_boolean, parse_expression_item, parse_expression_section, render_md,
+        root, root_children, section_start, z3_boolean,
     },
+    to_z3::{LoweredExistence, LoweredSideCondition},
     visit_mut::VisitContext,
 };
 
@@ -65,6 +66,15 @@ pub enum StepCheck {
     Counterexample {
         environment: Rc<Environment>,
         model: Model,
+    },
+    MayBeUndefined {
+        environment: Rc<Environment>,
+        introduced_variable: crate::Variable,
+        witness: Model,
+    },
+    AssumedExistence {
+        environment: Rc<Environment>,
+        introduced_variable: crate::Variable,
     },
     Unknown {
         environment: Option<Rc<Environment>>,
@@ -174,8 +184,9 @@ impl Argument {
         let mut tracked = Vec::new();
         for (index, assumption) in self.assumptions.iter().enumerate() {
             let assertion = lower_boolean(&environment, assumption, POSITIVE)?;
+            assert_definitions(&solver, &assertion.side_conditions)?;
             let tracker = Bool::new_const(format!("argument_assumption_{index}"));
-            solver.assert_and_track(assertion, &tracker);
+            solver.assert_and_track(assertion.expression, &tracker);
             tracked.push((tracker, assumption.clone()));
         }
 
@@ -216,7 +227,8 @@ impl Argument {
             };
 
             solver.push();
-            solver.assert(negative_assertion.not());
+            assert_definitions(&solver, &negative_assertion.side_conditions)?;
+            solver.assert(negative_assertion.expression.not());
             match solver.check() {
                 SatResult::Sat => {
                     let result = solver
@@ -254,14 +266,24 @@ impl Argument {
                             continue;
                         }
                     };
-                    self.steps[index].validation.checks.push(StepCheck::Unsat {
-                        environment: Rc::clone(&environment),
-                        supporting_facts,
-                    });
+                    let warnings = check_step_existence(
+                        &mut solver,
+                        Rc::clone(&environment),
+                        &positive_assertion.side_conditions,
+                    )?;
+                    if warnings.is_empty() {
+                        self.steps[index].validation.checks.push(StepCheck::Unsat {
+                            environment: Rc::clone(&environment),
+                            supporting_facts,
+                        });
+                    } else {
+                        self.steps[index].validation.checks.extend(warnings);
+                    }
+                    assert_definitions(&solver, &positive_assertion.side_conditions)?;
                     track_step(
                         &mut solver,
                         index,
-                        positive_assertion,
+                        positive_assertion.expression,
                         sentence,
                         &mut tracked,
                     );
@@ -285,10 +307,11 @@ impl Argument {
                         .push(StepCheck::Unknown {
                             environment: Some(Rc::clone(&environment)),
                         });
+                    assert_definitions(&solver, &positive_assertion.side_conditions)?;
                     track_step(
                         &mut solver,
                         index,
-                        positive_assertion,
+                        positive_assertion.expression,
                         sentence,
                         &mut tracked,
                     );
@@ -348,7 +371,9 @@ fn assert_natural_constraints(
             Expr::new(RawExpr::Variable(variable.clone())),
             Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
         ));
-        solver.assert(lower_boolean(environment, &type_assertion, POSITIVE)?);
+        let lowered = lower_boolean(environment, &type_assertion, POSITIVE)?;
+        assert_definitions(solver, &lowered.side_conditions)?;
+        solver.assert(lowered.expression);
     }
     Ok(())
 }
@@ -363,6 +388,53 @@ fn track_step(
     let tracker = Bool::new_const(format!("argument_step_{index}"));
     solver.assert_and_track(assertion, &tracker);
     tracked.push((tracker, sentence));
+}
+
+fn check_step_existence(
+    solver: &mut Solver,
+    environment: Rc<Environment>,
+    side_conditions: &[LoweredSideCondition],
+) -> Result<Vec<StepCheck>, ModelFindingError> {
+    let mut checks = Vec::new();
+    for condition in side_conditions {
+        match &condition.existence {
+            LoweredExistence::Guaranteed => {}
+            LoweredExistence::Assumed => checks.push(StepCheck::AssumedExistence {
+                environment: Rc::clone(&environment),
+                introduced_variable: condition.introduced_variable.clone(),
+            }),
+            LoweredExistence::Checkable(assertions) => {
+                solver.push();
+                for other in side_conditions {
+                    if other.introduced_variable != condition.introduced_variable {
+                        assert_definitions(solver, std::slice::from_ref(other))?;
+                    }
+                }
+                for assertion in assertions {
+                    solver.assert(z3_boolean(assertion)?);
+                }
+                let result = match solver.check() {
+                    SatResult::Unsat => None,
+                    SatResult::Unknown => Some(StepCheck::Unknown {
+                        environment: Some(Rc::clone(&environment)),
+                    }),
+                    SatResult::Sat => Some(StepCheck::MayBeUndefined {
+                        environment: Rc::clone(&environment),
+                        introduced_variable: condition.introduced_variable.clone(),
+                        witness: extract_model(
+                            &environment,
+                            &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
+                        )?,
+                    }),
+                };
+                solver.pop(1);
+                if let Some(result) = result {
+                    checks.push(result);
+                }
+            }
+        }
+    }
+    Ok(checks)
 }
 
 fn core_facts(solver: &Solver, tracked: &[(Bool, Expr<()>)]) -> Vec<Expr<()>> {
@@ -550,6 +622,45 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
     {
         return Some(format!(
             "<details>\n<summary>Unsupported step</summary>\n\n{error}\n</details>"
+        ));
+    }
+    let existence_warnings: Vec<_> = step
+        .validation
+        .checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check,
+                StepCheck::MayBeUndefined { .. } | StepCheck::AssumedExistence { .. }
+            )
+        })
+        .collect();
+    if !existence_warnings.is_empty() {
+        let mut messages = Vec::new();
+        for warning in existence_warnings {
+            match warning {
+                StepCheck::MayBeUndefined {
+                    introduced_variable,
+                    witness,
+                    ..
+                } => messages.push(format!(
+                    "The expression ${}$ may be undefined. For example:\n\n{}",
+                    introduced_variable.name,
+                    expression_bullets(witness)
+                )),
+                StepCheck::AssumedExistence {
+                    introduced_variable,
+                    ..
+                } => messages.push(format!(
+                    "The existence of ${}$ was assumed without checking.",
+                    introduced_variable.name
+                )),
+                _ => unreachable!(),
+            }
+        }
+        return Some(format!(
+            "<details>\n<summary>⚠️ conditional</summary>\n\n{}\n</details>",
+            messages.join("\n\n")
         ));
     }
     if step

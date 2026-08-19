@@ -9,8 +9,10 @@ use z3::ast::{Bool, Int, Real};
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
     Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
-    deep_clone::deep_clone,
     logic_lowering::LogicLowering,
+    operator_visitors::SquareRootVisitor,
+    type_resolver::{TypeError, TypeResolver, TypedMetadata},
+    visit_mut::Existence,
     visit_mut::{VisitContext, VisitMut},
 };
 
@@ -22,6 +24,7 @@ pub enum Z3Object {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToZ3Error {
+    Type(TypeError),
     Unsupported(&'static str),
     MissingVariableType(Variable),
     MissingImplicitDimension(ImplicitDimension),
@@ -37,6 +40,7 @@ pub enum ToZ3Error {
 impl Display for ToZ3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Type(error) => error.fmt(f),
             Self::Unsupported(message)
             | Self::InvalidOperands(message)
             | Self::Shape(message)
@@ -66,6 +70,33 @@ impl Display for ToZ3Error {
 }
 
 impl Error for ToZ3Error {}
+
+impl From<TypeError> for ToZ3Error {
+    fn from(error: TypeError) -> Self {
+        Self::Type(error)
+    }
+}
+
+#[derive(Clone)]
+pub struct ToZ3Result {
+    pub expression: Z3Object,
+    pub side_conditions: Vec<LoweredSideCondition>,
+}
+
+#[derive(Clone)]
+pub struct LoweredSideCondition {
+    pub introduced_variable: Variable,
+    pub introduced_type: Type,
+    pub defining_assertions: Vec<Z3Object>,
+    pub existence: LoweredExistence,
+}
+
+#[derive(Clone)]
+pub enum LoweredExistence {
+    Guaranteed,
+    Checkable(Vec<Z3Object>),
+    Assumed,
+}
 
 impl Neg for Z3Object {
     type Output = Result<Self, ToZ3Error>;
@@ -430,18 +461,60 @@ fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
 /// caller uses the returned expression. In particular, callers that pass
 /// negative polarity remain responsible for applying the corresponding Z3
 /// negation; this function does not insert one.
-pub fn to_z3<Metadata: Clone>(
+pub fn to_z3<Metadata>(
     environment: &Environment,
     expression: &Expr<Metadata>,
     context: VisitContext,
-) -> Result<Z3Object, ToZ3Error> {
-    let mut expression = deep_clone(expression);
-    preprocess(&mut expression, context);
-    lower(environment, &expression)
-}
+) -> Result<ToZ3Result, ToZ3Error> {
+    let mut expression: Expr<TypedMetadata> = expression.with_default_metadata();
+    TypeResolver::new(environment).resolve(&mut expression, context)?;
+    LogicLowering.visit_expr_mut(context, &mut expression);
+    let mut square_roots = SquareRootVisitor::default();
+    square_roots.visit_expr_mut(context, &mut expression);
+    let side_conditions = square_roots.finish()?;
 
-fn preprocess<Metadata: Clone>(expression: &mut Expr<Metadata>, context: VisitContext) {
-    LogicLowering.visit_expr_mut(context, expression);
+    let mut lowering_environment = environment.clone();
+    for condition in &side_conditions {
+        assert!(
+            lowering_environment
+                .types
+                .insert(
+                    condition.introduced_variable.clone(),
+                    condition.introduced_type.clone(),
+                )
+                .is_none(),
+            "synthetic square-root variable collides with an environment variable"
+        );
+    }
+    let expression = lower(&lowering_environment, &expression)?;
+    let side_conditions = side_conditions
+        .into_iter()
+        .map(|condition| {
+            Ok(LoweredSideCondition {
+                introduced_variable: condition.introduced_variable,
+                introduced_type: condition.introduced_type,
+                defining_assertions: condition
+                    .defining_assertions
+                    .iter()
+                    .map(|assertion| lower(&lowering_environment, assertion))
+                    .collect::<Result<_, _>>()?,
+                existence: match condition.existence {
+                    Existence::Guaranteed => LoweredExistence::Guaranteed,
+                    Existence::Checkable(assertions) => LoweredExistence::Checkable(
+                        assertions
+                            .iter()
+                            .map(|assertion| lower(&lowering_environment, assertion))
+                            .collect::<Result<_, _>>()?,
+                    ),
+                    Existence::Assumed => LoweredExistence::Assumed,
+                },
+            })
+        })
+        .collect::<Result<_, ToZ3Error>>()?;
+    Ok(ToZ3Result {
+        expression,
+        side_conditions,
+    })
 }
 
 fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
@@ -485,7 +558,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
         RawExpr::Binop(Binop::Power, base, exponent) => {
             let exponent = γ
                 .equalities
-                .get(&exponent.without_metadata())
+                .get(&exponent.with_default_metadata())
                 .copied()
                 .ok_or(ToZ3Error::MissingPowerExponent)?;
             lower_power(γ, base, exponent)
@@ -655,7 +728,7 @@ fn concrete_cast_dimension<Metadata>(
     }
     environment
         .equalities
-        .get(&expression.without_metadata())
+        .get(&expression.with_default_metadata())
         .copied()
         .ok_or(ToZ3Error::MissingCastDimension)
 }
@@ -772,7 +845,7 @@ fn concrete_nat<Metadata>(
     }
     environment
         .equalities
-        .get(&expression.without_metadata())
+        .get(&expression.with_default_metadata())
         .copied()
         .ok_or(ToZ3Error::Unsupported(
             "sequence bound is missing from the equality environment",
@@ -884,7 +957,7 @@ fn substitute_index<Metadata>(
                 to: recurse(&range.to),
             },
             if range.index_variable == *variable {
-                body.without_metadata()
+                body.with_default_metadata()
             } else {
                 recurse(body)
             },
@@ -1154,7 +1227,7 @@ mod tests {
     use ratex_parser::parse;
     use z3::{
         SatResult, Solver, SortKind,
-        ast::{Bool, Int},
+        ast::{Bool, Int, Real},
     };
 
     use crate::{
@@ -1177,7 +1250,9 @@ mod tests {
     }
 
     fn to_z3<Metadata: Clone>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
-        lower_to_z3(&environment, &expression, POSITIVE).unwrap()
+        lower_to_z3(&environment, &expression, POSITIVE)
+            .unwrap()
+            .expression
     }
 
     fn assert_lowering_error<Metadata: Clone>(
@@ -1633,12 +1708,16 @@ mod tests {
             ..Environment::default()
         };
         let expression = expression("p");
-        let Z3Object::Z3(positive) = lower_to_z3(&environment, &expression, POSITIVE).unwrap()
+        let Z3Object::Z3(positive) = lower_to_z3(&environment, &expression, POSITIVE)
+            .unwrap()
+            .expression
         else {
             panic!("expected a Boolean scalar")
         };
         let positive = positive.as_bool().unwrap();
-        let Z3Object::Z3(negative) = lower_to_z3(&environment, &expression, NEGATIVE).unwrap()
+        let Z3Object::Z3(negative) = lower_to_z3(&environment, &expression, NEGATIVE)
+            .unwrap()
+            .expression
         else {
             panic!("expected a Boolean scalar")
         };
@@ -1951,13 +2030,13 @@ mod tests {
             Expr::new(RawExpr::Binop(
                 Binop::Power,
                 base(),
-                exponent().without_metadata(),
+                exponent().with_default_metadata(),
             ))
         };
         let environment = |value| Environment {
             types: [(x.clone(), Type::Int)].into_iter().collect(),
             implicit_dimensions: HashMap::new(),
-            equalities: [(exponent().without_metadata(), value)]
+            equalities: [(exponent().with_default_metadata(), value)]
                 .into_iter()
                 .collect(),
         };
@@ -1997,6 +2076,92 @@ mod tests {
             power,
             ToZ3Error::MissingPowerExponent,
         );
+    }
+
+    #[test]
+    fn test_scalar_square_root_returns_principal_root_side_conditions() {
+        let environment = Environment {
+            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            ..Environment::default()
+        };
+        let lowered = lower_to_z3(&environment, &expression(r"x^{\frac{1}{2}}"), POSITIVE)
+            .unwrap();
+
+        assert_eq!(lowered.expression.to_string(), r"|x^{\\frac{1}{2}}|");
+        assert_eq!(lowered.side_conditions.len(), 1);
+        let condition = &lowered.side_conditions[0];
+        assert_eq!(condition.introduced_variable.name, r"x^{\frac{1}{2}}");
+        assert_eq!(condition.introduced_type, Type::Real);
+        assert_eq!(condition.defining_assertions.len(), 2);
+        assert!(matches!(
+            condition.existence,
+            super::LoweredExistence::Checkable(ref assertions) if assertions.len() == 1
+        ));
+
+        let solver = Solver::new();
+        for assertion in &condition.defining_assertions {
+            let Z3Object::Z3(assertion) = assertion else {
+                panic!("square-root definition must be Boolean")
+            };
+            solver.assert(assertion.as_bool().unwrap());
+        }
+        solver.assert(Real::new_const("x").eq(Real::from_rational(4, 1)));
+        solver.assert(
+            Real::new_const(r"x^{\frac{1}{2}}")
+                .eq(Real::from_rational(2, 1))
+                .not(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_matrix_compound_and_repeated_square_roots() {
+        let environment = Environment {
+            types: HashMap::from([
+                (Variable::new("A"), Type::Matrix(2, 2)),
+                (Variable::new("x"), Type::Real),
+            ]),
+            ..Environment::default()
+        };
+        let matrix_root = lower_to_z3(
+            &environment,
+            &expression(r"A^{\frac{1}{2}} = A^{\frac{1}{2}}"),
+            POSITIVE,
+        )
+        .unwrap();
+        assert_eq!(matrix_root.side_conditions.len(), 1);
+        assert_eq!(
+            matrix_root.side_conditions[0].introduced_variable.name,
+            r"A^{\frac{1}{2}}"
+        );
+        assert_eq!(
+            matrix_root.side_conditions[0].introduced_type,
+            Type::Matrix(2, 2)
+        );
+        assert!(matches!(
+            matrix_root.side_conditions[0].existence,
+            super::LoweredExistence::Assumed
+        ));
+
+        let compound = lower_to_z3(
+            &environment,
+            &expression(r"\left(x + 1\right)^{\frac{1}{2}}"),
+            POSITIVE,
+        )
+        .unwrap();
+        assert_eq!(compound.side_conditions.len(), 1);
+        assert_eq!(
+            compound.side_conditions[0].introduced_variable.name,
+            r"\left(x + 1\right)^{\frac{1}{2}}"
+        );
+
+        let nested = lower_to_z3(
+            &environment,
+            &expression(r"\left(x^{\frac{1}{2}}\right)^{\frac{1}{2}}"),
+            POSITIVE,
+        )
+        .unwrap();
+        assert_eq!(nested.side_conditions.len(), 2);
     }
 
     #[test]

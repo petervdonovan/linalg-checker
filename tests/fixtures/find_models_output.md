@@ -156,3 +156,62 @@ Unsat up to dimension 2
 ## Conclusion
 
 Unsat up to dimension 2
+
+# Defined scalar square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x \ge 0$
+
+## Sentences
+
+- $x^{\frac{1}{2}} = 2$
+
+## Conclusion
+
+Model
+
+- $x = 4$
+
+# Potentially undefined scalar square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+
+## Sentences
+
+- $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+
+## Conclusion
+
+Model
+
+- $x = 0$
+
+### Warnings
+
+The expression $x^{\frac{1}{2}}$ may be undefined. For example:
+
+- $x = -1$
+
+# Assumed matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+## Conclusion
+
+Model
+
+- $A = \begin{bmatrix}0 & 0 \\ 0 & 0\end{bmatrix}$
+
+### Warnings
+
+The existence of $A^{\frac{1}{2}}$ was assumed without checking.

@@ -203,3 +203,56 @@
 
    - $x = 0$
    </details>
+
+# Scalar square roots
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x \ge 0$
+
+## Steps
+
+1. $x^{\frac{1}{2}} \ge 0$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Potentially undefined square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+
+## Steps
+
+1. $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+
+   <details>
+   <summary>⚠️ conditional</summary>
+
+   The expression $x^{\frac{1}{2}}$ may be undefined. For example:
+
+   - $x = -1$
+   </details>
+
+# Assumed matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Steps
+
+1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+   <details>
+   <summary>⚠️ conditional</summary>
+
+   The existence of $A^{\frac{1}{2}}$ was assumed without checking.
+   </details>

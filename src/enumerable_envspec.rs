@@ -74,9 +74,9 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
     contextual_expressions: impl Iterator<Item = Expr<ContextMetadata>>,
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    let assumptions: Vec<_> = assumptions.map(|e| e.without_metadata()).collect();
+    let assumptions: Vec<Expr<()>> = assumptions.map(|e| e.with_default_metadata()).collect();
     let contextual_expressions: Vec<_> = contextual_expressions
-        .map(|expression| expression.without_metadata())
+        .map(|expression| expression.with_default_metadata())
         .collect();
     let specification = collect_environment_specification(&assumptions)?;
     let mut solver = Solver::new();
@@ -1820,7 +1820,7 @@ mod tests {
         let RawExpr::StandardBasis { index, .. } = &symbolic_index.raw else {
             panic!("expected standard basis vector")
         };
-        assert_eq!(symbolic.equalities[&index.without_metadata()], 2);
+        assert_eq!(symbolic.equalities[&index.with_default_metadata()], 2);
 
         assert!(matches!(
             extract_environment_iterator_with_context(

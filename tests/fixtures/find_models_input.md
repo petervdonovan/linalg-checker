@@ -140,3 +140,46 @@ Not solved yet
 ## Conclusion
 
 Not solved yet
+
+# Defined scalar square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x \ge 0$
+
+## Sentences
+
+- $x^{\frac{1}{2}} = 2$
+
+## Conclusion
+
+Not solved yet
+
+# Potentially undefined scalar square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+
+## Sentences
+
+- $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+
+## Conclusion
+
+Not solved yet
+
+# Assumed matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+## Conclusion
+
+Not solved yet

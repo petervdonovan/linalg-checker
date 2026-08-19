@@ -7,8 +7,10 @@ pub mod find_model_given_environment;
 pub mod from_tex;
 pub mod logic_lowering;
 mod model_finding;
+pub mod operator_visitors;
 pub mod to_tex;
 pub mod to_z3;
+pub mod type_resolver;
 pub mod validate_argument;
 pub mod visit_mut;
 
@@ -113,7 +115,7 @@ impl TypeExpr<()> {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Environment {
     pub types: HashMap<Variable, Type>,
     pub equalities: HashMap<Expr<()>, u64>,
@@ -258,14 +260,14 @@ impl<Metadata> Expr<Metadata> {
         Rc::get_mut(&mut self.0)
     }
 
-    pub fn without_metadata(&self) -> Expr<()> {
+    pub fn with_default_metadata<NewMetadata: Default>(&self) -> Expr<NewMetadata> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
             RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
                 dimension: *dimension,
             },
             RawExpr::StandardBasis { index, dimension } => RawExpr::StandardBasis {
-                index: index.without_metadata(),
+                index: index.with_default_metadata(),
                 dimension: *dimension,
             },
             RawExpr::ZeroMatrix { rows, cols } => RawExpr::ZeroMatrix {
@@ -278,10 +280,16 @@ impl<Metadata> Expr<Metadata> {
                 TypeExpr::Int => TypeExpr::Int,
                 TypeExpr::Real => TypeExpr::Real,
                 TypeExpr::Matrix(rows, cols) => {
-                    TypeExpr::Matrix(rows.without_metadata(), cols.without_metadata())
+                    TypeExpr::Matrix(
+                        rows.with_default_metadata(),
+                        cols.with_default_metadata(),
+                    )
                 }
                 TypeExpr::Seq(element, size) => {
-                    TypeExpr::Seq(element.without_metadata(), size.without_metadata())
+                    TypeExpr::Seq(
+                        element.with_default_metadata(),
+                        size.with_default_metadata(),
+                    )
                 }
             }),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
@@ -289,46 +297,59 @@ impl<Metadata> Expr<Metadata> {
             RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
-                elements: matrix.elements.iter().map(Expr::without_metadata).collect(),
+                elements: matrix
+                    .elements
+                    .iter()
+                    .map(Expr::with_default_metadata)
+                    .collect(),
             }),
-            RawExpr::Monop(op, expression) => RawExpr::Monop(*op, expression.without_metadata()),
+            RawExpr::Monop(op, expression) => {
+                RawExpr::Monop(*op, expression.with_default_metadata())
+            }
             RawExpr::Binop(op, left, right) => {
-                RawExpr::Binop(*op, left.without_metadata(), right.without_metadata())
+                RawExpr::Binop(
+                    *op,
+                    left.with_default_metadata(),
+                    right.with_default_metadata(),
+                )
             }
             RawExpr::Triop(op, first, second, third) => RawExpr::Triop(
                 *op,
-                first.without_metadata(),
-                second.without_metadata(),
-                third.without_metadata(),
+                first.with_default_metadata(),
+                second.with_default_metadata(),
+                third.with_default_metadata(),
             ),
             RawExpr::Finop(op, expressions) => RawExpr::Finop(
                 *op,
-                expressions.iter().map(Expr::without_metadata).collect(),
+                expressions
+                    .iter()
+                    .map(Expr::with_default_metadata)
+                    .collect(),
             ),
             RawExpr::CmpChain(chain) => RawExpr::CmpChain(CmpChain {
-                start: chain.start.without_metadata(),
+                start: chain.start.with_default_metadata(),
                 assertions: chain
                     .assertions
                     .iter()
-                    .map(|(op, expression)| (*op, expression.without_metadata()))
+                    .map(|(op, expression)| (*op, expression.with_default_metadata()))
                     .collect(),
             }),
             RawExpr::LogicChain(chain) => RawExpr::LogicChain(LogicChain {
-                start: chain.start.without_metadata(),
+                start: chain.start.with_default_metadata(),
                 assertions: chain
                     .assertions
                     .iter()
-                    .map(|(op, expression)| (*op, expression.without_metadata()))
+                    .map(|(op, expression)| (*op, expression.with_default_metadata()))
                     .collect(),
             }),
             RawExpr::Seqop(op, range, body) => RawExpr::Seqop(
                 *op,
                 Range {
                     index_variable: range.index_variable.clone(),
-                    from: range.from.without_metadata(),
-                    to: range.to.without_metadata(),
+                    from: range.from.with_default_metadata(),
+                    to: range.to.with_default_metadata(),
                 },
-                body.without_metadata(),
+                body.with_default_metadata(),
             ),
         };
         Expr::new(raw)
@@ -444,15 +465,14 @@ mod tests {
     }
 
     #[test]
-    fn without_metadata_preserves_holes() {
-        assert!(matches!(
-            Expr::with_metadata(1, RawExpr::Hole).without_metadata().raw,
-            RawExpr::Hole
-        ));
+    fn default_metadata_preserves_holes() {
+        let expression: Expr<()> =
+            Expr::with_metadata(1, RawExpr::Hole).with_default_metadata();
+        assert!(matches!(expression.raw, RawExpr::Hole));
     }
 
     #[test]
-    fn without_metadata_recursively_erases_metadata() {
+    fn default_metadata_recursively_replaces_metadata() {
         fn expression(metadata: u8) -> Expr<u8> {
             Expr::with_metadata(
                 metadata,
@@ -475,11 +495,13 @@ mod tests {
             )
         }
 
-        assert!(expression(1).without_metadata() == expression(2).without_metadata());
+        let left: Expr<()> = expression(1).with_default_metadata();
+        let right: Expr<()> = expression(2).with_default_metadata();
+        assert_eq!(left, right);
     }
 
     #[test]
-    fn without_metadata_erases_symbolic_type_dimensions() {
+    fn default_metadata_replaces_symbolic_type_dimension_metadata() {
         let expression = Expr::with_metadata(
             1,
             RawExpr::Type(TypeExpr::Matrix(
@@ -496,12 +518,12 @@ mod tests {
                 ),
             )),
         );
-        let erased = expression.without_metadata();
+        let erased: Expr<()> = expression.with_default_metadata();
         assert!(matches!(erased.raw, RawExpr::Type(TypeExpr::Matrix(_, _))));
     }
 
     #[test]
-    fn without_metadata_erases_sequence_element_and_size_metadata() {
+    fn default_metadata_replaces_sequence_element_and_size_metadata() {
         fn sequence(metadata: u8) -> Expr<u8> {
             Expr::with_metadata(
                 metadata,
@@ -522,13 +544,13 @@ mod tests {
         }
 
         assert_eq!(
-            sequence(1).without_metadata(),
-            sequence(10).without_metadata()
+            sequence(1).with_default_metadata::<()>(),
+            sequence(10).with_default_metadata::<()>()
         );
     }
 
     #[test]
-    fn without_metadata_preserves_implicit_dimension_identity() {
+    fn default_metadata_preserves_implicit_dimension_identity() {
         let dimension = ImplicitDimension::fresh();
         let expression = Expr::with_metadata(
             1,
@@ -538,7 +560,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            expression.without_metadata().raw,
+            expression.with_default_metadata::<()>().raw,
             RawExpr::StandardBasis {
                 dimension: found,
                 ..

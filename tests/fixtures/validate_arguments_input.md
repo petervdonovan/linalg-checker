@@ -76,3 +76,34 @@
 ## Steps
 
 1. $x = 0 \iff x \le 0 \implies x = x$
+
+# Scalar square roots
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+- $x \ge 0$
+
+## Steps
+
+1. $x^{\frac{1}{2}} \ge 0$
+
+# Potentially undefined square root
+
+## Assumptions
+
+- $x \in \mathbb{R}$
+
+## Steps
+
+1. $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+
+# Assumed matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Steps
+
+1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
