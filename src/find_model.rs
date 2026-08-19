@@ -5,11 +5,15 @@ use markdown::mdast::{Heading, Node, Root};
 pub use crate::model_finding::{ModelFindingError, ModelOrUnsat, NotSolvedYet, ToFromMd};
 use crate::{
     Expr,
-    enumerable_envspec::{ShapeError, extract_environment_iterator_with_context},
+    enumerable_envspec::{
+        ShapeError, extract_prepared_environment_iterator, infer_symbolic_type_environment,
+    },
     model_finding::{
         expression_list, heading, heading_text, parse_expression_section, render_md, root,
-        root_children, section_start, solve_environment,
+        root_children, section_start, solve_prepared_environment,
     },
+    preprocessing::prepare_expression,
+    visit_mut::VisitContext,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -151,9 +155,23 @@ impl TestCase<NotSolvedYet> {
             sentences,
             conclusion: NotSolvedYet,
         } = self;
-        let conclusion = match extract_environment_iterator_with_context(
-            assumptions.iter().cloned(),
-            sentences.iter().cloned(),
+        let symbolic_types = infer_symbolic_type_environment(&assumptions)?;
+        let positive = VisitContext {
+            logical_polarity: true,
+        };
+        let prepared_assumptions = assumptions
+            .iter()
+            .map(|expression| prepare_expression(&symbolic_types, expression, positive))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::to_z3::ToZ3Error::from)?;
+        let prepared_sentences = sentences
+            .iter()
+            .map(|expression| prepare_expression(&symbolic_types, expression, positive))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::to_z3::ToZ3Error::from)?;
+        let conclusion = match extract_prepared_environment_iterator(
+            &prepared_assumptions,
+            &prepared_sentences,
             max_dimension,
         ) {
             Err(ShapeError::Unsat(_)) => ModelOrUnsat::Unsat,
@@ -170,10 +188,12 @@ impl TestCase<NotSolvedYet> {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    match solve_environment(
-                        &environment,
-                        assumptions.iter().chain(sentences.iter()),
-                    )? {
+                    let prepared = prepared_assumptions
+                        .iter()
+                        .chain(prepared_sentences.iter())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    match solve_prepared_environment(&environment, &prepared)? {
                         ModelOrUnsat::Unsat => {}
                         result @ (ModelOrUnsat::Model(_, _) | ModelOrUnsat::Unknown) => {
                             conclusion = Some(result);

@@ -7,41 +7,72 @@ use crate::{
 
 impl<Metadata> fmt::Display for AsLatex<Metadata> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        expr(f, &self.e)
+        expr_with_mode(f, &self.e, self.verbose)
     }
 }
 
 pub struct AsLatex<Metadata> {
     e: Expr<Metadata>,
+    verbose: bool,
 }
 
 impl<Metadata> Expr<Metadata> {
     pub fn as_latex(&self) -> AsLatex<Metadata> {
-        AsLatex { e: self.clone() }
+        AsLatex {
+            e: self.clone(),
+            verbose: false,
+        }
+    }
+
+    pub fn as_latex_verbose(&self) -> AsLatex<Metadata> {
+        AsLatex {
+            e: self.clone(),
+            verbose: true,
+        }
     }
 }
 
 pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Result {
+    expr_with_mode(f, e, false)
+}
+
+fn expr_with_mode<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    e: &Expr<Metadata>,
+    verbose: bool,
+) -> fmt::Result {
     match &e.raw {
         crate::RawExpr::Hole => write!(f, r"\square"),
+        crate::RawExpr::IdentityMatrix { dimension } if verbose => {
+            write!(f, "I_{{\\text{{dim}}_{}}}", dimension.id())
+        }
         crate::RawExpr::IdentityMatrix { .. } => write!(f, "I"),
-        crate::RawExpr::StandardBasis { index, .. } => {
+        crate::RawExpr::StandardBasis { index, dimension } => {
             write!(f, "e_{{")?;
-            expr(f, index)?;
+            expr_with_mode(f, index, verbose)?;
+            if verbose {
+                write!(f, ",\\text{{dim}}_{}", dimension.id())?;
+            }
             write!(f, "}}")
         }
+        crate::RawExpr::ZeroMatrix { rows, cols } if verbose => write!(
+            f,
+            r"\mathbb{{0}}_{{\text{{dim}}_{},\text{{dim}}_{}}}",
+            rows.id(),
+            cols.id()
+        ),
         crate::RawExpr::ZeroMatrix { .. } => write!(f, r"\mathbb{{0}}"),
-        crate::RawExpr::Type(ty) => type_expr(f, ty),
+        crate::RawExpr::Type(ty) => type_expr(f, ty, verbose),
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
-        crate::RawExpr::Matrix(value) => matrix(f, value),
+        crate::RawExpr::Matrix(value) => matrix(f, value, verbose),
         crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
             let grouped = match op {
                 Monop::Neg => precedence(e) <= Precedence::Addition,
                 Monop::Inverse => precedence(e) < Precedence::Power,
                 _ => false,
             };
-            grouped_expr(f, e, grouped)
+            grouped_expr(f, e, grouped, verbose)
         }),
         crate::RawExpr::Binop(op, e0, e1) => binop(
             f,
@@ -53,6 +84,7 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
                     (matches!(op, Binop::Power) && precedence(e0) < Precedence::Power)
                         || (matches!(op, Binop::ElementOf)
                             && precedence(e0) <= Precedence::Comparison),
+                    verbose,
                 )
             },
             |f| {
@@ -60,27 +92,36 @@ pub fn expr<Metadata>(f: &mut fmt::Formatter<'_>, e: &Expr<Metadata>) -> fmt::Re
                     f,
                     e1,
                     matches!(op, Binop::ElementOf) && precedence(e1) <= Precedence::Comparison,
+                    verbose,
                 )
             },
         ),
-        crate::RawExpr::Triop(op, e0, e1, e2) => {
-            triop(f, op, |f| expr(f, e0), |f| expr(f, e1), |f| expr(f, e2))
-        }
-        crate::RawExpr::Finop(op, exprs) => finop(f, op, exprs.iter()),
-        crate::RawExpr::CmpChain(chain) => cmp_chain(f, chain),
-        crate::RawExpr::LogicChain(chain) => logic_chain(f, chain),
+        crate::RawExpr::Triop(op, e0, e1, e2) => triop(
+            f,
+            op,
+            |f| expr_with_mode(f, e0, verbose),
+            |f| expr_with_mode(f, e1, verbose),
+            |f| expr_with_mode(f, e2, verbose),
+        ),
+        crate::RawExpr::Finop(op, exprs) => finop(f, op, exprs.iter(), verbose),
+        crate::RawExpr::CmpChain(chain) => cmp_chain(f, chain, verbose),
+        crate::RawExpr::LogicChain(chain) => logic_chain(f, chain, verbose),
         crate::RawExpr::Seqop(op, range, body) => seqop(
             f,
             op,
             &range.index_variable.name,
-            |f| expr(f, &range.from),
-            |f| expr(f, &range.to),
-            |f| grouped_expr(f, body, precedence(body) <= Precedence::Addition),
+            |f| expr_with_mode(f, &range.from, verbose),
+            |f| expr_with_mode(f, &range.to, verbose),
+            |f| grouped_expr(f, body, precedence(body) <= Precedence::Addition, verbose),
         ),
     }
 }
 
-fn matrix<Metadata>(f: &mut fmt::Formatter<'_>, matrix: &Matrix<Expr<Metadata>>) -> fmt::Result {
+fn matrix<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    matrix: &Matrix<Expr<Metadata>>,
+    verbose: bool,
+) -> fmt::Result {
     let expected_elements = matrix
         .rows
         .checked_mul(matrix.cols)
@@ -104,7 +145,7 @@ fn matrix<Metadata>(f: &mut fmt::Formatter<'_>, matrix: &Matrix<Expr<Metadata>>)
             if column > 0 {
                 write!(f, " & ")?;
             }
-            expr(f, &matrix.at(row, column))?;
+            expr_with_mode(f, &matrix.at(row, column), verbose)?;
         }
     }
     write!(f, r"\end{{bmatrix}}")
@@ -114,11 +155,12 @@ fn grouped_expr<Metadata>(
     f: &mut fmt::Formatter<'_>,
     e: &Expr<Metadata>,
     grouped: bool,
+    verbose: bool,
 ) -> fmt::Result {
     if grouped {
         write!(f, r"\left(")?;
     }
-    expr(f, e)?;
+    expr_with_mode(f, e, verbose)?;
     if grouped {
         write!(f, r"\right)")?;
     }
@@ -157,7 +199,11 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     }
 }
 
-fn type_expr<Metadata>(f: &mut fmt::Formatter<'_>, ty: &TypeExpr<Metadata>) -> fmt::Result {
+fn type_expr<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    ty: &TypeExpr<Metadata>,
+    verbose: bool,
+) -> fmt::Result {
     match ty {
         TypeExpr::Bool => write!(f, r"\mathbb{{B}}"),
         TypeExpr::Nat => write!(f, r"\mathbb{{N}}"),
@@ -171,21 +217,21 @@ fn type_expr<Metadata>(f: &mut fmt::Formatter<'_>, ty: &TypeExpr<Metadata>) -> f
         }
         TypeExpr::Matrix(rows, cols) if matches!(cols.raw, crate::RawExpr::NatLiteral(1)) => {
             write!(f, r"\mathbb{{R}}^{{")?;
-            expr(f, rows)?;
+            expr_with_mode(f, rows, verbose)?;
             write!(f, "}}")
         }
         TypeExpr::Matrix(rows, cols) => {
             write!(f, r"\mathbb{{R}}^{{")?;
-            expr(f, rows)?;
+            expr_with_mode(f, rows, verbose)?;
             write!(f, r" \times ")?;
-            expr(f, cols)?;
+            expr_with_mode(f, cols, verbose)?;
             write!(f, "}}")
         }
         TypeExpr::Seq(element, size) => {
             write!(f, r"\operatorname{{Seq}}_{{")?;
-            expr(f, size)?;
+            expr_with_mode(f, size, verbose)?;
             write!(f, "}}(")?;
-            expr(f, element)?;
+            expr_with_mode(f, element, verbose)?;
             write!(f, ")")
         }
     }
@@ -319,7 +365,12 @@ fn triop<
     }
 }
 
-fn finop<'a, Metadata: 'a, I>(f: &mut fmt::Formatter<'_>, op: &Finop, exprs: I) -> fmt::Result
+fn finop<'a, Metadata: 'a, I>(
+    f: &mut fmt::Formatter<'_>,
+    op: &Finop,
+    exprs: I,
+    verbose: bool,
+) -> fmt::Result
 where
     I: IntoIterator<Item = &'a Expr<Metadata>>,
 {
@@ -334,7 +385,7 @@ where
             && index > 0
         {
             write!(f, " - ")?;
-            grouped_expr(f, inner, precedence(inner) <= Precedence::Addition)?;
+            grouped_expr(f, inner, precedence(inner) <= Precedence::Addition, verbose)?;
             continue;
         }
 
@@ -350,7 +401,7 @@ where
             Finop::Or => precedence(expression) < Precedence::Or,
             _ => false,
         };
-        grouped_expr(f, expression, grouped)?;
+        grouped_expr(f, expression, grouped, verbose)?;
     }
 
     match op {
@@ -359,11 +410,16 @@ where
     }
 }
 
-fn cmp_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &CmpChain<Metadata>) -> fmt::Result {
+fn cmp_chain<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    chain: &CmpChain<Metadata>,
+    verbose: bool,
+) -> fmt::Result {
     grouped_expr(
         f,
         &chain.start,
         precedence(&chain.start) <= Precedence::Comparison,
+        verbose,
     )?;
     for (op, expression) in &chain.assertions {
         write!(f, " {} ", cmp_symbol(op))?;
@@ -371,20 +427,31 @@ fn cmp_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &CmpChain<Metadata>) -
             f,
             expression,
             precedence(expression) <= Precedence::Comparison,
+            verbose,
         )?;
     }
     Ok(())
 }
 
-fn logic_chain<Metadata>(f: &mut fmt::Formatter<'_>, chain: &LogicChain<Metadata>) -> fmt::Result {
+fn logic_chain<Metadata>(
+    f: &mut fmt::Formatter<'_>,
+    chain: &LogicChain<Metadata>,
+    verbose: bool,
+) -> fmt::Result {
     grouped_expr(
         f,
         &chain.start,
         precedence(&chain.start) <= Precedence::Logic,
+        verbose,
     )?;
     for (op, expression) in &chain.assertions {
         write!(f, " {} ", logic_symbol(op))?;
-        grouped_expr(f, expression, precedence(expression) <= Precedence::Logic)?;
+        grouped_expr(
+            f,
+            expression,
+            precedence(expression) <= Precedence::Logic,
+            verbose,
+        )?;
     }
     Ok(())
 }
@@ -446,12 +513,38 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        Annotation, Binop, Cmp, CmpChain, Expr, Finop, Logic, LogicChain, Matrix, Monop, Range,
-        RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
+        Annotation, Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain,
+        Matrix, Monop, Range, RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
     };
 
     fn as_latex(raw: RawExpr<()>) -> String {
         Expr::new(raw).as_latex().to_string()
+    }
+
+    #[test]
+    fn verbose_latex_exposes_implicit_dimension_nonces_only_internally() {
+        let identity = ImplicitDimension::fresh();
+        let rows = ImplicitDimension::fresh();
+        let cols = ImplicitDimension::fresh();
+        let expression: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                Expr::new(RawExpr::IdentityMatrix {
+                    dimension: identity,
+                }),
+                Expr::new(RawExpr::ZeroMatrix { rows, cols }),
+            ],
+        ));
+        assert_eq!(expression.as_latex().to_string(), r"I + \mathbb{0}");
+        assert_eq!(
+            expression.as_latex_verbose().to_string(),
+            format!(
+                r"I_{{\text{{dim}}_{}}} + \mathbb{{0}}_{{\text{{dim}}_{},\text{{dim}}_{}}}",
+                identity.id(),
+                rows.id(),
+                cols.id()
+            )
+        );
     }
 
     #[test]

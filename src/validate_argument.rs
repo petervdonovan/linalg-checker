@@ -10,14 +10,18 @@ use z3::{SatResult, Solver, ast::Bool};
 
 pub use crate::model_finding::{ModelFindingError, ToFromMd};
 use crate::{
-    Binop, Environment, Expr, Model, RawExpr, Type, TypeExpr,
-    enumerable_envspec::{ShapeError, extract_environment_iterator_with_context},
+    Binop, Cmp, CmpChain, Environment, Expr, Model, RawExpr, Type, TypeExpr,
+    enumerable_envspec::{
+        ShapeError, extract_prepared_environment_iterator, infer_symbolic_type_environment,
+    },
     model_finding::{
         assert_definitions, assert_environment_equalities, expression_list, extract_model, heading,
-        heading_text, lower_boolean, parse_expression_item, parse_expression_section, render_md,
-        root, root_children, section_start, z3_boolean,
+        heading_text, lower_boolean, lower_prepared_boolean, parse_expression_item,
+        parse_expression_section, render_md, root, root_children, section_start, z3_boolean,
     },
+    preprocessing::{PreparedExpression, prepare_expression},
     to_z3::{LoweredExistence, LoweredSideCondition},
+    type_resolver::{SymbolicTypeEnvironment, type_expr},
     visit_mut::VisitContext,
 };
 
@@ -86,6 +90,9 @@ pub enum StepCheck {
     InconsistentAssumptions {
         max_dimension: Option<u64>,
     },
+    DimensionallyInvalid {
+        environment: Rc<Environment>,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -128,9 +135,32 @@ impl Argument {
             step.validation.max_dimension = Some(max_dimension);
         }
 
-        let environments = match extract_environment_iterator_with_context(
-            self.assumptions.iter().cloned(),
-            self.steps.iter().map(|step| step.sentence.clone()),
+        let symbolic_types = infer_symbolic_type_environment(&self.assumptions)?;
+        let prepared_assumptions = self
+            .assumptions
+            .iter()
+            .map(|expression| prepare_expression(&symbolic_types, expression, POSITIVE))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::to_z3::ToZ3Error::from)
+            .map_err(ModelFindingError::from)?;
+        let prepared_positive = self
+            .steps
+            .iter()
+            .map(|step| prepare_expression(&symbolic_types, &step.sentence, POSITIVE))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::to_z3::ToZ3Error::from)
+            .map_err(ModelFindingError::from)?;
+        let prepared_negative = self
+            .steps
+            .iter()
+            .map(|step| prepare_expression(&symbolic_types, &step.sentence, NEGATIVE))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::to_z3::ToZ3Error::from)
+            .map_err(ModelFindingError::from)?;
+
+        let environments = match extract_prepared_environment_iterator(
+            &prepared_assumptions,
+            &[],
             max_dimension,
         ) {
             Ok(environments) => environments,
@@ -157,7 +187,14 @@ impl Argument {
                 }
                 Err(error) => return Err(error.into()),
             };
-            match self.validate_environment(Rc::clone(&environment))? {
+            match self.validate_environment(
+                Rc::clone(&environment),
+                &symbolic_types,
+                &prepared_assumptions,
+                &prepared_positive,
+                &prepared_negative,
+                max_dimension,
+            )? {
                 EnvironmentResult::Sat => satisfiable_assumption_count += 1,
                 EnvironmentResult::Unsat => {}
                 EnvironmentResult::Unknown => assumption_unknown = true,
@@ -176,14 +213,24 @@ impl Argument {
     fn validate_environment(
         &mut self,
         environment: Rc<Environment>,
+        symbolic_types: &SymbolicTypeEnvironment,
+        prepared_assumptions: &[PreparedExpression],
+        prepared_positive: &[PreparedExpression],
+        prepared_negative: &[PreparedExpression],
+        max_dimension: u64,
     ) -> Result<EnvironmentResult, ArgumentValidationError> {
         let mut solver = Solver::new();
         assert_natural_constraints(&mut solver, &environment)?;
         assert_environment_equalities(&solver, &environment)?;
 
         let mut tracked = Vec::new();
-        for (index, assumption) in self.assumptions.iter().enumerate() {
-            let assertion = lower_boolean(&environment, assumption, POSITIVE)?;
+        for (index, (assumption, prepared)) in self
+            .assumptions
+            .iter()
+            .zip(prepared_assumptions)
+            .enumerate()
+        {
+            let assertion = lower_prepared_boolean(&environment, prepared)?;
             assert_definitions(&solver, &assertion.side_conditions)?;
             let tracker = Bool::new_const(format!("argument_assumption_{index}"));
             solver.assert_and_track(assertion.expression, &tracker);
@@ -215,107 +262,117 @@ impl Argument {
                 continue;
             }
             let sentence = self.steps[index].sentence.clone();
-            let negative_assertion = match lower_boolean(&environment, &sentence, NEGATIVE) {
-                Ok(assertion) => assertion,
-                Err(error) => {
-                    self.steps[index].validation.checks.push(StepCheck::Error {
+            let extensions = step_environment_extensions(
+                &environment,
+                symbolic_types,
+                &prepared_positive[index],
+                max_dimension,
+            )?;
+            if extensions.is_empty() {
+                self.steps[index]
+                    .validation
+                    .checks
+                    .push(StepCheck::DimensionallyInvalid {
                         environment: Rc::clone(&environment),
-                        error,
                     });
-                    continue;
-                }
-            };
+                continue;
+            }
 
-            solver.push();
-            assert_definitions(&solver, &negative_assertion.side_conditions)?;
-            solver.assert(negative_assertion.expression.not());
-            match solver.check() {
-                SatResult::Sat => {
-                    let result = solver
-                        .get_model()
-                        .ok_or(ModelFindingError::MissingModel)
-                        .and_then(|model| extract_model(&environment, &model));
-                    solver.pop(1);
-                    match result {
-                        Ok(model) => {
-                            self.steps[index]
-                                .validation
-                                .checks
-                                .push(StepCheck::Counterexample {
-                                    environment: Rc::clone(&environment),
-                                    model,
-                                })
-                        }
-                        Err(error) => self.steps[index].validation.checks.push(StepCheck::Error {
-                            environment: Rc::clone(&environment),
-                            error,
-                        }),
-                    }
-                }
-                SatResult::Unsat => {
-                    let supporting_facts = core_facts(&solver, &tracked);
-                    solver.pop(1);
-                    let positive_assertion = match lower_boolean(&environment, &sentence, POSITIVE)
-                    {
+            let mut accepted = Vec::new();
+            let mut failed = false;
+            for extension in extensions {
+                let extension = Rc::new(extension);
+                let negative_assertion =
+                    match lower_prepared_boolean(&extension, &prepared_negative[index]) {
                         Ok(assertion) => assertion,
                         Err(error) => {
                             self.steps[index].validation.checks.push(StepCheck::Error {
                                 environment: Rc::clone(&environment),
                                 error,
                             });
-                            continue;
+                            failed = true;
+                            break;
                         }
                     };
-                    let warnings = check_step_existence(
-                        &mut solver,
-                        Rc::clone(&environment),
-                        &positive_assertion.side_conditions,
-                    )?;
-                    if warnings.is_empty() {
-                        self.steps[index].validation.checks.push(StepCheck::Unsat {
-                            environment: Rc::clone(&environment),
-                            supporting_facts,
-                        });
-                    } else {
-                        self.steps[index].validation.checks.extend(warnings);
-                    }
-                    assert_definitions(&solver, &positive_assertion.side_conditions)?;
-                    track_step(
-                        &mut solver,
-                        index,
-                        positive_assertion.expression,
-                        sentence,
-                        &mut tracked,
-                    );
-                }
-                SatResult::Unknown => {
-                    solver.pop(1);
-                    let positive_assertion = match lower_boolean(&environment, &sentence, POSITIVE)
-                    {
-                        Ok(assertion) => assertion,
-                        Err(error) => {
-                            self.steps[index].validation.checks.push(StepCheck::Error {
+                solver.push();
+                assert_definitions(&solver, &negative_assertion.side_conditions)?;
+                solver.assert(negative_assertion.expression.not());
+                match solver.check() {
+                    SatResult::Sat => {
+                        let model = solver
+                            .get_model()
+                            .ok_or(ModelFindingError::MissingModel)
+                            .and_then(|model| extract_model(&environment, &model));
+                        solver.pop(1);
+                        self.steps[index].validation.checks.push(match model {
+                            Ok(model) => StepCheck::Counterexample {
+                                environment: Rc::clone(&environment),
+                                model,
+                            },
+                            Err(error) => StepCheck::Error {
                                 environment: Rc::clone(&environment),
                                 error,
-                            });
-                            continue;
-                        }
-                    };
-                    self.steps[index]
-                        .validation
-                        .checks
-                        .push(StepCheck::Unknown {
-                            environment: Some(Rc::clone(&environment)),
+                            },
                         });
-                    assert_definitions(&solver, &positive_assertion.side_conditions)?;
-                    track_step(
-                        &mut solver,
-                        index,
-                        positive_assertion.expression,
-                        sentence,
-                        &mut tracked,
-                    );
+                        failed = true;
+                        break;
+                    }
+                    SatResult::Unknown => {
+                        solver.pop(1);
+                        self.steps[index]
+                            .validation
+                            .checks
+                            .push(StepCheck::Unknown {
+                                environment: Some(Rc::clone(&environment)),
+                            });
+                        failed = true;
+                        break;
+                    }
+                    SatResult::Unsat => {
+                        let supporting_facts = core_facts(&solver, &tracked);
+                        solver.pop(1);
+                        let positive =
+                            match lower_prepared_boolean(&extension, &prepared_positive[index]) {
+                                Ok(assertion) => assertion,
+                                Err(error) => {
+                                    self.steps[index].validation.checks.push(StepCheck::Error {
+                                        environment: Rc::clone(&environment),
+                                        error,
+                                    });
+                                    failed = true;
+                                    break;
+                                }
+                            };
+                        let warnings = check_step_existence(
+                            &mut solver,
+                            Rc::clone(&environment),
+                            &positive.side_conditions,
+                        )?;
+                        if warnings.is_empty() {
+                            self.steps[index].validation.checks.push(StepCheck::Unsat {
+                                environment: Rc::clone(&environment),
+                                supporting_facts,
+                            });
+                        } else {
+                            self.steps[index].validation.checks.extend(warnings);
+                        }
+                        accepted.push(positive);
+                    }
                 }
+            }
+            if !failed {
+                let mut expressions = Vec::new();
+                for assertion in &accepted {
+                    assert_definitions(&solver, &assertion.side_conditions)?;
+                    expressions.push(assertion.expression.clone());
+                }
+                track_step(
+                    &mut solver,
+                    index,
+                    Bool::and(&expressions),
+                    sentence,
+                    &mut tracked,
+                );
             }
         }
         Ok(EnvironmentResult::Sat)
@@ -356,6 +413,53 @@ enum EnvironmentResult {
     Sat,
     Unsat,
     Unknown,
+}
+
+fn step_environment_extensions(
+    base: &Environment,
+    symbolic_types: &SymbolicTypeEnvironment,
+    step: &PreparedExpression,
+    max_dimension: u64,
+) -> Result<Vec<Environment>, ArgumentValidationError> {
+    let mut declarations = Vec::new();
+    for (variable, ty) in &base.types {
+        let declaration = Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            Expr::new(RawExpr::Variable(variable.clone())),
+            Expr::new(RawExpr::Type(type_expr(ty.clone()))),
+        ));
+        declarations.push(
+            prepare_expression(symbolic_types, &declaration, POSITIVE)
+                .map_err(crate::to_z3::ToZ3Error::from)
+                .map_err(ModelFindingError::from)?,
+        );
+    }
+    for (expression, value) in &base.equalities {
+        let equality = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: expression.clone(),
+            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
+        }));
+        if let Ok(prepared) = prepare_expression(symbolic_types, &equality, POSITIVE) {
+            declarations.push(prepared);
+        }
+    }
+    declarations.push(step.clone());
+    let iterator = match extract_prepared_environment_iterator(&declarations, &[], max_dimension) {
+        Ok(iterator) => iterator,
+        Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    iterator
+        .map(|environment| {
+            let mut environment = environment?;
+            environment.equalities.extend(base.equalities.clone());
+            environment
+                .implicit_dimensions
+                .extend(base.implicit_dimensions.clone());
+            Ok(environment)
+        })
+        .collect::<Result<Vec<_>, ShapeError>>()
+        .map_err(Into::into)
 }
 
 fn assert_natural_constraints(
@@ -401,7 +505,7 @@ fn check_step_existence(
             LoweredExistence::Guaranteed => {}
             LoweredExistence::Assumed => checks.push(StepCheck::AssumedExistence {
                 environment: Rc::clone(&environment),
-                introduced_variable: condition.introduced_variable.clone(),
+                introduced_variable: crate::Variable::new(condition.display_name.clone()),
             }),
             LoweredExistence::Checkable(assertions) => {
                 solver.push();
@@ -420,7 +524,7 @@ fn check_step_existence(
                     }),
                     SatResult::Sat => Some(StepCheck::MayBeUndefined {
                         environment: Rc::clone(&environment),
-                        introduced_variable: condition.introduced_variable.clone(),
+                        introduced_variable: crate::Variable::new(condition.display_name.clone()),
                         witness: extract_model(
                             &environment,
                             &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
@@ -612,6 +716,29 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
         return Some(format!(
             "<details>\n<summary>❌ counterexample found</summary>\n\nThe negation of ${}$ is satisfied by:\n\n{assignments}\n</details>",
             step.sentence.as_latex()
+        ));
+    }
+    if let Some(StepCheck::DimensionallyInvalid { environment }) = step
+        .validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::DimensionallyInvalid { .. }))
+    {
+        let mut declarations = environment.types.iter().collect::<Vec<_>>();
+        declarations.sort_by_key(|(variable, _)| *variable);
+        let declarations = declarations
+            .into_iter()
+            .map(|(variable, ty)| {
+                Expr::new(RawExpr::Binop(
+                    Binop::ElementOf,
+                    Expr::new(RawExpr::Variable(variable.clone())),
+                    Expr::new(RawExpr::Type(type_expr(ty.clone()))),
+                ))
+            })
+            .collect::<Vec<_>>();
+        return Some(format!(
+            "<details>\n<summary>⚠️ dimensionally invalid</summary>\n\nThis step is not dimensionally meaningful in the following environment:\n\n{}\n</details>",
+            expression_bullets(&declarations)
         ));
     }
     if let Some(StepCheck::Error { error, .. }) = step

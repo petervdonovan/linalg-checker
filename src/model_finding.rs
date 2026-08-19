@@ -16,9 +16,9 @@ use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
     Variable,
     enumerable_envspec::ShapeError,
+    preprocessing::{PreparedExpression, prepare_expression},
     to_z3::{
-        LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, lower_sequence_element,
-        to_z3,
+        LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, lower_sequence_element, to_z3,
     },
     visit_mut::VisitContext,
 };
@@ -302,6 +302,32 @@ pub(crate) fn solve_environment<'a>(
     }
 }
 
+pub(crate) fn solve_prepared_environment(
+    environment: &Environment,
+    assertions: &[PreparedExpression],
+) -> Result<ModelOrUnsat, ModelFindingError> {
+    let solver = Solver::new();
+    let mut lowered_assertions = Vec::new();
+    assert_environment_equalities(&solver, environment)?;
+    for assertion in assertions {
+        let lowered = lower_prepared_boolean(environment, assertion)?;
+        assert_definitions(&solver, &lowered.side_conditions)?;
+        solver.assert(lowered.expression.clone());
+        lowered_assertions.push(lowered);
+    }
+    match solver.check() {
+        SatResult::Unsat => Ok(ModelOrUnsat::Unsat),
+        SatResult::Unknown => Ok(ModelOrUnsat::Unknown),
+        SatResult::Sat => Ok(ModelOrUnsat::Model(
+            extract_model(
+                environment,
+                &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
+            )?,
+            existence_warnings(environment, &lowered_assertions)?,
+        )),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct LoweredBoolean {
     pub expression: z3::ast::Bool,
@@ -325,7 +351,7 @@ pub(crate) fn existence_warnings(
         match &condition.existence {
             LoweredExistence::Guaranteed => {}
             LoweredExistence::Assumed => warnings.push(ExistenceWarning::Assumed {
-                introduced_variable: condition.introduced_variable.clone(),
+                introduced_variable: Variable::new(condition.display_name.clone()),
             }),
             LoweredExistence::Checkable(warning_assertions) => {
                 let solver = Solver::new();
@@ -344,10 +370,10 @@ pub(crate) fn existence_warnings(
                 match solver.check() {
                     SatResult::Unsat => {}
                     SatResult::Unknown => warnings.push(ExistenceWarning::Assumed {
-                        introduced_variable: condition.introduced_variable.clone(),
+                        introduced_variable: Variable::new(condition.display_name.clone()),
                     }),
                     SatResult::Sat => warnings.push(ExistenceWarning::MayBeUndefined {
-                        introduced_variable: condition.introduced_variable.clone(),
+                        introduced_variable: Variable::new(condition.display_name.clone()),
                         witness: extract_model(
                             environment,
                             &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
@@ -365,7 +391,8 @@ pub(crate) fn lower_boolean(
     assertion: &Expr<()>,
     context: VisitContext,
 ) -> Result<LoweredBoolean, ModelFindingError> {
-    let lowered = to_z3(environment, assertion, context)?;
+    let prepared = prepare_expression(environment, assertion, context).map_err(ToZ3Error::from)?;
+    let lowered = to_z3(environment, &prepared)?;
     let Z3Object::Z3(assertion) = lowered.expression else {
         return Err(ModelFindingError::NonBooleanAssertion);
     };
@@ -374,6 +401,22 @@ pub(crate) fn lower_boolean(
         .ok_or(ModelFindingError::NonBooleanAssertion)?;
     Ok(LoweredBoolean {
         expression: assertion,
+        side_conditions: lowered.side_conditions,
+    })
+}
+
+pub(crate) fn lower_prepared_boolean(
+    environment: &Environment,
+    assertion: &PreparedExpression,
+) -> Result<LoweredBoolean, ModelFindingError> {
+    let lowered = to_z3(environment, assertion)?;
+    let Z3Object::Z3(assertion) = lowered.expression else {
+        return Err(ModelFindingError::NonBooleanAssertion);
+    };
+    Ok(LoweredBoolean {
+        expression: assertion
+            .as_bool()
+            .ok_or(ModelFindingError::NonBooleanAssertion)?,
         side_conditions: lowered.side_conditions,
     })
 }
@@ -394,7 +437,9 @@ pub(crate) fn z3_boolean(value: &Z3Object) -> Result<z3::ast::Bool, ModelFinding
     let Z3Object::Z3(value) = value else {
         return Err(ModelFindingError::NonBooleanAssertion);
     };
-    value.as_bool().ok_or(ModelFindingError::NonBooleanAssertion)
+    value
+        .as_bool()
+        .ok_or(ModelFindingError::NonBooleanAssertion)
 }
 
 pub(crate) fn assert_environment_equalities(
@@ -476,10 +521,14 @@ fn extract_variable(
                 model,
                 to_z3(
                     environment,
-                    &left,
-                    VisitContext {
-                        logical_polarity: true,
-                    },
+                    &prepare_expression(
+                        environment,
+                        &left,
+                        VisitContext {
+                            logical_polarity: true,
+                        },
+                    )
+                    .map_err(ToZ3Error::from)?,
                 )?
                 .expression,
             )?;
@@ -641,11 +690,15 @@ impl ToFromMd for ModelOrUnsat {
             [label, list] if paragraph_text(label) == "Model" => {
                 Self::Model(parse_expression_list(list), Vec::new())
             }
-            [label, list, Node::Heading(Heading { depth: 3, .. }), warnings @ ..]
-                if paragraph_text(label) == "Model" =>
-            {
-                Self::Model(parse_expression_list(list), parse_existence_warnings(warnings))
-            }
+            [
+                label,
+                list,
+                Node::Heading(Heading { depth: 3, .. }),
+                warnings @ ..,
+            ] if paragraph_text(label) == "Model" => Self::Model(
+                parse_expression_list(list),
+                parse_existence_warnings(warnings),
+            ),
             _ => panic!(
                 "conclusion must be Unsat, bounded Unsat, Unknown, or Model followed by an expression list"
             ),
@@ -723,7 +776,12 @@ fn parse_existence_warnings(nodes: &[Node]) -> Vec<ExistenceWarning> {
         let Node::Paragraph(Paragraph { children, .. }) = &nodes[index] else {
             panic!("existence warning must start with a paragraph")
         };
-        let [Node::Text(Text { value: prefix, .. }), Node::InlineMath(InlineMath { value, .. }), Node::Text(Text { value: suffix, .. })] = children.as_slice() else {
+        let [
+            Node::Text(Text { value: prefix, .. }),
+            Node::InlineMath(InlineMath { value, .. }),
+            Node::Text(Text { value: suffix, .. }),
+        ] = children.as_slice()
+        else {
             panic!("existence warning has an invalid format")
         };
         let introduced_variable = Variable::new(value.clone());

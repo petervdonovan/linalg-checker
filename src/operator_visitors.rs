@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Binop, Cmp, CmpChain, Expr, Finop, RawExpr, Type, Variable,
+    Binop, Cmp, CmpChain, Expr, Finop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
-    type_resolver::{MaybeTyped, TypeError, concrete_type_expr},
+    type_resolver::{MaybeTyped, TypeError},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
 
@@ -52,18 +52,11 @@ where
         if !is_square_root(node) {
             return;
         }
-        let root_name = node.as_latex().to_string();
-        let ty = match node
-            .meta
-            .get_type()
-            .and_then(|ty| concrete_type_expr(&ty))
-        {
-            Ok(Type::Real) => Type::Real,
-            Ok(Type::Matrix(rows, cols)) if rows == cols => Type::Matrix(rows, cols),
-            Ok(Type::Matrix(_, _)) => {
-                self.error = Some(TypeError::Invalid("matrix square root requires a square matrix"));
-                return;
-            }
+        let display_name = node.as_latex().to_string();
+        let root_name = node.as_latex_verbose().to_string();
+        let ty = match node.meta.get_type() {
+            Ok(TypeExpr::Real) => TypeExpr::Real,
+            Ok(matrix @ TypeExpr::Matrix(_, _)) => matrix,
             Ok(_) => {
                 self.error = Some(TypeError::Invalid(
                     "square root requires a real scalar or square real matrix",
@@ -98,7 +91,7 @@ where
             deep_clone(&base),
         )];
         let existence = match ty {
-            Type::Real => {
+            TypeExpr::Real => {
                 defining_assertions.push(comparison(
                     node.meta.clone(),
                     deep_clone(&introduced),
@@ -112,11 +105,12 @@ where
                     natural(node.meta.clone(), 0),
                 )])
             }
-            Type::Matrix(_, _) => Existence::Assumed,
+            TypeExpr::Matrix(_, _) => Existence::Assumed,
             _ => unreachable!(),
         };
         let condition = SideCondition {
             introduced_variable: introduced_variable.clone(),
+            display_name,
             introduced_type: ty,
             defining_assertions,
             existence,

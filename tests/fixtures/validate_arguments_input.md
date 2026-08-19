@@ -107,3 +107,13 @@
 ## Steps
 
 1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+# Dimensionally invalid matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2}$
+
+## Steps
+
+1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$

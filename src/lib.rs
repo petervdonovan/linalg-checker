@@ -8,6 +8,7 @@ pub mod from_tex;
 pub mod logic_lowering;
 mod model_finding;
 pub mod operator_visitors;
+pub mod preprocessing;
 pub mod to_tex;
 pub mod to_z3;
 pub mod type_resolver;
@@ -33,6 +34,10 @@ impl ImplicitDimension {
 
     pub(crate) fn z3_name(self) -> String {
         format!("__implicit_dimension_{}", self.0)
+    }
+
+    pub(crate) fn id(self) -> u64 {
+        self.0
     }
 }
 
@@ -280,17 +285,12 @@ impl<Metadata> Expr<Metadata> {
                 TypeExpr::Int => TypeExpr::Int,
                 TypeExpr::Real => TypeExpr::Real,
                 TypeExpr::Matrix(rows, cols) => {
-                    TypeExpr::Matrix(
-                        rows.with_default_metadata(),
-                        cols.with_default_metadata(),
-                    )
+                    TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
                 }
-                TypeExpr::Seq(element, size) => {
-                    TypeExpr::Seq(
-                        element.with_default_metadata(),
-                        size.with_default_metadata(),
-                    )
-                }
+                TypeExpr::Seq(element, size) => TypeExpr::Seq(
+                    element.with_default_metadata(),
+                    size.with_default_metadata(),
+                ),
             }),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
@@ -306,13 +306,11 @@ impl<Metadata> Expr<Metadata> {
             RawExpr::Monop(op, expression) => {
                 RawExpr::Monop(*op, expression.with_default_metadata())
             }
-            RawExpr::Binop(op, left, right) => {
-                RawExpr::Binop(
-                    *op,
-                    left.with_default_metadata(),
-                    right.with_default_metadata(),
-                )
-            }
+            RawExpr::Binop(op, left, right) => RawExpr::Binop(
+                *op,
+                left.with_default_metadata(),
+                right.with_default_metadata(),
+            ),
             RawExpr::Triop(op, first, second, third) => RawExpr::Triop(
                 *op,
                 first.with_default_metadata(),
@@ -466,8 +464,7 @@ mod tests {
 
     #[test]
     fn default_metadata_preserves_holes() {
-        let expression: Expr<()> =
-            Expr::with_metadata(1, RawExpr::Hole).with_default_metadata();
+        let expression: Expr<()> = Expr::with_metadata(1, RawExpr::Hole).with_default_metadata();
         assert!(matches!(expression.raw, RawExpr::Hole));
     }
 

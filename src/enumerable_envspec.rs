@@ -11,8 +11,50 @@ use z3::{
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, RawExpr, SeqOp,
-    SeqType, Type, TypeExpr, Variable,
+    SeqType, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
+    type_resolver::SymbolicTypeEnvironment,
 };
+
+pub fn infer_symbolic_type_environment(
+    assumptions: &[Expr<()>],
+) -> Result<SymbolicTypeEnvironment, ShapeError> {
+    let specification = collect_environment_specification(assumptions)?;
+    let mut types = HashMap::new();
+    for variable in specification.variables {
+        let ty = if specification.dimension_variables.contains(&variable) {
+            TypeExpr::Nat
+        } else if let Some(ty) = specification
+            .explicit_types
+            .get(&variable)
+            .and_then(|types| types.first())
+        {
+            ty.clone()
+        } else {
+            guessed_type_expr(&variable)
+        };
+        types.insert(variable, ty);
+    }
+    Ok(SymbolicTypeEnvironment { types })
+}
+
+fn guessed_type_expr(variable: &Variable) -> TypeExpr<()> {
+    let dimension = |axis: &str| {
+        Expr::new(RawExpr::Variable(Variable::new(format!(
+            "{}_{{{axis}}}",
+            variable.z3_name()
+        ))))
+    };
+    let first = variable.name.chars().next().unwrap_or('_');
+    if first.is_ascii_uppercase() {
+        TypeExpr::Matrix(dimension("rows"), dimension("cols"))
+    } else if matches!(variable.name.as_str(), "u" | "v" | "w" | "x" | "y" | "z") {
+        TypeExpr::Matrix(dimension("rows"), Expr::new(RawExpr::NatLiteral(1)))
+    } else if matches!(variable.name.as_str(), "n" | "i" | "j" | "k" | "l" | "m") {
+        TypeExpr::Nat
+    } else {
+        TypeExpr::Real
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShapeError {
@@ -56,6 +98,7 @@ pub struct EnvironmentIterator {
     max_dimension_sum: u64,
     dimensionless_yielded: bool,
     finished: bool,
+    hidden_variables: BTreeSet<Variable>,
 }
 
 pub fn extract_environment_iterator<Metadata>(
@@ -74,11 +117,84 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
     contextual_expressions: impl Iterator<Item = Expr<ContextMetadata>>,
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    let assumptions: Vec<Expr<()>> = assumptions.map(|e| e.with_default_metadata()).collect();
-    let contextual_expressions: Vec<_> = contextual_expressions
-        .map(|expression| expression.with_default_metadata())
-        .collect();
-    let specification = collect_environment_specification(&assumptions)?;
+    extract_environment_iterator_with_hidden(
+        assumptions
+            .map(|expression| expression.with_default_metadata())
+            .collect(),
+        contextual_expressions
+            .map(|expression| expression.with_default_metadata())
+            .collect(),
+        max_dimension,
+        BTreeSet::new(),
+    )
+}
+
+pub fn extract_prepared_environment_iterator(
+    assumptions: &[PreparedExpression],
+    contextual_expressions: &[PreparedExpression],
+    max_dimension: u64,
+) -> Result<EnvironmentIterator, ShapeError> {
+    let mut hidden_variables = BTreeSet::new();
+    let mut prepared_assumptions = Vec::new();
+    let mut prepared_context = Vec::new();
+    for prepared in assumptions {
+        prepared_assumptions.push(prepared.expression.with_default_metadata());
+        append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
+    }
+    for prepared in contextual_expressions {
+        prepared_context.push(prepared.expression.with_default_metadata());
+        // Generated definitions are typing obligations and must not be skipped by
+        // the ordinary-context implicit-nonce filter.
+        append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
+    }
+    extract_environment_iterator_with_hidden(
+        prepared_assumptions,
+        prepared_context,
+        max_dimension,
+        hidden_variables,
+    )
+}
+
+fn append_side_condition_shapes(
+    prepared: &PreparedExpression,
+    assumptions: &mut Vec<Expr<()>>,
+    hidden_variables: &mut BTreeSet<Variable>,
+) {
+    for condition in &prepared.side_conditions {
+        hidden_variables.insert(condition.introduced_variable.clone());
+        assumptions.push(Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            Expr::new(RawExpr::Variable(condition.introduced_variable.clone())),
+            Expr::new(RawExpr::Type(condition.introduced_type.clone())),
+        )));
+        assumptions.extend(
+            condition
+                .defining_assertions
+                .iter()
+                .map(Expr::with_default_metadata),
+        );
+    }
+}
+
+fn extract_environment_iterator_with_hidden(
+    assumptions: Vec<Expr<()>>,
+    contextual_expressions: Vec<Expr<()>>,
+    max_dimension: u64,
+    hidden_variables: BTreeSet<Variable>,
+) -> Result<EnvironmentIterator, ShapeError> {
+    let mut specification = collect_environment_specification(&assumptions)?;
+    let mut hidden_dimension_variables = BTreeSet::new();
+    for hidden in &hidden_variables {
+        if let Some(types) = specification.explicit_types.get(hidden) {
+            for ty in types {
+                collect_type_dimension_variables(ty, &mut hidden_dimension_variables);
+            }
+            for dimension in &hidden_dimension_variables {
+                specification.variables.remove(dimension);
+                specification.dimension_variables.remove(dimension);
+            }
+        }
+    }
     let mut solver = Solver::new();
     let variable_types = infer_variable_types(&mut solver, specification)?;
     assert_positive_matrix_dimensions(&mut solver, &variable_types);
@@ -95,6 +211,7 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
             implicit_dimensions: &implicit_dimensions,
             projections: &mut projections,
             contextual: false,
+            hidden_dimension_variables: &hidden_dimension_variables,
         };
         for assumption in &assumptions {
             context.constrain_assertion(assumption)?;
@@ -112,8 +229,9 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
     };
 
     let dimensions: Vec<Int> = variable_types
-        .values()
-        .flat_map(shape_dimensions)
+        .iter()
+        .filter(|(variable, _)| !hidden_variables.contains(*variable))
+        .flat_map(|(_, shape)| shape_dimensions(shape))
         .chain(implicit_dimensions.values().cloned())
         .collect();
     let finished = !dimensions.is_empty() && max_dimension == 0;
@@ -134,6 +252,7 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
         max_dimension_sum,
         dimensionless_yielded: false,
         finished,
+        hidden_variables,
     };
     if !iterator.dimensions.is_empty() && !iterator.finished {
         let max_dimension = Int::from_u64(max_dimension);
@@ -277,6 +396,9 @@ impl EnvironmentIterator {
             ..Environment::default()
         };
         for (variable, shape) in &self.variable_types {
+            if self.hidden_variables.contains(variable) {
+                continue;
+            }
             let ty = concrete_type(model, shape)?;
             environment.types.insert(variable.clone(), ty);
         }
@@ -470,6 +592,7 @@ struct ShapeContext<'a> {
     implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     projections: &'a mut BTreeMap<Expr<()>, Int>,
     contextual: bool,
+    hidden_dimension_variables: &'a BTreeSet<Variable>,
 }
 
 impl ShapeContext<'_> {
@@ -579,6 +702,11 @@ impl ShapeContext<'_> {
             RawExpr::Variable(variable)
                 if matches!(self.variable_types.get(variable), Some(Shape::Nat)) =>
             {
+                Ok(Some(Int::new_const(variable_z3_name(variable))))
+            }
+            RawExpr::Variable(variable) if self.hidden_dimension_variables.contains(variable) => {
+                // Symbolic dimensions of hidden generated values reuse internal
+                // dimension names without becoming user environment variables.
                 Ok(Some(Int::new_const(variable_z3_name(variable))))
             }
             RawExpr::Monop(Monop::Neg, inner) if self.lower_nat(inner)?.is_some() => Err(
@@ -1423,9 +1551,13 @@ mod tests {
 
     use super::{
         ShapeError, collect_implicit_dimensions, extract_environment_iterator,
-        extract_environment_iterator_with_context,
+        extract_environment_iterator_with_context, extract_prepared_environment_iterator,
+        infer_symbolic_type_environment,
     };
-    use crate::{Annotation, Expr, Matrix, RawExpr, SeqType, Type, Variable, from_tex};
+    use crate::{
+        Annotation, Expr, Matrix, RawExpr, SeqType, Type, Variable, from_tex,
+        preprocessing::prepare_expression, visit_mut::VisitContext,
+    };
 
     fn expression(tex: &str) -> Expr<()> {
         from_tex::expr(&parse(tex).unwrap()).unwrap()
@@ -1444,6 +1576,33 @@ mod tests {
         assert_eq!(environment.types[&Variable::new("a")], Type::Real);
         assert_eq!(environment.types[&Variable::new("n")], Type::Nat);
         assert_eq!(environment.types[&Variable::new("x")], Type::Real);
+    }
+
+    #[test]
+    fn prepared_square_root_definition_infers_squareness() {
+        let assumptions = vec![expression(r"A^{\frac{1}{2}} = A^{\frac{1}{2}}")];
+        let types = infer_symbolic_type_environment(&assumptions).unwrap();
+        let prepared = assumptions
+            .iter()
+            .map(|expression| {
+                prepare_expression(
+                    &types,
+                    expression,
+                    VisitContext {
+                        logical_polarity: true,
+                    },
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let environments = extract_prepared_environment_iterator(&prepared, &[], 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(environments.len(), 2);
+        assert!(environments.iter().all(|environment| {
+            matches!(environment.types[&Variable::new("A")], Type::Matrix(rows, cols) if rows == cols)
+        }));
     }
 
     #[test]

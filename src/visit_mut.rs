@@ -6,20 +6,21 @@
 
 use crate::{
     Binop, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix, MetaExpr, Monop,
-    Range, RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
+    Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Existence<Metadata> {
     Guaranteed,
     Checkable(Vec<Expr<Metadata>>),
     Assumed,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SideCondition<Metadata> {
     pub introduced_variable: Variable,
-    pub introduced_type: Type,
+    pub display_name: String,
+    pub introduced_type: TypeExpr<()>,
     pub defining_assertions: Vec<Expr<Metadata>>,
     pub existence: Existence<Metadata>,
 }

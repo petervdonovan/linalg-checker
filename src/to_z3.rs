@@ -8,12 +8,8 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
-    Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
-    logic_lowering::LogicLowering,
-    operator_visitors::SquareRootVisitor,
-    type_resolver::{TypeError, TypeResolver, TypedMetadata},
-    visit_mut::Existence,
-    visit_mut::{VisitContext, VisitMut},
+    Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
+    type_resolver::TypeError, visit_mut::Existence,
 };
 
 #[derive(Clone)]
@@ -86,6 +82,7 @@ pub struct ToZ3Result {
 #[derive(Clone)]
 pub struct LoweredSideCondition {
     pub introduced_variable: Variable,
+    pub display_name: String,
     pub introduced_type: Type,
     pub defining_assertions: Vec<Z3Object>,
     pub existence: LoweredExistence,
@@ -454,51 +451,46 @@ fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
     }
 }
 
-/// Lowers an expression after running the ordered core-language preprocessing
-/// pipeline.
+/// Lowers an expression that has already passed through the ordered symbolic
+/// preprocessing pipeline.
 ///
-/// `context.logical_polarity` must agree with the logical context in which the
-/// caller uses the returned expression. In particular, callers that pass
-/// negative polarity remain responsible for applying the corresponding Z3
-/// negation; this function does not insert one.
-pub fn to_z3<Metadata>(
+/// The context stored in `prepared` describes the caller's intended logical
+/// use. A negatively prepared Boolean is still returned without negation; the
+/// counterexample caller remains responsible for applying `not()`.
+pub fn to_z3(
     environment: &Environment,
-    expression: &Expr<Metadata>,
-    context: VisitContext,
+    prepared: &PreparedExpression,
 ) -> Result<ToZ3Result, ToZ3Error> {
-    let mut expression: Expr<TypedMetadata> = expression.with_default_metadata();
-    TypeResolver::new(environment).resolve(&mut expression, context)?;
-    LogicLowering.visit_expr_mut(context, &mut expression);
-    let mut square_roots = SquareRootVisitor::default();
-    square_roots.visit_expr_mut(context, &mut expression);
-    let side_conditions = square_roots.finish()?;
+    let expression = &prepared.expression;
+    let side_conditions = &prepared.side_conditions;
 
     let mut lowering_environment = environment.clone();
-    for condition in &side_conditions {
+    for condition in side_conditions {
         assert!(
             lowering_environment
                 .types
                 .insert(
                     condition.introduced_variable.clone(),
-                    condition.introduced_type.clone(),
+                    concrete_side_type(environment, &condition.introduced_type)?,
                 )
                 .is_none(),
             "synthetic square-root variable collides with an environment variable"
         );
     }
-    let expression = lower(&lowering_environment, &expression)?;
+    let expression = lower(&lowering_environment, expression)?;
     let side_conditions = side_conditions
-        .into_iter()
+        .iter()
         .map(|condition| {
             Ok(LoweredSideCondition {
-                introduced_variable: condition.introduced_variable,
-                introduced_type: condition.introduced_type,
+                introduced_variable: condition.introduced_variable.clone(),
+                display_name: condition.display_name.clone(),
+                introduced_type: concrete_side_type(environment, &condition.introduced_type)?,
                 defining_assertions: condition
                     .defining_assertions
                     .iter()
                     .map(|assertion| lower(&lowering_environment, assertion))
                     .collect::<Result<_, _>>()?,
-                existence: match condition.existence {
+                existence: match &condition.existence {
                     Existence::Guaranteed => LoweredExistence::Guaranteed,
                     Existence::Checkable(assertions) => LoweredExistence::Checkable(
                         assertions
@@ -514,6 +506,30 @@ pub fn to_z3<Metadata>(
     Ok(ToZ3Result {
         expression,
         side_conditions,
+    })
+}
+
+fn concrete_side_type(environment: &Environment, ty: &TypeExpr<()>) -> Result<Type, ToZ3Error> {
+    Ok(match ty {
+        TypeExpr::Bool => Type::Bool,
+        TypeExpr::Nat => Type::Nat,
+        TypeExpr::Int => Type::Int,
+        TypeExpr::Real => Type::Real,
+        TypeExpr::Matrix(rows, cols) => Type::Matrix(
+            concrete_cast_dimension(environment, rows)?,
+            concrete_cast_dimension(environment, cols)?,
+        ),
+        TypeExpr::Seq(element, size) => {
+            let RawExpr::Type(element) = &element.raw else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "sequence element must be a type expression",
+                ));
+            };
+            Type::Seq(Box::new(crate::SeqType {
+                t: concrete_side_type(environment, element)?,
+                n: concrete_cast_dimension(environment, size)?,
+            }))
+        }
     })
 }
 
@@ -1233,7 +1249,8 @@ mod tests {
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, SeqType, Type, TypeExpr,
         Variable, from_tex,
-        to_z3::{Environment, ToZ3Error, Z3Object, to_z3 as lower_to_z3},
+        preprocessing::prepare_expression,
+        to_z3::{Environment, ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
         visit_mut::VisitContext,
     };
 
@@ -1247,6 +1264,15 @@ mod tests {
 
     fn expression(tex: &str) -> Expr<()> {
         from_tex::expr(&parse(tex).unwrap()).unwrap()
+    }
+
+    fn lower_to_z3<Metadata>(
+        environment: &Environment,
+        expression: &Expr<Metadata>,
+        context: VisitContext,
+    ) -> Result<ToZ3Result, ToZ3Error> {
+        let prepared = prepare_expression(environment, expression, context)?;
+        prepared_to_z3(environment, &prepared)
     }
 
     fn to_z3<Metadata: Clone>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
@@ -1594,13 +1620,11 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_variable_type_returns_an_error() {
+    #[should_panic(expected = "has no symbolically inferred type")]
+    fn test_missing_variable_type_is_an_invariant_failure() {
         let variable = Variable::new("x");
-        assert_lowering_error(
-            Environment::default(),
-            Expr::<()>::new(RawExpr::Variable(variable.clone())),
-            ToZ3Error::MissingVariableType(variable),
-        );
+        let expression = Expr::<()>::new(RawExpr::Variable(variable));
+        let _ = lower_to_z3(&Environment::default(), &expression, POSITIVE);
     }
 
     #[test]
@@ -2072,7 +2096,10 @@ mod tests {
         ));
 
         assert_lowering_error(
-            Environment::default(),
+            Environment {
+                types: [(Variable::new("n"), Type::Nat)].into_iter().collect(),
+                ..Environment::default()
+            },
             power,
             ToZ3Error::MissingPowerExponent,
         );
@@ -2084,8 +2111,7 @@ mod tests {
             types: HashMap::from([(Variable::new("x"), Type::Real)]),
             ..Environment::default()
         };
-        let lowered = lower_to_z3(&environment, &expression(r"x^{\frac{1}{2}}"), POSITIVE)
-            .unwrap();
+        let lowered = lower_to_z3(&environment, &expression(r"x^{\frac{1}{2}}"), POSITIVE).unwrap();
 
         assert_eq!(lowered.expression.to_string(), r"|x^{\\frac{1}{2}}|");
         assert_eq!(lowered.side_conditions.len(), 1);

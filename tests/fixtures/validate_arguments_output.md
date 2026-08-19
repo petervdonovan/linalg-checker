@@ -180,7 +180,7 @@
 
    The negation of $U U^\top = I$ is satisfied by:
 
-   - $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
+   - $U = \begin{bmatrix}-\left(\frac{7}{16}\right)^{\frac{1}{2}} \\ \frac{-3}{4}\end{bmatrix}$
    </details>
 
 # Logic-chain preprocessing
@@ -255,4 +255,22 @@
    <summary>⚠️ conditional</summary>
 
    The existence of $A^{\frac{1}{2}}$ was assumed without checking.
+   </details>
+
+# Dimensionally invalid matrix square root
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2}$
+
+## Steps
+
+1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+   <details>
+   <summary>⚠️ dimensionally invalid</summary>
+
+   This step is not dimensionally meaningful in the following environment:
+
+   - $A \in \mathbb{R}^{2}$
    </details>
