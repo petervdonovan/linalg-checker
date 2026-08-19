@@ -2170,6 +2170,28 @@ mod tests {
     }
 
     #[test]
+    fn block_selector_uniquely_infers_context_dependent_dimensions() {
+        let assumptions = [
+            r"A \in \mathbb{R}^{2 \times 2}",
+            r"B \in \mathbb{R}^{2 \times 2}",
+            r"\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A",
+        ];
+        let environments = extract_environment_iterator(assumptions.into_iter().map(expression), 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(environments.len(), 1);
+        assert_eq!(environments[0].implicit_dimensions.len(), 3);
+        assert!(
+            environments[0]
+                .implicit_dimensions
+                .values()
+                .all(|dimension| *dimension == 2)
+        );
+    }
+
+    #[test]
     fn block_matrices_reject_unsupported_and_empty_blocks() {
         assert!(matches!(
             extract_environment_iterator(

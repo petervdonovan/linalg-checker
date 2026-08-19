@@ -138,3 +138,31 @@
 
 1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
 2. $\left\lVert A \right\rVert_{2} \ge 0$
+
+# Block multiplication formula
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{2 \times 2}$
+- $C \in \mathbb{R}^{2 \times 2}$
+- $D \in \mathbb{R}^{2 \times 2}$
+- $E \in \mathbb{R}^{2 \times 2}$
+- $F \in \mathbb{R}^{2 \times 2}$
+- $G \in \mathbb{R}^{2 \times 2}$
+- $H \in \mathbb{R}^{2 \times 2}$
+
+## Steps
+
+1. $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
+
+# Block selector identity
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $B \in \mathbb{R}^{2 \times 2}$
+
+## Steps
+
+1. $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
