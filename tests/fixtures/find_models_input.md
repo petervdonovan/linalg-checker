@@ -183,3 +183,48 @@ Not solved yet
 ## Conclusion
 
 Not solved yet
+
+# Negative squared two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Sentences
+
+- $\left\lVert v \right\rVert_{2}^{2} < 0$
+
+## Conclusion
+
+Not solved yet
+
+# Negative two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Sentences
+
+- $\left\lVert v \right\rVert_{2} < 0$
+
+## Conclusion
+
+Not solved yet
+
+# Bordered block matrix
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $b \in \mathbb{R}^{2}$
+- $c \in \mathbb{R}^{2}$
+- $d \in \mathbb{R}$
+
+## Sentences
+
+- $\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix} = \begin{bmatrix}1 & 2 & 3 \\ 4 & 5 & 6 \\ 7 & 8 & 9\end{bmatrix}$
+
+## Conclusion
+
+Not solved yet

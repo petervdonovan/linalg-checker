@@ -117,3 +117,24 @@
 ## Steps
 
 1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+
+# Vector two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Steps
+
+1. $\left\lVert v \right\rVert_{2} \ge 0$
+
+# Wide matrix two-norm
+
+## Assumptions
+
+- $A \in \mathbb{R}^{1 \times 2}$
+
+## Steps
+
+1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
+2. $\left\lVert A \right\rVert_{2} \ge 0$

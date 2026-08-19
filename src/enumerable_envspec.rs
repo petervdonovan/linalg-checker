@@ -10,8 +10,8 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, RawExpr, SeqOp,
-    SeqType, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Matrix, Monop, RawExpr,
+    SeqOp, SeqType, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
     type_resolver::SymbolicTypeEnvironment,
 };
 
@@ -782,19 +782,7 @@ impl ShapeContext<'_> {
                 })
             }
             RawExpr::NatLiteral(_) => Ok(Shape::Nat),
-            RawExpr::Matrix(matrix) => {
-                for element in &matrix.elements {
-                    if matches!(self.infer(element)?, Shape::Matrix(_, _)) {
-                        return Err(ShapeError::Unsupported(
-                            "block matrix shape inference is not supported".to_owned(),
-                        ));
-                    }
-                }
-                Ok(Shape::Matrix(
-                    Int::from_u64(matrix.rows as u64),
-                    Int::from_u64(matrix.cols as u64),
-                ))
-            }
+            RawExpr::Matrix(matrix) => self.infer_block_matrix(matrix),
             RawExpr::Monop(op, inner) => {
                 let shape = self.infer(inner)?;
                 match (op, shape) {
@@ -811,9 +799,10 @@ impl ShapeContext<'_> {
                         self.assert_typing_failure(&shape);
                         Ok(Shape::Real)
                     }
-                    (Monop::Norm1 | Monop::Norm2 | Monop::NormInfty | Monop::NormFrob, _) => {
-                        Ok(Shape::Real)
-                    }
+                    (Monop::Norm2, _) => Err(ShapeError::Unsupported(
+                        "2-norm must be lowered before shape inference".to_owned(),
+                    )),
+                    (Monop::Norm1 | Monop::NormInfty | Monop::NormFrob, _) => Ok(Shape::Real),
                     (_, shape) => Ok(shape),
                 }
             }
@@ -1155,6 +1144,64 @@ impl ShapeContext<'_> {
             }
             shape => shape,
         }
+    }
+
+    fn infer_block_matrix(&mut self, matrix: &Matrix<Expr<()>>) -> Result<Shape, ShapeError> {
+        let expected_elements = matrix.rows.checked_mul(matrix.cols).ok_or_else(|| {
+            ShapeError::Unsupported("matrix dimensions overflow usize".to_owned())
+        })?;
+        if matrix.elements.len() != expected_elements {
+            return Err(ShapeError::InvalidTyping(
+                "matrix element count does not match its dimensions".to_owned(),
+            ));
+        }
+        if (matrix.rows == 0) != (matrix.cols == 0) {
+            return Err(ShapeError::InvalidTyping(
+                "matrix dimensions must both be zero or both be nonzero".to_owned(),
+            ));
+        }
+        if matrix.rows == 0 {
+            return Ok(Shape::Matrix(Int::from_u64(0), Int::from_u64(0)));
+        }
+
+        let dimensions = matrix
+            .elements
+            .iter()
+            .map(|element| block_shape_dimensions(self.infer(element)?))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut row_heights = Vec::with_capacity(matrix.rows);
+        for row in 0..matrix.rows {
+            let height = dimensions[row * matrix.cols].0.clone();
+            for column in 1..matrix.cols {
+                self.assert_dimensions_equal(&height, &dimensions[row * matrix.cols + column].0);
+            }
+            row_heights.push(height);
+        }
+        let mut column_widths = Vec::with_capacity(matrix.cols);
+        for column in 0..matrix.cols {
+            let width = dimensions[column].1.clone();
+            for row in 1..matrix.rows {
+                self.assert_dimensions_equal(&width, &dimensions[row * matrix.cols + column].1);
+            }
+            column_widths.push(width);
+        }
+        Ok(Shape::Matrix(
+            Int::add(&row_heights),
+            Int::add(&column_widths),
+        ))
+    }
+}
+
+fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
+    match shape {
+        Shape::Nat | Shape::Int | Shape::Real => Ok((Int::from_u64(1), Int::from_u64(1))),
+        Shape::Matrix(rows, cols) if rows.as_u64() == Some(0) && cols.as_u64() == Some(0) => Err(
+            ShapeError::InvalidTyping("empty matrices cannot be used as blocks".to_owned()),
+        ),
+        Shape::Matrix(rows, cols) => Ok((rows, cols)),
+        Shape::Bool | Shape::Seq(_, _) => Err(ShapeError::InvalidTyping(
+            "block matrix cells must be numeric scalars or matrices".to_owned(),
+        )),
     }
 }
 
@@ -1606,6 +1653,38 @@ mod tests {
     }
 
     #[test]
+    fn prepared_two_norm_forms_infer_a_column_matrix() {
+        for assertion in [
+            r"\left\lVert A \right\rVert_{2} = 0",
+            r"\left\lVert A \right\rVert_{2}^{2} = 0",
+        ] {
+            let assumptions = vec![expression(assertion)];
+            let types = infer_symbolic_type_environment(&assumptions).unwrap();
+            let prepared = assumptions
+                .iter()
+                .map(|expression| {
+                    prepare_expression(
+                        &types,
+                        expression,
+                        VisitContext {
+                            logical_polarity: true,
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let environments = extract_prepared_environment_iterator(&prepared, &[], 2)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(environments.len(), 2);
+            assert!(environments.iter().all(|environment| {
+                matches!(environment.types[&Variable::new("A")], Type::Matrix(_, 1))
+            }));
+        }
+    }
+
+    #[test]
     fn casts_constrain_symbolic_matrix_targets_to_one_by_one() {
         let environment = environments(&[
             r"x \in \mathbb{R}",
@@ -2034,21 +2113,89 @@ mod tests {
     }
 
     #[test]
-    fn rejects_block_matrices_until_their_shapes_are_supported() {
-        let scalar: Expr<()> = Expr::new(RawExpr::NatLiteral(1));
-        let block = Expr::new(RawExpr::Matrix(Matrix {
-            rows: 1,
-            cols: 1,
-            elements: vec![scalar],
+    fn block_matrices_infer_totals_and_enforce_compatibility() {
+        let valid = [
+            r"A \in \mathbb{R}^{2 \times 2}",
+            r"b \in \mathbb{R}^{2}",
+            r"c \in \mathbb{R}^{2}",
+            r"d \in \mathbb{R}",
+            r"M = \begin{bmatrix}A & b \\ c^\top & d\end{bmatrix}",
+        ];
+        let environments = extract_environment_iterator(valid.into_iter().map(expression), 3)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(environments.len(), 1);
+        assert_eq!(
+            environments[0].types[&Variable::new("M")],
+            Type::Matrix(3, 3)
+        );
+
+        for invalid in [
+            [
+                r"A \in \mathbb{R}^{2 \times 2}",
+                r"b \in \mathbb{R}^{3}",
+                r"M = \begin{bmatrix}A & b\end{bmatrix}",
+            ],
+            [
+                r"A \in \mathbb{R}^{2 \times 2}",
+                r"c \in \mathbb{R}^{3}",
+                r"M = \begin{bmatrix}A \\ c^\top\end{bmatrix}",
+            ],
+        ] {
+            assert!(matches!(
+                extract_environment_iterator(invalid.into_iter().map(expression), 3),
+                Err(ShapeError::Unsat(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn block_matrices_support_context_dependent_blocks() {
+        let assumptions = [
+            r"M \in \mathbb{R}^{2 \times 2}",
+            r"M = \begin{bmatrix}I & \mathbb{0} \\ \mathbb{0} & I\end{bmatrix}",
+        ];
+        let environments = extract_environment_iterator(assumptions.into_iter().map(expression), 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(environments.len(), 1);
+        assert!(
+            environments[0]
+                .implicit_dimensions
+                .values()
+                .all(|dimension| *dimension == 1)
+        );
+    }
+
+    #[test]
+    fn block_matrices_reject_unsupported_and_empty_blocks() {
+        assert!(matches!(
+            extract_environment_iterator(
+                [
+                    expression(r"b \in \mathbb{B}"),
+                    expression(r"M = \begin{bmatrix}b\end{bmatrix}")
+                ]
+                .into_iter(),
+                2,
+            ),
+            Err(ShapeError::InvalidTyping(_))
+        ));
+
+        let empty: Expr<()> = Expr::new(RawExpr::Matrix(Matrix {
+            rows: 0,
+            cols: 0,
+            elements: Vec::new(),
         }));
         let matrix = Expr::new(RawExpr::Matrix(Matrix {
             rows: 1,
             cols: 1,
-            elements: vec![block],
+            elements: vec![empty],
         }));
         assert!(matches!(
-            extract_environment_iterator([matrix].into_iter(), 10),
-            Err(ShapeError::Unsupported(_))
+            extract_environment_iterator([matrix].into_iter(), 2),
+            Err(ShapeError::InvalidTyping(_))
         ));
     }
 

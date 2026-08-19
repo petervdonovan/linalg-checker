@@ -215,3 +215,53 @@ Model
 ### Warnings
 
 The existence of $A^{\frac{1}{2}}$ was assumed without checking.
+
+# Negative squared two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Sentences
+
+- $\left\lVert v \right\rVert_{2}^{2} < 0$
+
+## Conclusion
+
+Unsat up to dimension 2
+
+# Negative two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Sentences
+
+- $\left\lVert v \right\rVert_{2} < 0$
+
+## Conclusion
+
+Unsat up to dimension 2
+
+# Bordered block matrix
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $b \in \mathbb{R}^{2}$
+- $c \in \mathbb{R}^{2}$
+- $d \in \mathbb{R}$
+
+## Sentences
+
+- $\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix} = \begin{bmatrix}1 & 2 & 3 \\ 4 & 5 & 6 \\ 7 & 8 & 9\end{bmatrix}$
+
+## Conclusion
+
+Model
+
+- $A = \begin{bmatrix}1 & 2 \\ 4 & 5\end{bmatrix}$
+- $b = \begin{bmatrix}3 \\ 6\end{bmatrix}$
+- $c = \begin{bmatrix}7 \\ 8\end{bmatrix}$
+- $d = 9$

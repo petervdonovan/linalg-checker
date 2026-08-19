@@ -708,23 +708,28 @@ fn parse_sup_sub(
     sup: Option<&ParseNode>,
     sub: Option<&ParseNode>,
 ) -> Result<Expr<()>, FromTexError> {
-    if let ParseNode::LeftRight {
+    let norm = if let ParseNode::LeftRight {
         body, left, right, ..
     } = base
         && left == r"\lVert"
         && right == r"\rVert"
-        && sup.is_none()
     {
         let op = norm_operator(sub.ok_or_else(|| FromTexError::Malformed {
             index: 0,
             message: "norm is missing its subscript".to_owned(),
         })?)?;
-        return Ok(Expr::new(RawExpr::Monop(op, expr(body)?)));
-    }
+        Some(Expr::new(RawExpr::Monop(op, expr(body)?)))
+    } else {
+        None
+    };
 
-    let mut expression = parse_group(base)?;
+    let is_norm = norm.is_some();
+    let mut expression = match norm {
+        Some(norm) => norm,
+        None => parse_group(base)?,
+    };
 
-    if let Some(subscript) = sub {
+    if !is_norm && let Some(subscript) = sub {
         let body = group_body(subscript);
         let parts = split_top_level(body, ",");
         if parts.len() == 2 {
@@ -1190,15 +1195,23 @@ mod tests {
             matrix.elements[3].raw,
             crate::RawExpr::Binop(crate::Binop::Power, _, _)
         ));
+
+        expect![r"\begin{bmatrix}\begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix} & \begin{bmatrix}5 \\ 6\end{bmatrix} \\ \begin{bmatrix}7 & 8\end{bmatrix} & 9\end{bmatrix}"]
+            .assert_eq(
+                &round_trip(
+                    r"\begin{bmatrix}\begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix} & \begin{bmatrix}5 \\ 6\end{bmatrix} \\ \begin{bmatrix}7 & 8\end{bmatrix} & 9\end{bmatrix}",
+                )
+                .unwrap(),
+            );
     }
 
     #[test]
     fn parses_unary_and_finite_operators() {
         expect![
-            "\\operatorname{tr}(x)\n\\det(x)\n\\det(x)\n\\operatorname{tr}(A + B)\n\\det(A^\\top)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
+            "\\operatorname{tr}(x)\n\\det(x)\n\\det(x)\n\\operatorname{tr}(A + B)\n\\det(A^\\top)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{2}^{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             round_trip(r"\operatorname{tr}(x)").unwrap(),
             round_trip(r"\operatorname{det}(x)").unwrap(),
             round_trip(r"\det(x)").unwrap(),
@@ -1206,6 +1219,7 @@ mod tests {
             round_trip(r"\det(A^\top)").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{1}").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{2}").unwrap(),
+            round_trip(r"\left\lVert x \right\rVert_{2}^{2}").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{\infty}").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{F}").unwrap(),
             round_trip(r"\max(1, 2)").unwrap(),

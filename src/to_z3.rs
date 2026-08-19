@@ -590,24 +590,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
         }
         RawExpr::Finop(Finop::And, expressions) => lower_boolean_finite(γ, expressions, Finop::And),
         RawExpr::Finop(Finop::Or, expressions) => lower_boolean_finite(γ, expressions, Finop::Or),
-        RawExpr::Matrix(matrix) => {
-            let expected_elements = matrix
-                .rows
-                .checked_mul(matrix.cols)
-                .ok_or(ToZ3Error::DimensionOverflow)?;
-            if matrix.elements.len() != expected_elements {
-                return Err(ToZ3Error::InvalidMatrixLiteral);
-            }
-            Ok(Z3Object::Matrix(Matrix {
-                rows: matrix.rows,
-                cols: matrix.cols,
-                elements: matrix
-                    .elements
-                    .iter()
-                    .map(|expression| lower(γ, expression))
-                    .collect::<Result<_, _>>()?,
-            }))
-        }
+        RawExpr::Matrix(matrix) => lower_block_matrix(γ, matrix),
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
         RawExpr::Seqop(op, range, body) => lower_sequence(γ, *op, range, body),
         RawExpr::LogicChain(chain) => lower_logic_chain(γ, chain),
@@ -617,6 +600,115 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
         | RawExpr::Finop(_, _) => Err(ToZ3Error::Unsupported(
             "expression is not supported by to_z3",
         )),
+    }
+}
+
+fn lower_block_matrix<Metadata>(
+    environment: &Environment,
+    matrix: &Matrix<Expr<Metadata>>,
+) -> Result<Z3Object, ToZ3Error> {
+    let expected_elements = matrix
+        .rows
+        .checked_mul(matrix.cols)
+        .ok_or(ToZ3Error::DimensionOverflow)?;
+    if matrix.elements.len() != expected_elements || (matrix.rows == 0) != (matrix.cols == 0) {
+        return Err(ToZ3Error::InvalidMatrixLiteral);
+    }
+    if matrix.rows == 0 {
+        return Ok(Z3Object::Matrix(Matrix {
+            rows: 0,
+            cols: 0,
+            elements: Vec::new(),
+        }));
+    }
+
+    let blocks = matrix
+        .elements
+        .iter()
+        .map(|expression| lower(environment, expression).and_then(numeric_block))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut row_heights = Vec::with_capacity(matrix.rows);
+    for row in 0..matrix.rows {
+        let height = blocks[row * matrix.cols].rows;
+        if (1..matrix.cols).any(|column| blocks[row * matrix.cols + column].rows != height) {
+            return Err(ToZ3Error::Shape(
+                "blocks in a block-matrix row must have equal heights",
+            ));
+        }
+        row_heights.push(height);
+    }
+    let mut column_widths = Vec::with_capacity(matrix.cols);
+    for column in 0..matrix.cols {
+        let width = blocks[column].cols;
+        if (1..matrix.rows).any(|row| blocks[row * matrix.cols + column].cols != width) {
+            return Err(ToZ3Error::Shape(
+                "blocks in a block-matrix column must have equal widths",
+            ));
+        }
+        column_widths.push(width);
+    }
+    let rows = row_heights.iter().try_fold(0usize, |sum, height| {
+        sum.checked_add(*height).ok_or(ToZ3Error::DimensionOverflow)
+    })?;
+    let cols = column_widths.iter().try_fold(0usize, |sum, width| {
+        sum.checked_add(*width).ok_or(ToZ3Error::DimensionOverflow)
+    })?;
+    let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
+    let mut elements = Vec::with_capacity(capacity);
+    for block_row in 0..matrix.rows {
+        for inner_row in 0..row_heights[block_row] {
+            for block_column in 0..matrix.cols {
+                let block = &blocks[block_row * matrix.cols + block_column];
+                let start = inner_row * block.cols;
+                elements.extend(block.elements[start..start + block.cols].iter().cloned());
+            }
+        }
+    }
+    Ok(Z3Object::Matrix(Matrix {
+        rows,
+        cols,
+        elements,
+    }))
+}
+
+fn numeric_block(value: Z3Object) -> Result<Matrix<Z3Object>, ToZ3Error> {
+    match value {
+        Z3Object::Z3(expression)
+            if expression.as_int().is_some() || expression.as_real().is_some() =>
+        {
+            Ok(Matrix {
+                rows: 1,
+                cols: 1,
+                elements: vec![Z3Object::Z3(expression)],
+            })
+        }
+        Z3Object::Z3(_) => Err(ToZ3Error::InvalidOperands(
+            "block matrix cells must be numeric scalars or matrices",
+        )),
+        Z3Object::Matrix(matrix) => {
+            let expected_elements = matrix
+                .rows
+                .checked_mul(matrix.cols)
+                .ok_or(ToZ3Error::DimensionOverflow)?;
+            if matrix.elements.len() != expected_elements {
+                return Err(ToZ3Error::InvalidMatrixLiteral);
+            }
+            if matrix.rows == 0 {
+                return Err(ToZ3Error::Empty("empty matrices cannot be used as blocks"));
+            }
+            if matrix.elements.iter().any(|element| {
+                !matches!(
+                    element,
+                    Z3Object::Z3(expression)
+                        if expression.as_int().is_some() || expression.as_real().is_some()
+                )
+            }) {
+                return Err(ToZ3Error::InvalidOperands(
+                    "block matrices must flatten to numeric scalar cells",
+                ));
+            }
+            Ok(matrix)
+        }
     }
 }
 
@@ -1939,33 +2031,7 @@ mod tests {
             start: Expr::new(RawExpr::NatLiteral(1)),
             assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(1)))],
         }));
-        let nested: Expr<()> = Expr::new(RawExpr::Matrix(Matrix {
-            rows: 1,
-            cols: 1,
-            elements: vec![Expr::new(RawExpr::NatLiteral(1))],
-        }));
-        for (op, cell, message) in [
-            (
-                Monop::Trace,
-                boolean.clone(),
-                "trace requires numeric scalar matrix cells",
-            ),
-            (
-                Monop::Det,
-                boolean,
-                "determinant requires numeric scalar matrix cells",
-            ),
-            (
-                Monop::Trace,
-                nested.clone(),
-                "trace requires numeric scalar matrix cells",
-            ),
-            (
-                Monop::Det,
-                nested,
-                "determinant requires numeric scalar matrix cells",
-            ),
-        ] {
+        for (op, cell) in [(Monop::Trace, boolean.clone()), (Monop::Det, boolean)] {
             assert_lowering_error(
                 Environment::default(),
                 Expr::new(RawExpr::Monop(
@@ -1976,7 +2042,9 @@ mod tests {
                         elements: vec![cell],
                     })),
                 )),
-                ToZ3Error::InvalidOperands(message),
+                ToZ3Error::Type(crate::type_resolver::TypeError::Invalid(
+                    "block matrix cells must be numeric scalars or matrices",
+                )),
             );
         }
 
@@ -1991,7 +2059,9 @@ mod tests {
                         elements: vec![Expr::new(RawExpr::NatLiteral(1))],
                     })),
                 )),
-                ToZ3Error::InvalidMatrixLiteral,
+                ToZ3Error::Type(crate::type_resolver::TypeError::Invalid(
+                    "matrix element count does not match its dimensions",
+                )),
             );
         }
     }
@@ -2141,6 +2211,69 @@ mod tests {
     }
 
     #[test]
+    fn test_two_norm_and_squared_two_norm_lower_through_core_operations() {
+        let environment = Environment {
+            types: HashMap::from([(Variable::new("v"), Type::Matrix(2, 1))]),
+            ..Environment::default()
+        };
+        let norm = lower_to_z3(
+            &environment,
+            &expression(r"\left\lVert v \right\rVert_{2}"),
+            POSITIVE,
+        )
+        .unwrap();
+        assert_eq!(norm.side_conditions.len(), 1);
+        assert!(matches!(
+            norm.side_conditions[0].existence,
+            super::LoweredExistence::Guaranteed
+        ));
+
+        let squared = lower_to_z3(
+            &environment,
+            &expression(r"\left\lVert v \right\rVert_{2}^{2}"),
+            POSITIVE,
+        )
+        .unwrap();
+        assert!(squared.side_conditions.is_empty());
+
+        let entries = matrix(environment.clone(), expression("v")).elements;
+        let Z3Object::Z3(norm_value) = norm.expression else {
+            panic!("2-norm must lower to a scalar")
+        };
+        let Z3Object::Z3(squared_value) = squared.expression else {
+            panic!("squared 2-norm must lower to a scalar")
+        };
+        let solver = Solver::new();
+        for definition in &norm.side_conditions[0].defining_assertions {
+            let Z3Object::Z3(definition) = definition else {
+                panic!("norm definition must be Boolean")
+            };
+            solver.assert(definition.as_bool().unwrap());
+        }
+        for (entry, value) in entries.iter().zip([3, 4]) {
+            let Z3Object::Z3(entry) = entry else {
+                panic!("vector entry must be scalar")
+            };
+            solver.assert(entry.as_real().unwrap().eq(Real::from_rational(value, 1)));
+        }
+        solver.assert(
+            norm_value
+                .as_real()
+                .unwrap()
+                .eq(Real::from_rational(5, 1))
+                .not(),
+        );
+        solver.assert(
+            squared_value
+                .as_real()
+                .unwrap()
+                .eq(Real::from_rational(25, 1))
+                .not(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
     fn test_matrix_compound_and_repeated_square_roots() {
         let environment = Environment {
             types: HashMap::from([
@@ -2222,6 +2355,123 @@ mod tests {
             })),
         );
         assert_eq!(matrix_strings(&literal), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_block_matrix_lowering_flattens_typed_and_recursive_blocks() {
+        let environment = Environment {
+            types: HashMap::from([
+                (Variable::new("A"), Type::Matrix(2, 2)),
+                (Variable::new("b"), Type::Matrix(2, 1)),
+                (Variable::new("c"), Type::Matrix(2, 1)),
+                (Variable::new("d"), Type::Real),
+            ]),
+            ..Environment::default()
+        };
+        let block_tex = r"\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix}";
+        let block = matrix(environment.clone(), expression(block_tex));
+        assert_eq!((block.rows, block.cols), (3, 3));
+        assert_eq!(
+            matrix_strings(&block),
+            [
+                "|A_{1,1}|",
+                "|A_{1,2}|",
+                "|b_{1,1}|",
+                "|A_{2,1}|",
+                "|A_{2,2}|",
+                "|b_{2,1}|",
+                "|c_{1,1}|",
+                "|c_{2,1}|",
+                "d",
+            ]
+        );
+
+        let transposed = matrix(
+            environment.clone(),
+            expression(&format!(r"\left({block_tex}\right)^\top")),
+        );
+        assert_eq!(
+            matrix_strings(&transposed),
+            [
+                "|A_{1,1}|",
+                "|A_{2,1}|",
+                "|c_{1,1}|",
+                "|A_{1,2}|",
+                "|A_{2,2}|",
+                "|c_{2,1}|",
+                "|b_{1,1}|",
+                "|b_{2,1}|",
+                "d",
+            ]
+        );
+
+        let identity = r"\begin{bmatrix}1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1\end{bmatrix}";
+        let product = matrix(
+            environment,
+            expression(&format!(r"\left({block_tex}\right) {identity}")),
+        );
+        let inequalities = product
+            .elements
+            .iter()
+            .zip(&block.elements)
+            .map(|(actual, expected)| {
+                let (Z3Object::Z3(actual), Z3Object::Z3(expected)) = (actual, expected) else {
+                    panic!("flattened block cells must be scalar")
+                };
+                actual.eq(expected).not()
+            })
+            .collect::<Vec<_>>();
+        let solver = Solver::new();
+        solver.assert(Bool::or(&inequalities));
+        assert_eq!(solver.check(), SatResult::Unsat);
+
+        let recursive = expression(
+            r"\begin{bmatrix}\begin{bmatrix}1 & 2 \\ 3 & 4\end{bmatrix} & \begin{bmatrix}5 \\ 6\end{bmatrix} \\ \begin{bmatrix}7 & 8\end{bmatrix} & 9\end{bmatrix}",
+        );
+        assert_eq!(
+            matrix_strings(&matrix(Environment::default(), recursive.clone())),
+            ["1", "2", "5", "3", "4", "6", "7", "8", "9"]
+        );
+        assert_scalar_value(
+            Environment::default(),
+            Expr::new(RawExpr::Monop(Monop::Trace, recursive.clone())),
+            14,
+        );
+        assert_scalar_value(
+            Environment::default(),
+            Expr::new(RawExpr::Monop(Monop::Det, recursive)),
+            -2,
+        );
+    }
+
+    #[test]
+    fn test_block_matrix_lowering_rejects_incompatible_blocks() {
+        for (tex, environment, expected) in [
+            (
+                r"\begin{bmatrix}A & b\end{bmatrix}",
+                Environment {
+                    types: HashMap::from([
+                        (Variable::new("A"), Type::Matrix(2, 2)),
+                        (Variable::new("b"), Type::Matrix(3, 1)),
+                    ]),
+                    ..Environment::default()
+                },
+                ToZ3Error::Shape("blocks in a block-matrix row must have equal heights"),
+            ),
+            (
+                r"\begin{bmatrix}A \\ c^\top\end{bmatrix}",
+                Environment {
+                    types: HashMap::from([
+                        (Variable::new("A"), Type::Matrix(2, 2)),
+                        (Variable::new("c"), Type::Matrix(3, 1)),
+                    ]),
+                    ..Environment::default()
+                },
+                ToZ3Error::Shape("blocks in a block-matrix column must have equal widths"),
+            ),
+        ] {
+            assert_lowering_error(environment, expression(tex), expected);
+        }
     }
 
     #[test]

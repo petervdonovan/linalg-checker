@@ -124,9 +124,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                     )
                 }),
             RawExpr::NatLiteral(_) => TypeExpr::Nat,
-            RawExpr::Matrix(Matrix { rows, cols, .. }) => {
-                TypeExpr::Matrix(natural(*rows as u64), natural(*cols as u64))
-            }
+            RawExpr::Matrix(matrix) => infer_matrix_type(matrix)?,
             RawExpr::Monop(op, inner) => infer_monop(*op, node_type(inner)?)?,
             RawExpr::Binop(Binop::ElementOf, _, _) => TypeExpr::Bool,
             RawExpr::Binop(Binop::Cast, target, _) => {
@@ -244,6 +242,9 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 }
             }
         }
+        if self.error.is_some() {
+            return;
+        }
         match self.infer(node) {
             Ok(Some(ty)) => node.get_mut().unwrap().meta.put_type(ty),
             Ok(None) => {}
@@ -313,6 +314,71 @@ fn infer_monop(op: Monop, inner: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError
     }
 }
 
+fn infer_matrix_type<Metadata: MaybeTyped>(
+    matrix: &Matrix<Expr<Metadata>>,
+) -> Result<TypeExpr<()>, TypeError> {
+    let expected_elements = matrix
+        .rows
+        .checked_mul(matrix.cols)
+        .ok_or(TypeError::Invalid("matrix dimensions overflow usize"))?;
+    if matrix.elements.len() != expected_elements {
+        return Err(TypeError::Invalid(
+            "matrix element count does not match its dimensions",
+        ));
+    }
+    if (matrix.rows == 0) != (matrix.cols == 0) {
+        return Err(TypeError::Invalid(
+            "matrix dimensions must both be zero or both be nonzero",
+        ));
+    }
+    if matrix.rows == 0 {
+        return Ok(TypeExpr::Matrix(natural(0), natural(0)));
+    }
+
+    let dimensions = matrix
+        .elements
+        .iter()
+        .map(|element| block_dimensions(node_type(element)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    let row_heights = (0..matrix.rows)
+        .map(|row| dimensions[row * matrix.cols].0.clone())
+        .collect();
+    let column_widths = (0..matrix.cols)
+        .map(|column| dimensions[column].1.clone())
+        .collect();
+    Ok(TypeExpr::Matrix(
+        sum_dimensions(row_heights),
+        sum_dimensions(column_widths),
+    ))
+}
+
+fn block_dimensions(ty: TypeExpr<()>) -> Result<(Expr<()>, Expr<()>), TypeError> {
+    match ty {
+        TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok((natural(1), natural(1))),
+        TypeExpr::Matrix(rows, cols) if is_zero_dimension(&rows) && is_zero_dimension(&cols) => {
+            Err(TypeError::Invalid(
+                "empty matrices cannot be used as blocks",
+            ))
+        }
+        TypeExpr::Matrix(rows, cols) => Ok((rows, cols)),
+        TypeExpr::Bool | TypeExpr::Seq(_, _) => Err(TypeError::Invalid(
+            "block matrix cells must be numeric scalars or matrices",
+        )),
+    }
+}
+
+fn is_zero_dimension(expression: &Expr<()>) -> bool {
+    matches!(expression.raw, RawExpr::NatLiteral(0))
+}
+
+fn sum_dimensions(mut dimensions: Vec<Expr<()>>) -> Expr<()> {
+    match dimensions.len() {
+        0 => natural(0),
+        1 => dimensions.pop().unwrap(),
+        _ => Expr::new(RawExpr::Finop(Finop::Plus, dimensions)),
+    }
+}
+
 type BinaryTypeOperation = fn(TypeExpr<()>, TypeExpr<()>) -> Result<TypeExpr<()>, TypeError>;
 
 fn fold_types<Metadata: MaybeTyped>(
@@ -379,7 +445,7 @@ fn division_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>
 #[cfg(test)]
 mod tests {
     use super::{MaybeTyped, SymbolicTypeEnvironment, TypeResolver, TypedMetadata};
-    use crate::{Expr, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext};
+    use crate::{Expr, Finop, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext};
     use ratex_parser::parse;
     use std::collections::HashMap;
 
@@ -406,6 +472,52 @@ mod tests {
         assert_eq!(
             expression.meta.get_type().unwrap(),
             TypeExpr::Matrix(n.clone(), n)
+        );
+    }
+
+    #[test]
+    fn resolves_symbolic_block_matrix_dimensions() {
+        let m = Expr::new(RawExpr::Variable(Variable::new("m")));
+        let n = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([
+                (Variable::new("A"), TypeExpr::Matrix(m.clone(), n.clone())),
+                (
+                    Variable::new("b"),
+                    TypeExpr::Matrix(m.clone(), Expr::new(RawExpr::NatLiteral(1))),
+                ),
+                (
+                    Variable::new("c"),
+                    TypeExpr::Matrix(n.clone(), Expr::new(RawExpr::NatLiteral(1))),
+                ),
+                (Variable::new("d"), TypeExpr::Real),
+            ]),
+        };
+        let parsed: Expr<()> =
+            from_tex::expr(&parse(r"\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix}").unwrap())
+                .unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        TypeResolver::new(&types)
+            .resolve(
+                &mut expression,
+                VisitContext {
+                    logical_polarity: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            expression.meta.get_type().unwrap(),
+            TypeExpr::Matrix(
+                Expr::new(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![m, Expr::new(RawExpr::NatLiteral(1))],
+                )),
+                Expr::new(RawExpr::Finop(
+                    Finop::Plus,
+                    vec![n, Expr::new(RawExpr::NatLiteral(1))],
+                )),
+            )
         );
     }
 }

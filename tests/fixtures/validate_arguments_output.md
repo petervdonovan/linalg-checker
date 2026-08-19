@@ -180,7 +180,7 @@
 
    The negation of $U U^\top = I$ is satisfied by:
 
-   - $U = \begin{bmatrix}-\left(\frac{7}{16}\right)^{\frac{1}{2}} \\ \frac{-3}{4}\end{bmatrix}$
+   - $U = \begin{bmatrix}\frac{-3}{4} \\ -\left(\frac{7}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
    </details>
 
 # Logic-chain preprocessing
@@ -273,4 +273,49 @@
    This step is not dimensionally meaningful in the following environment:
 
    - $A \in \mathbb{R}^{2}$
+   </details>
+
+# Vector two-norm
+
+## Assumptions
+
+- $v \in \mathbb{R}^{2}$
+
+## Steps
+
+1. $\left\lVert v \right\rVert_{2} \ge 0$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Wide matrix two-norm
+
+## Assumptions
+
+- $A \in \mathbb{R}^{1 \times 2}$
+
+## Steps
+
+1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
+
+   <details>
+   <summary>⚠️ dimensionally invalid</summary>
+
+   This step is not dimensionally meaningful in the following environment:
+
+   - $A \in \mathbb{R}^{1 \times 2}$
+   </details>
+2. $\left\lVert A \right\rVert_{2} \ge 0$
+
+   <details>
+   <summary>⚠️ dimensionally invalid</summary>
+
+   This step is not dimensionally meaningful in the following environment:
+
+   - $A \in \mathbb{R}^{1 \times 2}$
    </details>
