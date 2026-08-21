@@ -1658,15 +1658,14 @@ fn model_u64(model: &z3::Model, expression: &Int) -> Result<u64, ShapeError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     use ratex_parser::parse;
-    use z3::{SatResult, Solver, ast::Int};
 
     use super::{
         ShapeError, collect_implicit_dimensions, collect_variables, extract_environment_iterator,
         extract_environment_iterator_with_context, extract_prepared_environment_iterator,
-        infer_symbolic_type_environment, lower_nat_with_symbols,
+        infer_symbolic_type_environment,
     };
     use crate::{
         Annotation, Expr, Finop, Matrix, Range, RawExpr, SeqOp, SeqType, Type, Variable, from_tex,

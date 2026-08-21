@@ -49,45 +49,27 @@ pub trait TypeLookup {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TypeRuleOperand {
-    Value {
-        ty: TypeExpr<()>,
-        expression: Expr<()>,
-    },
-    Type {
-        ty: TypeExpr<()>,
-        expression: Expr<()>,
-    },
-    NoValue {
-        expression: Expr<()>,
-    },
+pub struct TypeRuleOperand {
+    value_type: Option<TypeExpr<()>>,
+    expression: Expr<()>,
 }
 
 impl TypeRuleOperand {
     fn value(&self) -> Result<TypeExpr<()>, TypeError> {
-        match self {
-            Self::Value { ty, .. } => Ok(ty.clone()),
-            Self::Type { .. } | Self::NoValue { .. } => {
-                Err(TypeError::Invalid("expected a value operand"))
-            }
-        }
+        self.value_type
+            .clone()
+            .ok_or(TypeError::Invalid("expected a value operand"))
     }
 
     fn type_expression(&self) -> Result<TypeExpr<()>, TypeError> {
-        match self {
-            Self::Type { ty, .. } => Ok(ty.clone()),
-            Self::Value { .. } | Self::NoValue { .. } => {
-                Err(TypeError::Invalid("expected a type-expression operand"))
-            }
+        match &self.expression.raw {
+            RawExpr::Type(ty) => Ok(ty.clone()),
+            _ => Err(TypeError::Invalid("expected a type-expression operand")),
         }
     }
 
     pub fn expression(&self) -> &Expr<()> {
-        match self {
-            Self::Value { expression, .. }
-            | Self::Type { expression, .. }
-            | Self::NoValue { expression } => expression,
-        }
+        &self.expression
     }
 }
 
@@ -414,19 +396,13 @@ fn node_type<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> Result<TypeEx
 }
 
 fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> TypeRuleOperand {
-    let erased = expression.with_default_metadata();
-    match &expression.raw {
-        RawExpr::Type(ty) => TypeRuleOperand::Type {
-            ty: ty.with_default_metadata(),
-            expression: erased,
-        },
-        RawExpr::Hole => TypeRuleOperand::NoValue { expression: erased },
-        _ => node_type(expression)
-            .map(|ty| TypeRuleOperand::Value {
-                ty,
-                expression: erased.clone(),
-            })
-            .unwrap_or(TypeRuleOperand::NoValue { expression: erased }),
+    let value_type = match expression.raw {
+        RawExpr::Type(_) | RawExpr::Hole => None,
+        _ => node_type(expression).ok(),
+    };
+    TypeRuleOperand {
+        value_type,
+        expression: expression.with_default_metadata(),
     }
 }
 
