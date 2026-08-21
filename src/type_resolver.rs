@@ -40,7 +40,14 @@ impl MaybeTyped for TypedMetadata {
     }
 
     fn put_type(&mut self, ty: TypeExpr<()>) {
-        self.0 = Some(ty);
+        if let Some(previous) = &self.0 {
+            assert_eq!(
+                previous, &ty,
+                "type resolution changed an existing annotation"
+            );
+        } else {
+            self.0 = Some(ty);
+        }
     }
 }
 
@@ -122,12 +129,6 @@ impl OperatorTypeRules {
         );
     }
 
-    pub fn standard() -> Self {
-        let mut rules = Self::core();
-        crate::operator_visitors::register_type_rules(&mut rules);
-        rules
-    }
-
     pub fn core() -> Self {
         let mut rules = Self::new();
         rules.register_monop(Monop::Neg, numeric_identity_rule);
@@ -160,50 +161,60 @@ impl OperatorTypeRules {
         rules
     }
 
+    pub(crate) fn supports_monop(&self, op: Monop) -> bool {
+        self.monops.contains_key(&op)
+    }
+
+    pub(crate) fn supports_binop(&self, op: Binop) -> bool {
+        self.binops.contains_key(&op)
+    }
+
+    pub(crate) fn supports_triop(&self, op: Triop) -> bool {
+        self.triops.contains_key(&op)
+    }
+
+    pub(crate) fn supports_finop(&self, op: Finop) -> bool {
+        self.finops.contains_key(&op)
+    }
+
+    pub(crate) fn supports_seqop(&self, op: SeqOp) -> bool {
+        self.seqops.contains_key(&op)
+    }
+
     fn infer_monop(
         &self,
         op: Monop,
         operands: &[TypeRuleOperand],
-    ) -> Result<TypeExpr<()>, TypeError> {
-        self.monops
-            .get(&op)
-            .ok_or(TypeError::Unsupported("unregistered unary operator"))?(operands)
+    ) -> Option<Result<TypeExpr<()>, TypeError>> {
+        self.monops.get(&op).map(|rule| rule(operands))
     }
     fn infer_binop(
         &self,
         op: Binop,
         operands: &[TypeRuleOperand],
-    ) -> Result<TypeExpr<()>, TypeError> {
-        self.binops
-            .get(&op)
-            .ok_or(TypeError::Unsupported("unregistered binary operator"))?(operands)
+    ) -> Option<Result<TypeExpr<()>, TypeError>> {
+        self.binops.get(&op).map(|rule| rule(operands))
     }
     fn infer_triop(
         &self,
         op: Triop,
         operands: &[TypeRuleOperand],
-    ) -> Result<TypeExpr<()>, TypeError> {
-        self.triops
-            .get(&op)
-            .ok_or(TypeError::Unsupported("unregistered ternary operator"))?(operands)
+    ) -> Option<Result<TypeExpr<()>, TypeError>> {
+        self.triops.get(&op).map(|rule| rule(operands))
     }
     fn infer_finop(
         &self,
         op: Finop,
         operands: &[TypeRuleOperand],
-    ) -> Result<TypeExpr<()>, TypeError> {
-        self.finops
-            .get(&op)
-            .ok_or(TypeError::Unsupported("unregistered finite operator"))?(operands)
+    ) -> Option<Result<TypeExpr<()>, TypeError>> {
+        self.finops.get(&op).map(|rule| rule(operands))
     }
     fn infer_seqop(
         &self,
         op: SeqOp,
         operands: &[TypeRuleOperand],
-    ) -> Result<TypeExpr<()>, TypeError> {
-        self.seqops
-            .get(&op)
-            .ok_or(TypeError::Unsupported("unregistered sequence operator"))?(operands)
+    ) -> Option<Result<TypeExpr<()>, TypeError>> {
+        self.seqops.get(&op).map(|rule| rule(operands))
     }
 }
 
@@ -236,6 +247,7 @@ pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
     rules: &'a OperatorTypeRules,
     lexical_types: HashMap<Variable, TypeExpr<()>>,
+    in_dimension_expression: bool,
     error: Option<TypeError>,
 }
 
@@ -245,6 +257,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             types,
             rules,
             lexical_types: HashMap::new(),
+            in_dimension_expression: false,
             error: None,
         }
     }
@@ -280,25 +293,54 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                 .cloned()
                 .or_else(|| self.types.type_of(variable))
                 .unwrap_or_else(|| {
+                    if self.in_dimension_expression {
+                        return TypeExpr::Nat;
+                    }
                     panic!(
                         "variable {} has no symbolically inferred type",
                         variable.z3_name()
                     )
                 }),
             RawExpr::NatLiteral(_) => TypeExpr::Nat,
-            RawExpr::Matrix(matrix) => infer_matrix_type(matrix)?,
-            RawExpr::Monop(op, inner) => self.rules.infer_monop(*op, &[operand(inner)])?,
-            RawExpr::Binop(op, left, right) => self
-                .rules
-                .infer_binop(*op, &[operand(left), operand(right)])?,
-            RawExpr::Triop(op, first, second, third) => self
-                .rules
-                .infer_triop(*op, &[operand(first), operand(second), operand(third)])?,
-            RawExpr::Finop(op, expressions) => self
-                .rules
-                .infer_finop(*op, &expressions.iter().map(operand).collect::<Vec<_>>())?,
+            RawExpr::Matrix(matrix) => return infer_matrix_type(matrix),
+            RawExpr::Monop(op, inner) => {
+                return infer_operator([inner], |operands| self.rules.infer_monop(*op, operands));
+            }
+            RawExpr::Binop(Binop::ElementOf, _, _) => TypeExpr::Bool,
+            RawExpr::Binop(Binop::Cast, target, value) => {
+                let Some(value) = operand(value) else {
+                    return Ok(None);
+                };
+                let target = match &target.raw {
+                    RawExpr::Type(ty) => {
+                        TypeRuleOperand::TypeExpression(ty.with_default_metadata())
+                    }
+                    _ => TypeRuleOperand::NoValue,
+                };
+                return self
+                    .rules
+                    .infer_binop(Binop::Cast, &[target, value])
+                    .transpose();
+            }
+            RawExpr::Binop(op, left, right) => {
+                return infer_operator([left, right], |operands| {
+                    self.rules.infer_binop(*op, operands)
+                });
+            }
+            RawExpr::Triop(op, first, second, third) => {
+                return infer_operator([first, second, third], |operands| {
+                    self.rules.infer_triop(*op, operands)
+                });
+            }
+            RawExpr::Finop(op, expressions) => {
+                return infer_operator(expressions.iter(), |operands| {
+                    self.rules.infer_finop(*op, operands)
+                });
+            }
             RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => TypeExpr::Bool,
-            RawExpr::Seqop(op, _, body) => self.rules.infer_seqop(*op, &[operand(body)])?,
+            RawExpr::Seqop(op, _, body) => {
+                return infer_operator([body], |operands| self.rules.infer_seqop(*op, operands));
+            }
         };
         Ok(Some(ty))
     }
@@ -322,7 +364,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 | RawExpr::Variable(_)
                 | RawExpr::NatLiteral(_) => {}
                 RawExpr::StandardBasis { index, .. } => self.visit_expr_mut(context, index),
-                RawExpr::Type(_) => {}
+                RawExpr::Type(ty) => self.visit_type_expr_mut(context, ty),
                 RawExpr::Matrix(matrix) => {
                     for element in &mut matrix.elements {
                         self.visit_expr_mut(context, element);
@@ -335,7 +377,12 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     }
                     self.visit_expr_mut(context, right);
                 }
-                RawExpr::Binop(Binop::Cast, _, value) => self.visit_expr_mut(context, value),
+                RawExpr::Binop(Binop::Cast, target, value) => {
+                    if matches!(target.raw, RawExpr::Type(_)) {
+                        self.visit_expr_mut(context, target);
+                    }
+                    self.visit_expr_mut(context, value);
+                }
                 RawExpr::Binop(_, left, right) => {
                     self.visit_expr_mut(context, left);
                     self.visit_expr_mut(context, right);
@@ -391,20 +438,52 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
             Err(error) => self.error = Some(error),
         }
     }
+
+    fn visit_type_expr_mut(&mut self, context: VisitContext, node: &mut TypeExpr<Metadata>) {
+        match node {
+            TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
+            TypeExpr::Matrix(rows, cols) => {
+                let previous = self.in_dimension_expression;
+                self.in_dimension_expression = true;
+                self.visit_expr_mut(context, rows);
+                self.visit_expr_mut(context, cols);
+                self.in_dimension_expression = previous;
+            }
+            TypeExpr::Seq(element, size) => {
+                self.visit_expr_mut(context, element);
+                let previous = self.in_dimension_expression;
+                self.in_dimension_expression = true;
+                self.visit_expr_mut(context, size);
+                self.in_dimension_expression = previous;
+            }
+        }
+    }
 }
 
 fn node_type<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> Result<TypeExpr<()>, TypeError> {
     expression.meta.get_type()
 }
 
-fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> TypeRuleOperand {
+fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> Option<TypeRuleOperand> {
     match &expression.raw {
-        RawExpr::Type(ty) => TypeRuleOperand::TypeExpression(ty.with_default_metadata()),
-        RawExpr::Hole => TypeRuleOperand::NoValue,
-        _ => node_type(expression)
-            .map(TypeRuleOperand::Value)
-            .unwrap_or(TypeRuleOperand::NoValue),
+        RawExpr::Type(ty) => Some(TypeRuleOperand::TypeExpression(ty.with_default_metadata())),
+        RawExpr::Hole => Some(TypeRuleOperand::NoValue),
+        _ => node_type(expression).map(TypeRuleOperand::Value).ok(),
     }
+}
+
+fn infer_operator<'a, Metadata: MaybeTyped + 'a>(
+    expressions: impl IntoIterator<Item = &'a Expr<Metadata>>,
+    infer: impl FnOnce(&[TypeRuleOperand]) -> Option<Result<TypeExpr<()>, TypeError>>,
+) -> Result<Option<TypeExpr<()>>, TypeError> {
+    let Some(operands) = expressions
+        .into_iter()
+        .map(operand)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    infer(&operands).transpose()
 }
 
 fn exactly(operands: &[TypeRuleOperand], count: usize) -> Result<&[TypeRuleOperand], TypeError> {
@@ -453,12 +532,6 @@ fn real_result_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeEr
         operand.value()?;
     }
     Ok(TypeExpr::Real)
-}
-
-pub(crate) fn real_operator_type_rule(
-    operands: &[TypeRuleOperand],
-) -> Result<TypeExpr<()>, TypeError> {
-    real_result_rule(operands)
 }
 
 fn bool_result_rule(_operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
@@ -546,7 +619,7 @@ fn implicit_dimension(value: crate::ImplicitDimension) -> Expr<()> {
 
 fn infer_matrix_type<Metadata: MaybeTyped>(
     matrix: &Matrix<Expr<Metadata>>,
-) -> Result<TypeExpr<()>, TypeError> {
+) -> Result<Option<TypeExpr<()>>, TypeError> {
     let expected_elements = matrix
         .rows
         .checked_mul(matrix.cols)
@@ -562,24 +635,26 @@ fn infer_matrix_type<Metadata: MaybeTyped>(
         ));
     }
     if matrix.rows == 0 {
-        return Ok(TypeExpr::Matrix(natural(0), natural(0)));
+        return Ok(Some(TypeExpr::Matrix(natural(0), natural(0))));
     }
 
-    let dimensions = matrix
-        .elements
-        .iter()
-        .map(|element| block_dimensions(node_type(element)?))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut dimensions = Vec::with_capacity(matrix.elements.len());
+    for element in &matrix.elements {
+        let Ok(ty) = node_type(element) else {
+            return Ok(None);
+        };
+        dimensions.push(block_dimensions(ty)?);
+    }
     let row_heights = (0..matrix.rows)
         .map(|row| dimensions[row * matrix.cols].0.clone())
         .collect();
     let column_widths = (0..matrix.cols)
         .map(|column| dimensions[column].1.clone())
         .collect();
-    Ok(TypeExpr::Matrix(
+    Ok(Some(TypeExpr::Matrix(
         sum_dimensions(row_heights),
         sum_dimensions(column_widths),
-    ))
+    )))
 }
 
 fn block_dimensions(ty: TypeExpr<()>) -> Result<(Expr<()>, Expr<()>), TypeError> {
@@ -684,7 +759,7 @@ mod tests {
         };
         let parsed: Expr<()> = from_tex::expr(&parse("A B").unwrap()).unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        TypeResolver::new(&types, &OperatorTypeRules::standard())
+        TypeResolver::new(&types, &OperatorTypeRules::core())
             .resolve(
                 &mut expression,
                 VisitContext {
@@ -720,7 +795,7 @@ mod tests {
             from_tex::expr(&parse(r"\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix}").unwrap())
                 .unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        TypeResolver::new(&types, &OperatorTypeRules::standard())
+        TypeResolver::new(&types, &OperatorTypeRules::core())
             .resolve(
                 &mut expression,
                 VisitContext {
@@ -745,21 +820,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_duplicate_operator_rules_are_explicit() {
+    fn missing_rules_defer_typing_and_duplicate_rules_are_explicit() {
         let types = SymbolicTypeEnvironment {
             types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
         };
         let parsed: Expr<()> = from_tex::expr(&parse("x^2").unwrap()).unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        assert!(matches!(
-            TypeResolver::new(&types, &OperatorTypeRules::new()).resolve(
+        TypeResolver::new(&types, &OperatorTypeRules::new())
+            .resolve(
                 &mut expression,
                 VisitContext {
-                    logical_polarity: true
+                    logical_polarity: true,
                 },
-            ),
-            Err(super::TypeError::Unsupported(_))
-        ));
+            )
+            .unwrap();
+        assert!(expression.meta.get_type().is_err());
 
         let mut rules = OperatorTypeRules::new();
         rules.register_binop(Binop::Power, super::first_value_rule);
@@ -772,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn core_rules_reject_surface_norms() {
+    fn core_rules_leave_surface_norms_untyped_but_type_their_operands() {
         let types = SymbolicTypeEnvironment {
             types: HashMap::from([(
                 Variable::new("v"),
@@ -785,14 +860,46 @@ mod tests {
         let parsed: Expr<()> =
             from_tex::expr(&parse(r"\left\lVert v \right\rVert_2").unwrap()).unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        assert!(matches!(
-            TypeResolver::new(&types, &OperatorTypeRules::core()).resolve(
+        TypeResolver::new(&types, &OperatorTypeRules::core())
+            .resolve(
                 &mut expression,
                 VisitContext {
-                    logical_polarity: true
+                    logical_polarity: true,
                 },
-            ),
-            Err(super::TypeError::Unsupported(_))
+            )
+            .unwrap();
+        assert!(expression.meta.get_type().is_err());
+        let RawExpr::Monop(crate::Monop::Norm2, operand) = &expression.raw else {
+            panic!("expected a 2-norm")
+        };
+        assert!(matches!(
+            operand.meta.get_type(),
+            Ok(TypeExpr::Matrix(_, _))
         ));
+    }
+
+    #[test]
+    fn type_resolution_never_changes_an_existing_annotation() {
+        let variable = Variable::new("x");
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([(variable.clone(), TypeExpr::Real)]),
+        };
+        let mut expression = Expr::with_metadata(
+            TypedMetadata(Some(TypeExpr::Nat)),
+            RawExpr::Variable(variable),
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                TypeResolver::new(&types, &OperatorTypeRules::core())
+                    .resolve(
+                        &mut expression,
+                        VisitContext {
+                            logical_polarity: true,
+                        },
+                    )
+                    .unwrap();
+            }))
+            .is_err()
+        );
     }
 }

@@ -6,7 +6,16 @@ use crate::{
 
 /// Rewrites adjacency-based logic chains into conjunctions of single
 /// implications.
-pub struct LogicLowering;
+#[derive(Default)]
+pub struct LogicLowering {
+    rewrites: usize,
+}
+
+impl LogicLowering {
+    pub fn rewrites(&self) -> usize {
+        self.rewrites
+    }
+}
 
 impl<Metadata: Clone> VisitMut<Metadata> for LogicLowering {
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
@@ -23,6 +32,7 @@ impl<Metadata: Clone> VisitMut<Metadata> for LogicLowering {
             node.get_mut()
                 .expect("logic lowering requires uniquely owned expressions")
                 .raw = replacement;
+            self.rewrites += 1;
         }
         visit_mut::visit_expr_mut(self, context, node);
     }
@@ -85,7 +95,9 @@ mod tests {
         let context = VisitContext {
             logical_polarity: true,
         };
-        LogicLowering.visit_expr_mut(context, &mut expression);
+        let mut lowering = LogicLowering::default();
+        lowering.visit_expr_mut(context, &mut expression);
+        assert_eq!(lowering.rewrites(), 1);
 
         assert_eq!(
             expression.as_latex().to_string(),

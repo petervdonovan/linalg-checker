@@ -3,28 +3,25 @@ use std::collections::BTreeMap;
 use crate::{
     Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
-    type_resolver::{MaybeTyped, OperatorTypeRules, TypeError},
+    type_resolver::{MaybeTyped, TypeError},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
 
-pub fn register_type_rules(rules: &mut OperatorTypeRules) {
-    rules.register_monop(Monop::Norm2, crate::type_resolver::real_operator_type_rule);
-}
-
 #[derive(Default)]
 pub struct Norm2SquaredVisitor {
+    rewrites: usize,
     error: Option<TypeError>,
 }
 
 impl Norm2SquaredVisitor {
-    pub fn finish(self) -> Result<(), TypeError> {
-        self.error.map_or(Ok(()), Err)
+    pub fn finish(self) -> Result<usize, TypeError> {
+        self.error.map_or(Ok(self.rewrites), Err)
     }
 }
 
 impl<Metadata> VisitMut<Metadata> for Norm2SquaredVisitor
 where
-    Metadata: Clone + MaybeTyped,
+    Metadata: Clone + Default + MaybeTyped,
 {
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
         if self.error.is_some() {
@@ -34,18 +31,13 @@ where
         let Some(operand) = norm2_squared_operand(node) else {
             return;
         };
-        match operand.meta.get_type() {
-            Ok(TypeExpr::Matrix(_, _)) => {}
-            Ok(_) => {
-                self.error = Some(TypeError::Invalid("2-norm requires a real column matrix"));
-                return;
-            }
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
+        if let Ok(ty) = operand.meta.get_type()
+            && !matches!(ty, TypeExpr::Matrix(_, _))
+        {
+            self.error = Some(TypeError::Invalid("2-norm requires a real column matrix"));
+            return;
         }
-        let mut core = norm2_squared(node.meta.clone(), operand);
+        let mut core = norm2_squared(operand);
         let raw = std::mem::replace(
             &mut core
                 .get_mut()
@@ -56,11 +48,13 @@ where
         node.get_mut()
             .expect("2-norm lowering requires uniquely owned expressions")
             .raw = raw;
+        self.rewrites += 1;
     }
 }
 
 pub struct Norm2Visitor<Metadata> {
     roots: PrincipalRootRegistry<Metadata>,
+    rewrites: usize,
     error: Option<TypeError>,
 }
 
@@ -68,20 +62,22 @@ impl<Metadata> Default for Norm2Visitor<Metadata> {
     fn default() -> Self {
         Self {
             roots: PrincipalRootRegistry::default(),
+            rewrites: 0,
             error: None,
         }
     }
 }
 
 impl<Metadata> Norm2Visitor<Metadata> {
-    pub fn finish(self) -> Result<Vec<SideCondition<Metadata>>, TypeError> {
-        self.error.map_or(Ok(self.roots.side_conditions), Err)
+    pub fn finish(self) -> Result<(usize, Vec<SideCondition<Metadata>>), TypeError> {
+        self.error
+            .map_or(Ok((self.rewrites, self.roots.side_conditions)), Err)
     }
 }
 
 impl<Metadata> VisitMut<Metadata> for Norm2Visitor<Metadata>
 where
-    Metadata: Clone + MaybeTyped,
+    Metadata: Clone + Default + MaybeTyped,
 {
     fn side_conditions(&mut self) -> Vec<SideCondition<Metadata>> {
         std::mem::take(&mut self.roots.side_conditions)
@@ -95,30 +91,27 @@ where
         let RawExpr::Monop(Monop::Norm2, operand) = &node.raw else {
             return;
         };
-        match operand.meta.get_type() {
-            Ok(TypeExpr::Matrix(_, _)) => {}
-            Ok(_) => {
-                self.error = Some(TypeError::Invalid("2-norm requires a real column matrix"));
-                return;
-            }
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
+        if let Ok(ty) = operand.meta.get_type()
+            && !matches!(ty, TypeExpr::Matrix(_, _))
+        {
+            self.error = Some(TypeError::Invalid("2-norm requires a real column matrix"));
+            return;
         }
-        let radicand = norm2_squared(node.meta.clone(), operand);
+        let radicand = norm2_squared(operand);
         let introduced =
             self.roots
                 .lower(node, radicand, TypeExpr::Real, RootExistence::Guaranteed);
         node.get_mut()
             .expect("2-norm lowering requires uniquely owned expressions")
             .raw = RawExpr::Variable(introduced);
+        self.rewrites += 1;
     }
 }
 
 pub struct SquareRootVisitor<Metadata> {
     roots: PrincipalRootRegistry<Metadata>,
     error: Option<TypeError>,
+    rewrites: usize,
 }
 
 impl<Metadata> Default for SquareRootVisitor<Metadata> {
@@ -126,19 +119,21 @@ impl<Metadata> Default for SquareRootVisitor<Metadata> {
         Self {
             roots: PrincipalRootRegistry::default(),
             error: None,
+            rewrites: 0,
         }
     }
 }
 
 impl<Metadata> SquareRootVisitor<Metadata> {
-    pub fn finish(self) -> Result<Vec<SideCondition<Metadata>>, TypeError> {
-        self.error.map_or(Ok(self.roots.side_conditions), Err)
+    pub fn finish(self) -> Result<(usize, Vec<SideCondition<Metadata>>), TypeError> {
+        self.error
+            .map_or(Ok((self.rewrites, self.roots.side_conditions)), Err)
     }
 }
 
 impl<Metadata> VisitMut<Metadata> for SquareRootVisitor<Metadata>
 where
-    Metadata: Clone + MaybeTyped,
+    Metadata: Clone + Default + MaybeTyped,
 {
     fn side_conditions(&mut self) -> Vec<SideCondition<Metadata>> {
         std::mem::take(&mut self.roots.side_conditions)
@@ -152,7 +147,10 @@ where
         if !is_square_root(node) {
             return;
         }
-        let ty = match node.meta.get_type() {
+        let RawExpr::Binop(Binop::Power, base, _) = &node.raw else {
+            unreachable!()
+        };
+        let ty = match base.meta.get_type() {
             Ok(TypeExpr::Real) => TypeExpr::Real,
             Ok(matrix @ TypeExpr::Matrix(_, _)) => matrix,
             Ok(_) => {
@@ -161,13 +159,7 @@ where
                 ));
                 return;
             }
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        };
-        let RawExpr::Binop(Binop::Power, base, _) = &node.raw else {
-            unreachable!()
+            Err(_) => return,
         };
         let existence = match ty {
             TypeExpr::Real => RootExistence::Checkable,
@@ -178,6 +170,7 @@ where
         node.get_mut()
             .expect("square-root lowering requires uniquely owned expressions")
             .raw = RawExpr::Variable(introduced);
+        self.rewrites += 1;
     }
 }
 
@@ -204,7 +197,7 @@ impl<Metadata> Default for PrincipalRootRegistry<Metadata> {
 
 impl<Metadata> PrincipalRootRegistry<Metadata>
 where
-    Metadata: Clone + MaybeTyped,
+    Metadata: Clone + Default,
 {
     fn lower(
         &mut self,
@@ -214,39 +207,28 @@ where
         existence: RootExistence,
     ) -> Variable {
         let introduced_variable = Variable::new(source.as_latex_verbose().to_string());
+        // These wrappers are new syntax nodes, so the source node's metadata
+        // does not describe them. Type resolution fills their default metadata.
         let introduced = Expr::with_metadata(
-            source.meta.clone(),
+            Metadata::default(),
             RawExpr::Variable(introduced_variable.clone()),
         );
         let square = Expr::with_metadata(
-            source.meta.clone(),
+            Metadata::default(),
             RawExpr::Finop(
                 Finop::Times,
                 vec![deep_clone(&introduced), deep_clone(&introduced)],
             ),
         );
-        let mut defining_assertions = vec![comparison(
-            source.meta.clone(),
-            square,
-            Cmp::Eq,
-            deep_clone(&radicand),
-        )];
+        let mut defining_assertions = vec![comparison(square, Cmp::Eq, deep_clone(&radicand))];
         if matches!(ty, TypeExpr::Real) {
-            defining_assertions.push(comparison(
-                source.meta.clone(),
-                deep_clone(&introduced),
-                Cmp::Ge,
-                natural(source.meta.clone(), 0),
-            ));
+            defining_assertions.push(comparison(deep_clone(&introduced), Cmp::Ge, natural(0)));
         }
         let existence = match existence {
             RootExistence::Guaranteed => Existence::Guaranteed,
-            RootExistence::Checkable => Existence::Checkable(vec![comparison(
-                source.meta.clone(),
-                radicand,
-                Cmp::Lt,
-                natural(source.meta.clone(), 0),
-            )]),
+            RootExistence::Checkable => {
+                Existence::Checkable(vec![comparison(radicand, Cmp::Lt, natural(0))])
+            }
             RootExistence::Assumed => Existence::Assumed,
         };
         let condition = SideCondition {
@@ -277,45 +259,26 @@ fn norm2_squared_operand<Metadata>(expression: &Expr<Metadata>) -> Option<&Expr<
     matches!(exponent.raw, RawExpr::NatLiteral(2)).then_some(operand)
 }
 
-fn norm2_squared<Metadata>(metadata: Metadata, operand: &Expr<Metadata>) -> Expr<Metadata>
+fn norm2_squared<Metadata>(operand: &Expr<Metadata>) -> Expr<Metadata>
 where
-    Metadata: Clone + MaybeTyped,
+    Metadata: Clone + Default,
 {
-    let TypeExpr::Matrix(rows, cols) = operand
-        .meta
-        .get_type()
-        .expect("2-norm operand type was checked before constructing its core expression")
-    else {
-        unreachable!()
-    };
-    let transpose = typed(
-        metadata.clone(),
-        TypeExpr::Matrix(cols.clone(), rows),
+    let transpose = Expr::with_metadata(
+        Metadata::default(),
         RawExpr::Monop(Monop::Transpose, deep_clone(operand)),
     );
-    let product = typed(
-        metadata.clone(),
-        TypeExpr::Matrix(cols.clone(), cols),
+    let product = Expr::with_metadata(
+        Metadata::default(),
         RawExpr::Finop(Finop::Times, vec![transpose, deep_clone(operand)]),
     );
-    typed(
-        metadata.clone(),
-        TypeExpr::Real,
+    Expr::with_metadata(
+        Metadata::default(),
         RawExpr::Binop(
             Binop::Cast,
-            Expr::with_metadata(metadata, RawExpr::Type(TypeExpr::Real)),
+            Expr::with_metadata(Metadata::default(), RawExpr::Type(TypeExpr::Real)),
             product,
         ),
     )
-}
-
-fn typed<Metadata: MaybeTyped>(
-    mut metadata: Metadata,
-    ty: TypeExpr<()>,
-    raw: RawExpr<Metadata>,
-) -> Expr<Metadata> {
-    metadata.put_type(ty);
-    Expr::with_metadata(metadata, raw)
 }
 
 fn is_square_root<Metadata>(expression: &Expr<Metadata>) -> bool {
@@ -330,14 +293,13 @@ fn is_square_root<Metadata>(expression: &Expr<Metadata>) -> bool {
     )
 }
 
-fn comparison<Metadata>(
-    metadata: Metadata,
+fn comparison<Metadata: Default>(
     left: Expr<Metadata>,
     op: Cmp,
     right: Expr<Metadata>,
 ) -> Expr<Metadata> {
     Expr::with_metadata(
-        metadata,
+        Metadata::default(),
         RawExpr::CmpChain(CmpChain {
             start: left,
             assertions: vec![(op, right)],
@@ -345,15 +307,16 @@ fn comparison<Metadata>(
     )
 }
 
-fn natural<Metadata>(metadata: Metadata, value: u64) -> Expr<Metadata> {
-    Expr::with_metadata(metadata, RawExpr::NatLiteral(value))
+fn natural<Metadata: Default>(value: u64) -> Expr<Metadata> {
+    Expr::with_metadata(Metadata::default(), RawExpr::NatLiteral(value))
 }
 
-fn assert_compatible<Metadata>(
+pub(crate) fn assert_compatible<Metadata>(
     previous: &SideCondition<Metadata>,
     current: &SideCondition<Metadata>,
 ) {
     assert_eq!(previous.introduced_type, current.introduced_type);
+    assert_eq!(previous.display_name, current.display_name);
     let render = |assertions: &[Expr<Metadata>]| {
         assertions
             .iter()
@@ -365,4 +328,14 @@ fn assert_compatible<Metadata>(
         render(&current.defining_assertions),
         "same-named synthetic variables have incompatible definitions"
     );
+    match (&previous.existence, &current.existence) {
+        (Existence::Guaranteed, Existence::Guaranteed)
+        | (Existence::Assumed, Existence::Assumed) => {}
+        (Existence::Checkable(previous), Existence::Checkable(current)) => assert_eq!(
+            render(previous),
+            render(current),
+            "same-named synthetic variables have incompatible existence checks"
+        ),
+        _ => panic!("same-named synthetic variables have incompatible existence classes"),
+    }
 }
