@@ -170,6 +170,7 @@ impl TestCase<NotSolvedYet> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(crate::to_z3::ToZ3Error::from)?;
         let conclusion = match extract_prepared_environment_iterator(
+            &symbolic_types,
             &prepared_assumptions,
             &prepared_sentences,
             max_dimension,

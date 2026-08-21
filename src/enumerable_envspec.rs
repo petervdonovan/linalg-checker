@@ -23,6 +23,12 @@ pub fn infer_symbolic_type_environment(
     assumptions: &[Expr<()>],
 ) -> Result<SymbolicTypeEnvironment, ShapeError> {
     let specification = collect_environment_specification(assumptions)?;
+    let user_names = specification
+        .variables
+        .iter()
+        .map(variable_z3_name)
+        .collect::<BTreeSet<_>>();
+    let mut generated_dimensions = BTreeSet::new();
     let mut types = HashMap::new();
     for variable in specification.variables {
         let ty = if specification.dimension_variables.contains(&variable) {
@@ -34,9 +40,20 @@ pub fn infer_symbolic_type_environment(
         {
             ty.clone()
         } else {
-            guessed_type_expr(&variable)
+            let ty = guessed_type_expr(&variable);
+            collect_type_dimension_variables(&ty, &mut generated_dimensions);
+            ty
         };
         types.insert(variable, ty);
+    }
+    if let Some(collision) = generated_dimensions
+        .iter()
+        .map(variable_z3_name)
+        .find(|name| user_names.contains(name))
+    {
+        return Err(ShapeError::InvalidTyping(format!(
+            "generated dimension variable collides with user variable {collision}"
+        )));
     }
     Ok(SymbolicTypeEnvironment { types })
 }
@@ -155,121 +172,105 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
             prepare_expression(&types, expression, positive).map_err(type_error_to_shape_error)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    extract_prepared_environment_iterator(&assumptions, &contextual_expressions, max_dimension)
+    extract_prepared_environment_iterator(
+        &types,
+        &assumptions,
+        &contextual_expressions,
+        max_dimension,
+    )
 }
 
 pub fn extract_prepared_environment_iterator(
+    symbolic_types: &SymbolicTypeEnvironment,
     assumptions: &[PreparedExpression],
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    let mut hidden_variables = BTreeSet::new();
+    let mut hidden_types = BTreeMap::new();
     let mut prepared_assumptions: Vec<Expr<TypedMetadata>> = Vec::new();
     let mut prepared_context: Vec<Expr<TypedMetadata>> = Vec::new();
     for prepared in assumptions {
         prepared_assumptions.push(prepared.expression.clone());
-        append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
+        append_side_condition_definitions(prepared, &mut prepared_assumptions, &mut hidden_types)?;
     }
     for prepared in contextual_expressions {
         prepared_context.push(prepared.expression.clone());
         // Generated definitions are typing obligations and must not be skipped by
         // the ordinary-context implicit-nonce filter.
-        append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
+        append_side_condition_definitions(prepared, &mut prepared_assumptions, &mut hidden_types)?;
     }
     extract_typed_environment_iterator_with_hidden(
+        symbolic_types,
         prepared_assumptions,
         prepared_context,
         max_dimension,
-        hidden_variables,
+        hidden_types,
     )
 }
 
-fn append_side_condition_shapes(
+fn append_side_condition_definitions(
     prepared: &PreparedExpression,
     assumptions: &mut Vec<Expr<TypedMetadata>>,
-    hidden_variables: &mut BTreeSet<Variable>,
-) {
+    hidden_types: &mut BTreeMap<Variable, TypeExpr<()>>,
+) -> Result<(), ShapeError> {
     for condition in &prepared.side_conditions {
-        hidden_variables.insert(condition.introduced_variable.clone());
-        assumptions.push(Expr::new(RawExpr::Binop(
-            Binop::ElementOf,
-            Expr::new(RawExpr::Variable(condition.introduced_variable.clone())),
-            Expr::new(RawExpr::Type(typed_type_expr(&condition.introduced_type))),
-        )));
+        if let Some(previous) = hidden_types.insert(
+            condition.introduced_variable.clone(),
+            condition.introduced_type.clone(),
+        ) && previous != condition.introduced_type
+        {
+            return Err(ShapeError::InvalidTyping(format!(
+                "generated variable {} has incompatible inferred types",
+                condition.introduced_variable.z3_name()
+            )));
+        }
         assumptions.extend(condition.defining_assertions.iter().cloned());
     }
-}
-
-fn typed_type_expr(ty: &TypeExpr<()>) -> TypeExpr<TypedMetadata> {
-    match ty {
-        TypeExpr::Bool => TypeExpr::Bool,
-        TypeExpr::Nat => TypeExpr::Nat,
-        TypeExpr::Int => TypeExpr::Int,
-        TypeExpr::Real => TypeExpr::Real,
-        TypeExpr::Matrix(rows, cols) => {
-            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
-        }
-        TypeExpr::Seq(element, length) => TypeExpr::Seq(
-            element.with_default_metadata(),
-            length.with_default_metadata(),
-        ),
-    }
-}
-
-fn erase_generic_type<Metadata>(ty: &TypeExpr<Metadata>) -> TypeExpr<()> {
-    match ty {
-        TypeExpr::Bool => TypeExpr::Bool,
-        TypeExpr::Nat => TypeExpr::Nat,
-        TypeExpr::Int => TypeExpr::Int,
-        TypeExpr::Real => TypeExpr::Real,
-        TypeExpr::Matrix(rows, cols) => {
-            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
-        }
-        TypeExpr::Seq(element, length) => TypeExpr::Seq(
-            element.with_default_metadata(),
-            length.with_default_metadata(),
-        ),
-    }
+    Ok(())
 }
 
 fn extract_typed_environment_iterator_with_hidden(
+    symbolic_types: &SymbolicTypeEnvironment,
     assumptions: Vec<Expr<TypedMetadata>>,
     contextual_expressions: Vec<Expr<TypedMetadata>>,
     max_dimension: u64,
-    hidden_variables: BTreeSet<Variable>,
+    hidden_types: BTreeMap<Variable, TypeExpr<()>>,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    let mut specification = collect_environment_specification(&assumptions)?;
-    let mut hidden_dimension_variables = BTreeSet::new();
-    for hidden in &hidden_variables {
-        if let Some(types) = specification.explicit_types.get(hidden) {
-            for ty in types {
-                collect_type_dimension_variables(ty, &mut hidden_dimension_variables);
-            }
-            for dimension in &hidden_dimension_variables {
-                specification.variables.remove(dimension);
-                specification.dimension_variables.remove(dimension);
-            }
-        }
+    let hidden_variables = hidden_types.keys().cloned().collect::<BTreeSet<_>>();
+    if let Some(collision) = hidden_variables
+        .iter()
+        .find(|variable| symbolic_types.types.contains_key(*variable))
+    {
+        return Err(ShapeError::InvalidTyping(format!(
+            "generated variable {} collides with a user variable",
+            collision.z3_name()
+        )));
     }
     let mut solver = Solver::new();
-    let variable_types = infer_variable_types(&mut solver, specification)?;
-    let generated_dimension_variables = generated_dimension_variables(&variable_types);
-    assert_positive_matrix_dimensions(&mut solver, &variable_types);
     let implicit_dimensions =
         collect_implicit_dimension_symbols(assumptions.iter().chain(contextual_expressions.iter()));
     for dimension in implicit_dimensions.values() {
         solver.assert(dimension.gt(0));
     }
+    let CompiledSymbolicTypes {
+        variable_types,
+        natural_symbols,
+    } = compile_symbolic_types(
+        &mut solver,
+        symbolic_types,
+        &hidden_types,
+        &implicit_dimensions,
+    )?;
+    assert_positive_matrix_dimensions(&mut solver, &variable_types);
     let (known_equalities, projections) = {
         let mut projections = BTreeMap::new();
         let mut context = DimensionConstraintBuilder {
             solver: &mut solver,
             variable_types: &variable_types,
-            generated_dimension_variables: &generated_dimension_variables,
+            natural_symbols: &natural_symbols,
             implicit_dimensions: &implicit_dimensions,
             projections: &mut projections,
             mode: ConstraintMode::Permanent,
-            hidden_dimension_variables: &hidden_dimension_variables,
         };
         for assumption in &assumptions {
             context.constrain_top_level_assertion(assumption)?;
@@ -349,8 +350,8 @@ struct EnvironmentSpecification {
     dimension_variables: BTreeSet<Variable>,
 }
 
-fn collect_environment_specification<Metadata>(
-    assumptions: &[Expr<Metadata>],
+fn collect_environment_specification(
+    assumptions: &[Expr<()>],
 ) -> Result<EnvironmentSpecification, ShapeError> {
     let mut specification = EnvironmentSpecification {
         variables: BTreeSet::new(),
@@ -373,7 +374,7 @@ fn collect_environment_specification<Metadata>(
                 "type membership must have a type on the right".to_owned(),
             ));
         };
-        let ty = erase_generic_type(ty);
+        let ty = ty.clone();
         collect_type_dimension_variables(&ty, &mut specification.dimension_variables);
         specification
             .explicit_types
@@ -384,44 +385,66 @@ fn collect_environment_specification<Metadata>(
     Ok(specification)
 }
 
-fn infer_variable_types(
-    solver: &mut Solver,
-    specification: EnvironmentSpecification,
-) -> Result<BTreeMap<Variable, Shape>, ShapeError> {
-    let mut variable_types = BTreeMap::new();
-    let mut generated_names = BTreeSet::new();
-    for variable in specification.variables {
-        let explicit = specification
-            .explicit_types
-            .get(&variable)
-            .and_then(|types| types.first());
-        let shape = if specification.dimension_variables.contains(&variable) {
-            Shape::Nat
-        } else if let Some(ty) = explicit {
-            shape_from_type_expr(&variable, ty, &mut generated_names)?
-        } else {
-            guessed_shape(&variable, &mut generated_names)
-        };
-        if matches!(shape, Shape::Nat) {
-            solver.assert(Int::new_const(variable_z3_name(&variable)).ge(0));
-        }
-        variable_types.insert(variable, shape);
-    }
-    reject_generated_name_collisions(&variable_types, &generated_names)?;
-    Ok(variable_types)
+struct CompiledSymbolicTypes {
+    variable_types: BTreeMap<Variable, Shape>,
+    natural_symbols: BTreeMap<Variable, Int>,
 }
 
-fn reject_generated_name_collisions(
-    variable_types: &BTreeMap<Variable, Shape>,
-    generated_names: &BTreeSet<String>,
-) -> Result<(), ShapeError> {
-    let user_names: BTreeSet<_> = variable_types.keys().map(variable_z3_name).collect();
-    if let Some(collision) = generated_names.intersection(&user_names).next() {
-        return Err(ShapeError::InvalidTyping(format!(
-            "generated dimension variable collides with user variable {collision}"
-        )));
+fn compile_symbolic_types(
+    solver: &mut Solver,
+    symbolic_types: &SymbolicTypeEnvironment,
+    hidden_types: &BTreeMap<Variable, TypeExpr<()>>,
+    implicit_dimensions: &BTreeMap<ImplicitDimension, Int>,
+) -> Result<CompiledSymbolicTypes, ShapeError> {
+    let mut all_types = symbolic_types
+        .types
+        .iter()
+        .map(|(variable, ty)| (variable.clone(), ty.clone()))
+        .collect::<BTreeMap<_, _>>();
+    all_types.extend(hidden_types.clone());
+    let mut natural_variables = BTreeSet::new();
+    for (variable, ty) in &all_types {
+        if matches!(ty, TypeExpr::Nat) {
+            natural_variables.insert(variable.clone());
+        }
+        collect_type_dimension_variables(ty, &mut natural_variables);
     }
-    Ok(())
+
+    let mut natural_symbols = implicit_dimensions
+        .iter()
+        .map(|(dimension, symbol)| (Variable::new(dimension.z3_name()), symbol.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for variable in natural_variables {
+        if let Some(ty) = symbolic_types.types.get(&variable)
+            && !matches!(ty, TypeExpr::Nat)
+        {
+            return Err(ShapeError::InvalidTyping(format!(
+                "dimension variable {} is not natural-valued",
+                variable_z3_name(&variable)
+            )));
+        }
+        let symbol = implicit_dimensions
+            .iter()
+            .find(|(dimension, _)| variable.name == dimension.z3_name())
+            .map(|(_, symbol)| symbol.clone())
+            .unwrap_or_else(|| Int::new_const(variable_z3_name(&variable)));
+        solver.assert(symbol.ge(0));
+        if let Some(previous) = natural_symbols.insert(variable.clone(), symbol.clone()) {
+            assert_eq!(
+                previous, symbol,
+                "implicit dimension names must map to their nonce symbols"
+            );
+        }
+    }
+
+    let variable_types = all_types
+        .into_iter()
+        .map(|(variable, ty)| Ok((variable, compile_type_expr(&ty, &natural_symbols)?)))
+        .collect::<Result<_, ShapeError>>()?;
+    Ok(CompiledSymbolicTypes {
+        variable_types,
+        natural_symbols,
+    })
 }
 
 fn assert_positive_matrix_dimensions(
@@ -631,11 +654,10 @@ enum ConstraintMode {
 struct DimensionConstraintBuilder<'a> {
     solver: &'a mut Solver,
     variable_types: &'a BTreeMap<Variable, Shape>,
-    generated_dimension_variables: &'a BTreeMap<Variable, Int>,
+    natural_symbols: &'a BTreeMap<Variable, Int>,
     implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     projections: &'a mut BTreeMap<Expr<()>, Int>,
     mode: ConstraintMode,
-    hidden_dimension_variables: &'a BTreeSet<Variable>,
 }
 
 impl DimensionConstraintBuilder<'_> {
@@ -771,66 +793,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn lower_nat(&self, expression: &Expr<()>) -> Result<Option<Int>, ShapeError> {
-        match &expression.raw {
-            RawExpr::NatLiteral(value) => Ok(Some(Int::from_u64(*value))),
-            RawExpr::Variable(variable)
-                if matches!(self.variable_types.get(variable), Some(Shape::Nat)) =>
-            {
-                Ok(Some(Int::new_const(variable_z3_name(variable))))
-            }
-            RawExpr::Variable(variable) if self.hidden_dimension_variables.contains(variable) => {
-                // Symbolic dimensions of hidden generated values reuse internal
-                // dimension names without becoming user environment variables.
-                Ok(Some(Int::new_const(variable_z3_name(variable))))
-            }
-            RawExpr::Variable(variable) => {
-                let implicit = self
-                    .implicit_dimensions
-                    .iter()
-                    .find(|(dimension, _)| variable.name == dimension.z3_name())
-                    .map(|(_, value)| value.clone())
-                    .or_else(|| self.generated_dimension_variables.get(variable).cloned());
-                Ok(implicit)
-            }
-            RawExpr::Monop(Monop::Neg, inner) if self.lower_nat(inner)?.is_some() => Err(
-                ShapeError::Unsupported("natural expressions do not support negation".to_owned()),
-            ),
-            RawExpr::Finop(Finop::Plus, terms) => {
-                let mut lowered = Vec::new();
-                for term in terms {
-                    let Some(term) = self.lower_nat(term)? else {
-                        return Ok(None);
-                    };
-                    lowered.push(term);
-                }
-                Ok(Some(Int::add(&lowered)))
-            }
-            RawExpr::Finop(Finop::Times, factors) => {
-                let mut coefficient = 1u64;
-                let mut symbolic = None;
-                for factor in factors {
-                    if let Some(value) = natural_literal(factor) {
-                        coefficient = coefficient.checked_mul(value).ok_or_else(|| {
-                            ShapeError::Unsupported("linear coefficient overflow".to_owned())
-                        })?;
-                    } else if symbolic.is_none() {
-                        symbolic = self.lower_nat(factor)?;
-                        if symbolic.is_none() {
-                            return Ok(None);
-                        }
-                    } else {
-                        return Err(ShapeError::Unsupported(
-                            "symbolic multiplication is not Presburger arithmetic".to_owned(),
-                        ));
-                    }
-                }
-                Ok(Some(match symbolic {
-                    Some(value) => value * Int::from_u64(coefficient),
-                    None => Int::from_u64(coefficient),
-                }))
-            }
-            _ => Ok(None),
-        }
+        lower_nat_with_symbols(expression, self.natural_symbols)
     }
 
     fn shape_of(&self, expression: &Expr<TypedMetadata>) -> Result<Shape, ShapeError> {
@@ -842,41 +805,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn shape_from_resolved_type(&self, ty: &TypeExpr<()>) -> Result<Shape, ShapeError> {
-        Ok(match ty {
-            TypeExpr::Bool => Shape::Bool,
-            TypeExpr::Nat => Shape::Nat,
-            TypeExpr::Int => Shape::Int,
-            TypeExpr::Real => Shape::Real,
-            TypeExpr::Matrix(rows, cols) => Shape::Matrix(
-                self.lower_nat(rows)?.ok_or_else(|| {
-                    ShapeError::Unsupported(format!(
-                        "matrix row dimension is not linear natural arithmetic: {}",
-                        rows.as_latex()
-                    ))
-                })?,
-                self.lower_nat(cols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(format!(
-                        "matrix column dimension is not linear natural arithmetic: {}",
-                        cols.as_latex()
-                    ))
-                })?,
-            ),
-            TypeExpr::Seq(element, length) => {
-                let RawExpr::Type(element) = &element.raw else {
-                    return Err(ShapeError::InvalidTyping(
-                        "sequence element must be a type expression".to_owned(),
-                    ));
-                };
-                Shape::Seq(
-                    Box::new(self.shape_from_resolved_type(element)?),
-                    self.lower_nat(length)?.ok_or_else(|| {
-                        ShapeError::Unsupported(
-                            "sequence length is not linear natural arithmetic".to_owned(),
-                        )
-                    })?,
-                )
-            }
-        })
+        compile_type_expr(ty, self.natural_symbols)
     }
 
     fn constrain_shape_type(
@@ -1423,66 +1352,96 @@ fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
     }
 }
 
-fn scalar_shape(ty: &TypeExpr<()>) -> Option<Shape> {
-    Some(match ty {
+fn compile_type_expr(
+    ty: &TypeExpr<()>,
+    natural_symbols: &BTreeMap<Variable, Int>,
+) -> Result<Shape, ShapeError> {
+    Ok(match ty {
         TypeExpr::Bool => Shape::Bool,
         TypeExpr::Nat => Shape::Nat,
         TypeExpr::Int => Shape::Int,
         TypeExpr::Real => Shape::Real,
-        TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => return None,
-    })
-}
-
-fn shape_from_type_expr(
-    variable: &Variable,
-    ty: &TypeExpr<()>,
-    generated_names: &mut BTreeSet<String>,
-) -> Result<Shape, ShapeError> {
-    if let Some(shape) = scalar_shape(ty) {
-        return Ok(shape);
-    }
-    match ty {
-        TypeExpr::Matrix(_, _) => Ok(matrix_shape(variable, generated_names)),
-        TypeExpr::Seq(element, _) => {
+        TypeExpr::Matrix(rows, cols) => Shape::Matrix(
+            lower_nat_with_symbols(rows, natural_symbols)?.ok_or_else(|| {
+                ShapeError::Unsupported(format!(
+                    "matrix row dimension is not linear natural arithmetic: {}",
+                    rows.as_latex()
+                ))
+            })?,
+            lower_nat_with_symbols(cols, natural_symbols)?.ok_or_else(|| {
+                ShapeError::Unsupported(format!(
+                    "matrix column dimension is not linear natural arithmetic: {}",
+                    cols.as_latex()
+                ))
+            })?,
+        ),
+        TypeExpr::Seq(element, length) => {
             let RawExpr::Type(element) = &element.raw else {
                 return Err(ShapeError::InvalidTyping(
                     "sequence element must be a type expression".to_owned(),
                 ));
             };
-            if matches!(element, TypeExpr::Seq(_, _)) {
-                return Err(ShapeError::Unsupported(
-                    "nested sequence inference is not supported".to_owned(),
-                ));
-            }
-            let element =
-                shape_from_type_expr_with_prefix(variable, element, "element_", generated_names)?;
-            Ok(Shape::Seq(
-                Box::new(element),
-                dimension_for(variable, "length", generated_names),
-            ))
+            Shape::Seq(
+                Box::new(compile_type_expr(element, natural_symbols)?),
+                lower_nat_with_symbols(length, natural_symbols)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "sequence length is not linear natural arithmetic".to_owned(),
+                    )
+                })?,
+            )
         }
-        _ => unreachable!(),
-    }
+    })
 }
 
-fn shape_from_type_expr_with_prefix(
-    variable: &Variable,
-    ty: &TypeExpr<()>,
-    prefix: &str,
-    generated_names: &mut BTreeSet<String>,
-) -> Result<Shape, ShapeError> {
-    if let Some(shape) = scalar_shape(ty) {
-        return Ok(shape);
-    }
-    match ty {
-        TypeExpr::Matrix(_, _) => Ok(Shape::Matrix(
-            dimension_for(variable, &format!("{prefix}rows"), generated_names),
-            dimension_for(variable, &format!("{prefix}cols"), generated_names),
-        )),
-        TypeExpr::Seq(_, _) => Err(ShapeError::Unsupported(
-            "nested sequence inference is not supported".to_owned(),
-        )),
-        _ => unreachable!(),
+fn lower_nat_with_symbols(
+    expression: &Expr<()>,
+    natural_symbols: &BTreeMap<Variable, Int>,
+) -> Result<Option<Int>, ShapeError> {
+    match &expression.raw {
+        RawExpr::NatLiteral(value) => Ok(Some(Int::from_u64(*value))),
+        RawExpr::Variable(variable) => Ok(natural_symbols.get(variable).cloned()),
+        RawExpr::Monop(Monop::Neg, inner)
+            if lower_nat_with_symbols(inner, natural_symbols)?.is_some() =>
+        {
+            Err(ShapeError::Unsupported(
+                "natural expressions do not support negation".to_owned(),
+            ))
+        }
+        RawExpr::Finop(Finop::Plus, terms) => {
+            let mut lowered = Vec::new();
+            for term in terms {
+                let Some(term) = lower_nat_with_symbols(term, natural_symbols)? else {
+                    return Ok(None);
+                };
+                lowered.push(term);
+            }
+            Ok(Some(Int::add(&lowered)))
+        }
+        RawExpr::Finop(Finop::Times, factors) => {
+            let mut coefficient = 1u64;
+            let mut symbolic = None;
+            for factor in factors {
+                if let Some(value) = natural_literal(factor) {
+                    coefficient = coefficient.checked_mul(value).ok_or_else(|| {
+                        ShapeError::Unsupported("linear coefficient overflow".to_owned())
+                    })?;
+                } else if symbolic.is_none() {
+                    symbolic = lower_nat_with_symbols(factor, natural_symbols)?;
+                    if symbolic.is_none() {
+                        return Ok(None);
+                    }
+                } else {
+                    return Err(ShapeError::Unsupported(
+                        "symbolic multiplication is not Presburger arithmetic".to_owned(),
+                    ));
+                }
+            }
+            Ok(Some(match symbolic {
+                Some(value) => value * Int::from_u64(coefficient),
+                None => Int::from_u64(coefficient),
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1496,44 +1455,6 @@ fn shape_dimensions(shape: &Shape) -> Vec<Int> {
         }
         _ => Vec::new(),
     }
-}
-
-fn generated_dimension_variables(
-    variable_types: &BTreeMap<Variable, Shape>,
-) -> BTreeMap<Variable, Int> {
-    fn insert_shape(
-        result: &mut BTreeMap<Variable, Int>,
-        variable: &Variable,
-        prefix: &str,
-        shape: &Shape,
-    ) {
-        match shape {
-            Shape::Matrix(rows, cols) => {
-                result.insert(
-                    Variable::new(format!("{}_{{{prefix}rows}}", variable.z3_name())),
-                    rows.clone(),
-                );
-                result.insert(
-                    Variable::new(format!("{}_{{{prefix}cols}}", variable.z3_name())),
-                    cols.clone(),
-                );
-            }
-            Shape::Seq(element, length) => {
-                result.insert(
-                    Variable::new(format!("{}_{{{prefix}length}}", variable.z3_name())),
-                    length.clone(),
-                );
-                insert_shape(result, variable, &format!("{prefix}element_"), element);
-            }
-            Shape::Bool | Shape::Nat | Shape::Int | Shape::Real => {}
-        }
-    }
-
-    let mut result = BTreeMap::new();
-    for (variable, shape) in variable_types {
-        insert_shape(&mut result, variable, "", shape);
-    }
-    result
 }
 
 fn concrete_type(model: &z3::Model, shape: &Shape) -> Result<Type, ShapeError> {
@@ -1612,33 +1533,6 @@ fn indexed_sequence_lengths<Metadata>(
     } else {
         Ok(collector.lengths.into_values().collect())
     }
-}
-
-fn guessed_shape(variable: &Variable, generated_names: &mut BTreeSet<String>) -> Shape {
-    let first = variable.name.chars().next().unwrap_or('_');
-    if first.is_ascii_uppercase() {
-        matrix_shape(variable, generated_names)
-    } else if matches!(variable.name.as_str(), "u" | "v" | "w" | "x" | "y" | "z") {
-        let rows = dimension_for(variable, "rows", generated_names);
-        Shape::Matrix(rows, Int::from_u64(1))
-    } else if matches!(variable.name.as_str(), "n" | "i" | "j" | "k" | "l" | "m") {
-        Shape::Nat
-    } else {
-        Shape::Real
-    }
-}
-
-fn matrix_shape(variable: &Variable, generated_names: &mut BTreeSet<String>) -> Shape {
-    Shape::Matrix(
-        dimension_for(variable, "rows", generated_names),
-        dimension_for(variable, "cols", generated_names),
-    )
-}
-
-fn dimension_for(variable: &Variable, axis: &str, generated_names: &mut BTreeSet<String>) -> Int {
-    let name = format!("{}_{{{axis}}}", variable_z3_name(variable));
-    generated_names.insert(name.clone());
-    Int::new_const(name)
 }
 
 fn variable_z3_name(variable: &Variable) -> String {
@@ -1886,7 +1780,7 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let environments = extract_prepared_environment_iterator(&prepared, &[], 2)
+        let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -1917,7 +1811,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect::<Vec<_>>();
-            let environments = extract_prepared_environment_iterator(&prepared, &[], 2)
+            let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();

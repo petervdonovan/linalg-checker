@@ -161,6 +161,7 @@ impl Argument {
             .map_err(ModelFindingError::from)?;
 
         let environments = match extract_prepared_environment_iterator(
+            &symbolic_types,
             &prepared_assumptions,
             &[],
             max_dimension,
@@ -454,7 +455,12 @@ fn step_environment_extensions(
         }
     }
     declarations.push(step.clone());
-    let iterator = match extract_prepared_environment_iterator(&declarations, &[], max_dimension) {
+    let iterator = match extract_prepared_environment_iterator(
+        symbolic_types,
+        &declarations,
+        &[],
+        max_dimension,
+    ) {
         Ok(iterator) => iterator,
         Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
             return Ok(StepEnvironmentExtensions {
