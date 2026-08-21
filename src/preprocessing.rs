@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use crate::{
     Expr,
     logic_lowering::LogicLowering,
     operator_visitors::{Norm2SquaredVisitor, Norm2Visitor, SquareRootVisitor},
-    type_resolver::{TypeError, TypeLookup, TypeResolver, TypedMetadata},
+    type_resolver::{OperatorTypeRules, TypeError, TypeLookup, TypeResolver, TypedMetadata},
     visit_mut::{Existence, SideCondition, VisitContext, VisitMut},
 };
 
@@ -19,7 +21,8 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
     context: VisitContext,
 ) -> Result<PreparedExpression, TypeError> {
     let mut expression: Expr<TypedMetadata> = expression.with_default_metadata();
-    TypeResolver::new(types).resolve(&mut expression, context)?;
+    let standard_rules = OperatorTypeRules::standard();
+    TypeResolver::new(types, &standard_rules).resolve(&mut expression, context)?;
     LogicLowering.visit_expr_mut(context, &mut expression);
     let mut norm2_squared = Norm2SquaredVisitor::default();
     norm2_squared.visit_expr_mut(context, &mut expression);
@@ -40,11 +43,51 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
         }
     }
     side_conditions.extend(square_roots.finish()?);
+
+    let synthetic_types = side_conditions
+        .iter()
+        .map(|condition| {
+            (
+                condition.introduced_variable.clone(),
+                condition.introduced_type.clone(),
+            )
+        })
+        .collect();
+    let extended_types = ExtendedTypeLookup {
+        base: types,
+        synthetic_types,
+    };
+    let core_rules = OperatorTypeRules::core();
+    TypeResolver::new(&extended_types, &core_rules).resolve(&mut expression, context)?;
+    for condition in &mut side_conditions {
+        for assertion in &mut condition.defining_assertions {
+            TypeResolver::new(&extended_types, &core_rules).resolve(assertion, context)?;
+        }
+        if let Existence::Checkable(assertions) = &mut condition.existence {
+            for assertion in assertions {
+                TypeResolver::new(&extended_types, &core_rules).resolve(assertion, context)?;
+            }
+        }
+    }
     Ok(PreparedExpression {
         expression,
         side_conditions,
         context,
     })
+}
+
+struct ExtendedTypeLookup<'a, Lookup> {
+    base: &'a Lookup,
+    synthetic_types: HashMap<crate::Variable, crate::TypeExpr<()>>,
+}
+
+impl<Lookup: TypeLookup> TypeLookup for ExtendedTypeLookup<'_, Lookup> {
+    fn type_of(&self, variable: &crate::Variable) -> Option<crate::TypeExpr<()>> {
+        self.synthetic_types
+            .get(variable)
+            .cloned()
+            .or_else(|| self.base.type_of(variable))
+    }
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub mod to_tex;
 pub mod to_z3;
 pub mod type_resolver;
 pub mod validate_argument;
+pub mod visit;
 pub mod visit_mut;
 
 use std::{

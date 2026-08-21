@@ -3,9 +3,13 @@ use std::collections::BTreeMap;
 use crate::{
     Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
-    type_resolver::{MaybeTyped, TypeError},
+    type_resolver::{MaybeTyped, OperatorTypeRules, TypeError},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
+
+pub fn register_type_rules(rules: &mut OperatorTypeRules) {
+    rules.register_monop(Monop::Norm2, crate::type_resolver::real_operator_type_rule);
+}
 
 #[derive(Default)]
 pub struct Norm2SquaredVisitor {

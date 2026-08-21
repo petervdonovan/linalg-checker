@@ -10,9 +10,13 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Matrix, Monop, RawExpr,
-    SeqOp, SeqType, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
-    type_resolver::SymbolicTypeEnvironment,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, RawExpr, SeqOp,
+    SeqType, Type, TypeExpr, Variable,
+    preprocessing::PreparedExpression,
+    preprocessing::prepare_expression,
+    type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata},
+    visit::{self, Visit},
+    visit_mut::VisitContext,
 };
 
 pub fn infer_symbolic_type_environment(
@@ -77,6 +81,17 @@ impl fmt::Display for ShapeError {
 
 impl Error for ShapeError {}
 
+fn type_error_to_shape_error(error: TypeError) -> ShapeError {
+    match error {
+        TypeError::Unsupported(message) => ShapeError::Unsupported(message.to_owned()),
+        TypeError::Invalid(message) => ShapeError::InvalidTyping(message.to_owned()),
+        TypeError::MissingType(variable) => ShapeError::InvalidTyping(format!(
+            "missing inferred type for {}",
+            variable_z3_name(&variable)
+        )),
+    }
+}
+
 #[derive(Clone)]
 enum Shape {
     Bool,
@@ -118,16 +133,29 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
     contextual_expressions: impl Iterator<Item = Expr<ContextMetadata>>,
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    extract_environment_iterator_with_hidden(
-        assumptions
-            .map(|expression| expression.with_default_metadata())
-            .collect(),
-        contextual_expressions
-            .map(|expression| expression.with_default_metadata())
-            .collect(),
-        max_dimension,
-        BTreeSet::new(),
-    )
+    let assumptions: Vec<Expr<()>> = assumptions
+        .map(|expression| expression.with_default_metadata())
+        .collect();
+    let contextual_expressions: Vec<Expr<()>> = contextual_expressions
+        .map(|expression| expression.with_default_metadata())
+        .collect();
+    let types = infer_symbolic_type_environment(&assumptions)?;
+    let positive = VisitContext {
+        logical_polarity: true,
+    };
+    let assumptions = assumptions
+        .iter()
+        .map(|expression| {
+            prepare_expression(&types, expression, positive).map_err(type_error_to_shape_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let contextual_expressions = contextual_expressions
+        .iter()
+        .map(|expression| {
+            prepare_expression(&types, expression, positive).map_err(type_error_to_shape_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    extract_prepared_environment_iterator(&assumptions, &contextual_expressions, max_dimension)
 }
 
 pub fn extract_prepared_environment_iterator(
@@ -136,19 +164,19 @@ pub fn extract_prepared_environment_iterator(
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
     let mut hidden_variables = BTreeSet::new();
-    let mut prepared_assumptions = Vec::new();
-    let mut prepared_context = Vec::new();
+    let mut prepared_assumptions: Vec<Expr<TypedMetadata>> = Vec::new();
+    let mut prepared_context: Vec<Expr<TypedMetadata>> = Vec::new();
     for prepared in assumptions {
-        prepared_assumptions.push(prepared.expression.with_default_metadata());
+        prepared_assumptions.push(prepared.expression.clone());
         append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
     }
     for prepared in contextual_expressions {
-        prepared_context.push(prepared.expression.with_default_metadata());
+        prepared_context.push(prepared.expression.clone());
         // Generated definitions are typing obligations and must not be skipped by
         // the ordinary-context implicit-nonce filter.
         append_side_condition_shapes(prepared, &mut prepared_assumptions, &mut hidden_variables);
     }
-    extract_environment_iterator_with_hidden(
+    extract_typed_environment_iterator_with_hidden(
         prepared_assumptions,
         prepared_context,
         max_dimension,
@@ -158,7 +186,7 @@ pub fn extract_prepared_environment_iterator(
 
 fn append_side_condition_shapes(
     prepared: &PreparedExpression,
-    assumptions: &mut Vec<Expr<()>>,
+    assumptions: &mut Vec<Expr<TypedMetadata>>,
     hidden_variables: &mut BTreeSet<Variable>,
 ) {
     for condition in &prepared.side_conditions {
@@ -166,20 +194,47 @@ fn append_side_condition_shapes(
         assumptions.push(Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(condition.introduced_variable.clone())),
-            Expr::new(RawExpr::Type(condition.introduced_type.clone())),
+            Expr::new(RawExpr::Type(typed_type_expr(&condition.introduced_type))),
         )));
-        assumptions.extend(
-            condition
-                .defining_assertions
-                .iter()
-                .map(Expr::with_default_metadata),
-        );
+        assumptions.extend(condition.defining_assertions.iter().cloned());
     }
 }
 
-fn extract_environment_iterator_with_hidden(
-    assumptions: Vec<Expr<()>>,
-    contextual_expressions: Vec<Expr<()>>,
+fn typed_type_expr(ty: &TypeExpr<()>) -> TypeExpr<TypedMetadata> {
+    match ty {
+        TypeExpr::Bool => TypeExpr::Bool,
+        TypeExpr::Nat => TypeExpr::Nat,
+        TypeExpr::Int => TypeExpr::Int,
+        TypeExpr::Real => TypeExpr::Real,
+        TypeExpr::Matrix(rows, cols) => {
+            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
+        }
+        TypeExpr::Seq(element, length) => TypeExpr::Seq(
+            element.with_default_metadata(),
+            length.with_default_metadata(),
+        ),
+    }
+}
+
+fn erase_generic_type<Metadata>(ty: &TypeExpr<Metadata>) -> TypeExpr<()> {
+    match ty {
+        TypeExpr::Bool => TypeExpr::Bool,
+        TypeExpr::Nat => TypeExpr::Nat,
+        TypeExpr::Int => TypeExpr::Int,
+        TypeExpr::Real => TypeExpr::Real,
+        TypeExpr::Matrix(rows, cols) => {
+            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
+        }
+        TypeExpr::Seq(element, length) => TypeExpr::Seq(
+            element.with_default_metadata(),
+            length.with_default_metadata(),
+        ),
+    }
+}
+
+fn extract_typed_environment_iterator_with_hidden(
+    assumptions: Vec<Expr<TypedMetadata>>,
+    contextual_expressions: Vec<Expr<TypedMetadata>>,
     max_dimension: u64,
     hidden_variables: BTreeSet<Variable>,
 ) -> Result<EnvironmentIterator, ShapeError> {
@@ -198,6 +253,7 @@ fn extract_environment_iterator_with_hidden(
     }
     let mut solver = Solver::new();
     let variable_types = infer_variable_types(&mut solver, specification)?;
+    let generated_dimension_variables = generated_dimension_variables(&variable_types);
     assert_positive_matrix_dimensions(&mut solver, &variable_types);
     let implicit_dimensions =
         collect_implicit_dimension_symbols(assumptions.iter().chain(contextual_expressions.iter()));
@@ -206,25 +262,23 @@ fn extract_environment_iterator_with_hidden(
     }
     let (known_equalities, projections) = {
         let mut projections = BTreeMap::new();
-        let mut context = ShapeContext {
+        let mut context = DimensionConstraintBuilder {
             solver: &mut solver,
             variable_types: &variable_types,
+            generated_dimension_variables: &generated_dimension_variables,
             implicit_dimensions: &implicit_dimensions,
             projections: &mut projections,
-            contextual: false,
+            mode: ConstraintMode::Permanent,
             hidden_dimension_variables: &hidden_dimension_variables,
         };
         for assumption in &assumptions {
-            context.constrain_assertion(assumption)?;
+            context.constrain_top_level_assertion(assumption)?;
         }
-        let known = context.known_equalities(&assumptions)?;
+        run_dimension_constraint_visitors(&mut context, &assumptions)?;
+        let known = context.known_equalities_typed(&assumptions)?;
         check_base_constraints(context.solver)?;
-        context.contextual = true;
-        for expression in &contextual_expressions {
-            if contains_implicit(expression) {
-                context.constrain_assertion(expression)?;
-            }
-        }
+        context.mode = ConstraintMode::Contextual;
+        run_dimension_constraint_visitors(&mut context, &contextual_expressions)?;
         check_contextual_constraints(context.solver)?;
         (known, projections.into_iter().collect())
     };
@@ -295,8 +349,8 @@ struct EnvironmentSpecification {
     dimension_variables: BTreeSet<Variable>,
 }
 
-fn collect_environment_specification(
-    assumptions: &[Expr<()>],
+fn collect_environment_specification<Metadata>(
+    assumptions: &[Expr<Metadata>],
 ) -> Result<EnvironmentSpecification, ShapeError> {
     let mut specification = EnvironmentSpecification {
         variables: BTreeSet::new(),
@@ -304,7 +358,7 @@ fn collect_environment_specification(
         dimension_variables: BTreeSet::new(),
     };
     for assumption in assumptions {
-        collect_variables(assumption, &mut specification.variables);
+        collect_variables(assumption, &mut specification.variables)?;
         collect_range_bound_variables(assumption, &mut specification.dimension_variables);
         let RawExpr::Binop(Binop::ElementOf, left, right) = &assumption.raw else {
             continue;
@@ -319,12 +373,13 @@ fn collect_environment_specification(
                 "type membership must have a type on the right".to_owned(),
             ));
         };
-        collect_type_dimension_variables(ty, &mut specification.dimension_variables);
+        let ty = erase_generic_type(ty);
+        collect_type_dimension_variables(&ty, &mut specification.dimension_variables);
         specification
             .explicit_types
             .entry(variable.clone())
             .or_default()
-            .push(ty.clone());
+            .push(ty);
     }
     Ok(specification)
 }
@@ -525,8 +580,8 @@ impl Iterator for EnvironmentIterator {
     }
 }
 
-fn collect_implicit_dimension_symbols<'a>(
-    expressions: impl Iterator<Item = &'a Expr<()>>,
+fn collect_implicit_dimension_symbols<'a, Metadata: 'a>(
+    expressions: impl Iterator<Item = &'a Expr<Metadata>>,
 ) -> BTreeMap<ImplicitDimension, Int> {
     let mut dimensions = BTreeSet::new();
     for expression in expressions {
@@ -538,93 +593,52 @@ fn collect_implicit_dimension_symbols<'a>(
         .collect()
 }
 
-fn contains_implicit(expression: &Expr<()>) -> bool {
-    let mut dimensions = BTreeSet::new();
-    collect_implicit_dimensions(expression, &mut dimensions);
-    !dimensions.is_empty()
-}
-
-fn collect_implicit_dimensions(
-    expression: &Expr<()>,
+fn collect_implicit_dimensions<Metadata>(
+    expression: &Expr<Metadata>,
     dimensions: &mut BTreeSet<ImplicitDimension>,
 ) {
-    match &expression.raw {
-        RawExpr::IdentityMatrix { dimension } => {
-            dimensions.insert(*dimension);
+    struct Collector<'a>(&'a mut BTreeSet<ImplicitDimension>);
+    impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_identity_matrix(&mut self, dimension: &ImplicitDimension) {
+            self.0.insert(*dimension);
         }
-        RawExpr::StandardBasis { index, dimension } => {
-            dimensions.insert(*dimension);
-            collect_implicit_dimensions(index, dimensions);
+        fn visit_raw_expr_standard_basis(
+            &mut self,
+            index: &Expr<Metadata>,
+            dimension: &ImplicitDimension,
+        ) {
+            self.0.insert(*dimension);
+            self.visit_expr(index);
         }
-        RawExpr::ZeroMatrix { rows, cols } => {
-            dimensions.insert(*rows);
-            dimensions.insert(*cols);
+        fn visit_raw_expr_zero_matrix(
+            &mut self,
+            rows: &ImplicitDimension,
+            cols: &ImplicitDimension,
+        ) {
+            self.0.insert(*rows);
+            self.0.insert(*cols);
         }
-        RawExpr::Type(ty) => collect_type_implicit_dimensions(ty, dimensions),
-        RawExpr::Matrix(matrix) => {
-            for element in &matrix.elements {
-                collect_implicit_dimensions(element, dimensions);
-            }
-        }
-        RawExpr::Monop(_, inner) => collect_implicit_dimensions(inner, dimensions),
-        RawExpr::Binop(_, left, right) => {
-            collect_implicit_dimensions(left, dimensions);
-            collect_implicit_dimensions(right, dimensions);
-        }
-        RawExpr::Triop(_, first, second, third) => {
-            collect_implicit_dimensions(first, dimensions);
-            collect_implicit_dimensions(second, dimensions);
-            collect_implicit_dimensions(third, dimensions);
-        }
-        RawExpr::Finop(_, expressions) => {
-            for expression in expressions {
-                collect_implicit_dimensions(expression, dimensions);
-            }
-        }
-        RawExpr::CmpChain(chain) => {
-            collect_implicit_dimensions(&chain.start, dimensions);
-            for (_, expression) in &chain.assertions {
-                collect_implicit_dimensions(expression, dimensions);
-            }
-        }
-        RawExpr::LogicChain(chain) => {
-            collect_implicit_dimensions(&chain.start, dimensions);
-            for (_, expression) in &chain.assertions {
-                collect_implicit_dimensions(expression, dimensions);
-            }
-        }
-        RawExpr::Seqop(_, range, body) => {
-            collect_implicit_dimensions(&range.from, dimensions);
-            collect_implicit_dimensions(&range.to, dimensions);
-            collect_implicit_dimensions(body, dimensions);
-        }
-        RawExpr::Hole | RawExpr::Variable(_) | RawExpr::NatLiteral(_) => {}
     }
+    Collector(dimensions).visit_expr(expression);
 }
 
-fn collect_type_implicit_dimensions(
-    ty: &TypeExpr<()>,
-    dimensions: &mut BTreeSet<ImplicitDimension>,
-) {
-    match ty {
-        TypeExpr::Matrix(rows, cols) | TypeExpr::Seq(rows, cols) => {
-            collect_implicit_dimensions(rows, dimensions);
-            collect_implicit_dimensions(cols, dimensions);
-        }
-        _ => {}
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstraintMode {
+    Permanent,
+    Contextual,
 }
 
-struct ShapeContext<'a> {
+struct DimensionConstraintBuilder<'a> {
     solver: &'a mut Solver,
     variable_types: &'a BTreeMap<Variable, Shape>,
+    generated_dimension_variables: &'a BTreeMap<Variable, Int>,
     implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     projections: &'a mut BTreeMap<Expr<()>, Int>,
-    contextual: bool,
+    mode: ConstraintMode,
     hidden_dimension_variables: &'a BTreeSet<Variable>,
 }
 
-impl ShapeContext<'_> {
+impl DimensionConstraintBuilder<'_> {
     fn implicit_dimension(&self, dimension: ImplicitDimension) -> Int {
         self.implicit_dimensions[&dimension].clone()
     }
@@ -648,7 +662,7 @@ impl ShapeContext<'_> {
     }
 
     fn assert_if_relevant(&mut self, assertion: Bool, dimensions: &[&Int]) {
-        if !self.contextual
+        if matches!(self.mode, ConstraintMode::Permanent)
             || dimensions
                 .iter()
                 .any(|dimension| self.is_implicit_dimension(dimension))
@@ -661,8 +675,18 @@ impl ShapeContext<'_> {
         self.assert_if_relevant(left.eq(right), &[left, right]);
     }
 
+    fn record_projection(&mut self, expression: Expr<()>, value: Int, dimensions: &[&Int]) {
+        if matches!(self.mode, ConstraintMode::Permanent)
+            || dimensions
+                .iter()
+                .any(|dimension| self.is_implicit_dimension(dimension))
+        {
+            self.projections.insert(expression, value);
+        }
+    }
+
     fn assert_typing_failure(&mut self, shape: &Shape) {
-        if !self.contextual || self.shape_depends_on_implicit(shape) {
+        if matches!(self.mode, ConstraintMode::Permanent) || self.shape_depends_on_implicit(shape) {
             self.solver.assert(Bool::from_bool(false));
         }
     }
@@ -700,14 +724,35 @@ impl ShapeContext<'_> {
         Ok(equalities)
     }
 
-    fn constrain_assertion(&mut self, expression: &Expr<()>) -> Result<(), ShapeError> {
-        if !self.contextual
-            && let RawExpr::CmpChain(chain) = &expression.raw
-            && let Some(comparison) = self.natural_comparison(chain)?
-        {
-            self.solver.assert(comparison);
+    fn known_equalities_typed(
+        &self,
+        assumptions: &[Expr<TypedMetadata>],
+    ) -> Result<HashMap<Expr<()>, u64>, ShapeError> {
+        let erased = assumptions
+            .iter()
+            .map(Expr::with_default_metadata)
+            .collect::<Vec<_>>();
+        self.known_equalities(&erased)
+    }
+
+    fn constrain_top_level_assertion(
+        &mut self,
+        expression: &Expr<TypedMetadata>,
+    ) -> Result<(), ShapeError> {
+        if let RawExpr::CmpChain(chain) = &expression.raw {
+            let chain = CmpChain {
+                start: chain.start.with_default_metadata(),
+                assertions: chain
+                    .assertions
+                    .iter()
+                    .map(|(cmp, expression)| (*cmp, expression.with_default_metadata()))
+                    .collect(),
+            };
+            if let Some(comparison) = self.natural_comparison(&chain)? {
+                self.solver.assert(comparison);
+            }
         }
-        self.infer(expression).map(|_| ())
+        Ok(())
     }
 
     fn natural_comparison(&self, chain: &CmpChain<()>) -> Result<Option<Bool>, ShapeError> {
@@ -737,6 +782,15 @@ impl ShapeContext<'_> {
                 // Symbolic dimensions of hidden generated values reuse internal
                 // dimension names without becoming user environment variables.
                 Ok(Some(Int::new_const(variable_z3_name(variable))))
+            }
+            RawExpr::Variable(variable) => {
+                let implicit = self
+                    .implicit_dimensions
+                    .iter()
+                    .find(|(dimension, _)| variable.name == dimension.z3_name())
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| self.generated_dimension_variables.get(variable).cloned());
+                Ok(implicit)
             }
             RawExpr::Monop(Monop::Neg, inner) if self.lower_nat(inner)?.is_some() => Err(
                 ShapeError::Unsupported("natural expressions do not support negation".to_owned()),
@@ -779,301 +833,50 @@ impl ShapeContext<'_> {
         }
     }
 
-    fn infer(&mut self, expression: &Expr<()>) -> Result<Shape, ShapeError> {
-        match &expression.raw {
-            RawExpr::Hole | RawExpr::Type(_) => Ok(Shape::Bool),
-            RawExpr::IdentityMatrix { dimension } => {
-                let dimension = self.implicit_dimension(*dimension);
-                Ok(Shape::Matrix(dimension.clone(), dimension))
-            }
-            RawExpr::StandardBasis { index, dimension } => {
-                let dimension = self.implicit_dimension(*dimension);
-                let index_value = self.lower_nat(index)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "standard basis index is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.projections.insert(index.clone(), index_value.clone());
-                self.assert_if_relevant(index_value.ge(1), &[&dimension]);
-                self.assert_if_relevant(index_value.le(&dimension), &[&dimension]);
-                Ok(Shape::Matrix(dimension, Int::from_u64(1)))
-            }
-            RawExpr::ZeroMatrix { rows, cols } => Ok(Shape::Matrix(
-                self.implicit_dimension(*rows),
-                self.implicit_dimension(*cols),
-            )),
-            RawExpr::Variable(variable) => {
-                self.variable_types.get(variable).cloned().ok_or_else(|| {
-                    ShapeError::InvalidTyping(format!(
-                        "missing inferred type for {}",
-                        variable_z3_name(variable)
-                    ))
-                })
-            }
-            RawExpr::NatLiteral(_) => Ok(Shape::Nat),
-            RawExpr::Matrix(matrix) => self.infer_block_matrix(matrix),
-            RawExpr::Monop(op, inner) => {
-                let shape = self.infer(inner)?;
-                match (op, shape) {
-                    (Monop::Transpose, Shape::Matrix(rows, cols)) => Ok(Shape::Matrix(cols, rows)),
-                    (Monop::Inverse, Shape::Matrix(rows, cols)) => {
-                        self.assert_dimensions_equal(&rows, &cols);
-                        Ok(Shape::Matrix(rows, cols))
-                    }
-                    (Monop::Trace | Monop::Det, Shape::Matrix(rows, cols)) => {
-                        self.assert_dimensions_equal(&rows, &cols);
-                        Ok(Shape::Real)
-                    }
-                    (Monop::Trace | Monop::Det, shape) => {
-                        self.assert_typing_failure(&shape);
-                        Ok(Shape::Real)
-                    }
-                    (Monop::Norm2, _) => Err(ShapeError::Unsupported(
-                        "2-norm must be lowered before shape inference".to_owned(),
-                    )),
-                    (Monop::Norm1 | Monop::NormInfty | Monop::NormFrob, _) => Ok(Shape::Real),
-                    (_, shape) => Ok(shape),
-                }
-            }
-            RawExpr::Binop(Binop::ElementOf, left, right) => self.constrain_membership(left, right),
-            RawExpr::Binop(Binop::Cast, target, value) => self.infer_cast(target, value),
-            RawExpr::Binop(Binop::SingleSubscript, left, index) => {
-                let Shape::Seq(element, _) = self.infer(left)? else {
-                    return Err(ShapeError::InvalidTyping(
-                        "subscripted expression is not a sequence".to_owned(),
-                    ));
-                };
-                if !matches!(index.raw, RawExpr::Variable(_) | RawExpr::NatLiteral(_))
-                    && self.lower_nat(index)?.is_none()
-                {
-                    return Err(ShapeError::InvalidTyping(
-                        "sequence index must be natural-number arithmetic".to_owned(),
-                    ));
-                }
-                Ok(*element)
-            }
-            RawExpr::Binop(Binop::Power, base, exponent) => {
-                self.infer(exponent)?;
-                let shape = self.infer(base)?;
-                if let Shape::Matrix(rows, cols) = &shape {
-                    self.assert_dimensions_equal(rows, cols);
-                }
-                Ok(shape)
-            }
-            RawExpr::Binop(Binop::Div, left, right) => {
-                let left = self.infer(left)?;
-                let left = self.division_scalar(left);
-                let right = self.infer(right)?;
-                let right = self.division_scalar(right);
-                scalar_shape_lub(left, right)
-            }
-            RawExpr::Binop(_, left, right) => {
-                self.infer(left)?;
-                self.infer(right)?;
-                Ok(Shape::Real)
-            }
-            RawExpr::Finop(Finop::Plus, expressions) => {
-                let (first, rest) = expressions
-                    .split_first()
-                    .ok_or_else(|| ShapeError::InvalidTyping("empty addition".to_owned()))?;
-                let mut result = self.infer(first)?;
-                for expression in rest {
-                    let shape = self.infer(expression)?;
-                    result = self.add_shapes(result, shape)?;
-                }
-                Ok(result)
-            }
-            RawExpr::Finop(Finop::Times, expressions) => {
-                let (first, rest) = expressions
-                    .split_first()
-                    .ok_or_else(|| ShapeError::InvalidTyping("empty multiplication".to_owned()))?;
-                let mut result = self.infer(first)?;
-                for expression in rest {
-                    let shape = self.infer(expression)?;
-                    result = self.multiply_shapes(result, shape)?;
-                }
-                Ok(result)
-            }
-            RawExpr::Finop(Finop::And | Finop::Or, expressions) => {
-                if expressions.is_empty() {
-                    return Err(ShapeError::InvalidTyping(
-                        "logical finite operations require at least one operand".to_owned(),
-                    ));
-                }
-                for expression in expressions {
-                    if !matches!(self.infer(expression)?, Shape::Bool) {
-                        return Err(ShapeError::InvalidTyping(
-                            "logical operations require Boolean operands".to_owned(),
-                        ));
-                    }
-                }
-                Ok(Shape::Bool)
-            }
-            RawExpr::CmpChain(chain) => {
-                let mut previous = self.infer(&chain.start)?;
-                for (_, current) in &chain.assertions {
-                    let current = self.infer(current)?;
-                    self.equal_shapes(&previous, &current);
-                    previous = current;
-                }
-                Ok(Shape::Bool)
-            }
-            RawExpr::LogicChain(chain) => {
-                if !matches!(self.infer(&chain.start)?, Shape::Bool) {
-                    return Err(ShapeError::InvalidTyping(
-                        "logical operations require Boolean operands".to_owned(),
-                    ));
-                }
-                for (_, expression) in &chain.assertions {
-                    if !matches!(self.infer(expression)?, Shape::Bool) {
-                        return Err(ShapeError::InvalidTyping(
-                            "logical operations require Boolean operands".to_owned(),
-                        ));
-                    }
-                }
-                Ok(Shape::Bool)
-            }
-            RawExpr::Seqop(op, range, body) => {
-                let from = self.lower_nat(&range.from)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence lower bound is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                let to = self.lower_nat(&range.to)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence upper bound is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.assert_if_relevant(from.ge(1), &[&from]);
-                self.assert_if_relevant(from.le(&to), &[&from, &to]);
-                let lengths =
-                    indexed_sequence_lengths(body, &range.index_variable, self.variable_types)?;
-                if lengths.is_empty() {
-                    return Err(ShapeError::InvalidTyping(
-                        "sequence operation body does not index a sequence".to_owned(),
-                    ));
-                }
-                for length in lengths {
-                    self.assert_if_relevant(to.le(&length), &[&to, &length]);
-                }
-                if !self.contextual {
-                    self.projections.insert(range.from.clone(), from);
-                    self.projections.insert(range.to.clone(), to);
-                }
-                let shape = self.infer(body)?;
-                if matches!(op, SeqOp::Prod)
-                    && let Shape::Matrix(rows, cols) = &shape
-                {
-                    self.assert_dimensions_equal(rows, cols);
-                }
-                Ok(shape)
-            }
-            RawExpr::Triop(_, _, _, _) | RawExpr::Finop(_, _) => Err(ShapeError::Unsupported(
-                "expression has unsupported shape semantics".to_owned(),
-            )),
-        }
+    fn shape_of(&self, expression: &Expr<TypedMetadata>) -> Result<Shape, ShapeError> {
+        let ty = expression
+            .meta
+            .get_type()
+            .map_err(type_error_to_shape_error)?;
+        self.shape_from_resolved_type(&ty)
     }
 
-    fn constrain_membership(
-        &mut self,
-        left: &Expr<()>,
-        right: &Expr<()>,
-    ) -> Result<Shape, ShapeError> {
-        let RawExpr::Variable(variable) = &left.raw else {
-            return Err(ShapeError::InvalidTyping(
-                "type membership requires a variable subject".to_owned(),
-            ));
-        };
-        let RawExpr::Type(ty) = &right.raw else {
-            return Err(ShapeError::InvalidTyping(
-                "type membership requires a type expression".to_owned(),
-            ));
-        };
-        let actual = self.variable_types.get(variable).ok_or_else(|| {
-            ShapeError::InvalidTyping("membership subject has no inferred type".to_owned())
-        })?;
-        match (actual, ty) {
-            (Shape::Bool, TypeExpr::Bool)
-            | (Shape::Nat, TypeExpr::Nat)
-            | (Shape::Int, TypeExpr::Int)
-            | (Shape::Real, TypeExpr::Real) => {}
-            (Shape::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
-                let row_value = self.lower_nat(expected_rows)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "matrix row dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                let col_value = self.lower_nat(expected_cols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "matrix column dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.projections
-                    .insert(expected_rows.clone(), row_value.clone());
-                self.projections
-                    .insert(expected_cols.clone(), col_value.clone());
-                self.assert_dimensions_equal(rows, &row_value);
-                self.assert_dimensions_equal(cols, &col_value);
-            }
-            (Shape::Seq(element, length), TypeExpr::Seq(expected_element, expected_length)) => {
-                let RawExpr::Type(expected_element) = &expected_element.raw else {
+    fn shape_from_resolved_type(&self, ty: &TypeExpr<()>) -> Result<Shape, ShapeError> {
+        Ok(match ty {
+            TypeExpr::Bool => Shape::Bool,
+            TypeExpr::Nat => Shape::Nat,
+            TypeExpr::Int => Shape::Int,
+            TypeExpr::Real => Shape::Real,
+            TypeExpr::Matrix(rows, cols) => Shape::Matrix(
+                self.lower_nat(rows)?.ok_or_else(|| {
+                    ShapeError::Unsupported(format!(
+                        "matrix row dimension is not linear natural arithmetic: {}",
+                        rows.as_latex()
+                    ))
+                })?,
+                self.lower_nat(cols)?.ok_or_else(|| {
+                    ShapeError::Unsupported(format!(
+                        "matrix column dimension is not linear natural arithmetic: {}",
+                        cols.as_latex()
+                    ))
+                })?,
+            ),
+            TypeExpr::Seq(element, length) => {
+                let RawExpr::Type(element) = &element.raw else {
                     return Err(ShapeError::InvalidTyping(
                         "sequence element must be a type expression".to_owned(),
                     ));
                 };
-                let length_value = self.lower_nat(expected_length)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence length is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.projections
-                    .insert(expected_length.clone(), length_value.clone());
-                self.assert_dimensions_equal(length, &length_value);
-                self.constrain_shape_type(element, expected_element)?;
+                Shape::Seq(
+                    Box::new(self.shape_from_resolved_type(element)?),
+                    self.lower_nat(length)?.ok_or_else(|| {
+                        ShapeError::Unsupported(
+                            "sequence length is not linear natural arithmetic".to_owned(),
+                        )
+                    })?,
+                )
             }
-            _ => self.assert_typing_failure(actual),
-        }
-        Ok(Shape::Bool)
-    }
-
-    fn infer_cast(&mut self, target: &Expr<()>, value: &Expr<()>) -> Result<Shape, ShapeError> {
-        let RawExpr::Type(target) = &target.raw else {
-            return Err(ShapeError::InvalidTyping(
-                "cast target must be a type expression".to_owned(),
-            ));
-        };
-        let value = self.infer(value)?;
-        match (target, value) {
-            (TypeExpr::Real, Shape::Real) => Ok(Shape::Real),
-            (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
-                self.assert_dimensions_equal(&rows, &Int::from_u64(1));
-                self.assert_dimensions_equal(&cols, &Int::from_u64(1));
-                Ok(Shape::Real)
-            }
-            (TypeExpr::Matrix(rows, cols), Shape::Real) => {
-                let rows_value = self.lower_nat(rows)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "cast matrix row dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                let cols_value = self.lower_nat(cols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "cast matrix column dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.projections.insert(rows.clone(), rows_value.clone());
-                self.projections.insert(cols.clone(), cols_value.clone());
-                self.assert_dimensions_equal(&rows_value, &Int::from_u64(1));
-                self.assert_dimensions_equal(&cols_value, &Int::from_u64(1));
-                Ok(Shape::Matrix(rows_value, cols_value))
-            }
-            (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => Err(
-                ShapeError::Unsupported("only real and 1x1 matrix casts are supported".to_owned()),
-            ),
-            (TypeExpr::Real | TypeExpr::Matrix(_, _), _) => Err(ShapeError::InvalidTyping(
-                "cast requires a real scalar or a 1x1 matrix operand".to_owned(),
-            )),
-        }
+        })
     }
 
     fn constrain_shape_type(
@@ -1097,17 +900,45 @@ impl ShapeContext<'_> {
                         "matrix column dimension is not linear natural arithmetic".to_owned(),
                     )
                 })?;
-                self.projections
-                    .insert(expected_rows.clone(), row_value.clone());
-                self.projections
-                    .insert(expected_cols.clone(), col_value.clone());
+                self.record_projection(
+                    expected_rows.clone(),
+                    row_value.clone(),
+                    &[rows, &row_value],
+                );
+                self.record_projection(
+                    expected_cols.clone(),
+                    col_value.clone(),
+                    &[cols, &col_value],
+                );
                 self.assert_dimensions_equal(rows, &row_value);
                 self.assert_dimensions_equal(cols, &col_value);
                 Ok(())
             }
-            (Shape::Seq(_, _), TypeExpr::Seq(_, _)) => Err(ShapeError::Unsupported(
-                "nested sequence constraints are not supported".to_owned(),
-            )),
+            (Shape::Seq(element, length), TypeExpr::Seq(expected_element, expected_length)) => {
+                let RawExpr::Type(expected_element) = &expected_element.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence element must be a type expression".to_owned(),
+                    ));
+                };
+                if matches!(expected_element, TypeExpr::Seq(_, _)) {
+                    return Err(ShapeError::Unsupported(
+                        "nested sequence constraints are not supported".to_owned(),
+                    ));
+                }
+                let expected_length_expression = expected_length.clone();
+                let expected_length = self.lower_nat(expected_length)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "sequence length is not linear natural arithmetic".to_owned(),
+                    )
+                })?;
+                self.record_projection(
+                    expected_length_expression,
+                    expected_length.clone(),
+                    &[length, &expected_length],
+                );
+                self.assert_dimensions_equal(length, &expected_length);
+                self.constrain_shape_type(element, expected_element)
+            }
             _ => {
                 self.assert_typing_failure(actual);
                 Ok(())
@@ -1163,62 +994,420 @@ impl ShapeContext<'_> {
             _ => {}
         }
     }
+}
 
-    fn division_scalar(&mut self, shape: Shape) -> Shape {
-        match shape {
-            Shape::Matrix(rows, cols) => {
-                self.assert_dimensions_equal(&rows, &Int::from_u64(1));
-                self.assert_dimensions_equal(&cols, &Int::from_u64(1));
-                Shape::Real
+struct OperatorCompatibilityVisitor<'a, 'builder> {
+    builder: &'a mut DimensionConstraintBuilder<'builder>,
+    error: Option<ShapeError>,
+}
+
+impl OperatorCompatibilityVisitor<'_, '_> {
+    fn constrain(&mut self, expression: &Expr<TypedMetadata>) -> Result<(), ShapeError> {
+        match &expression.raw {
+            RawExpr::StandardBasis { index, dimension } => {
+                let dimension = self.builder.implicit_dimension(*dimension);
+                let index_value = self
+                    .builder
+                    .lower_nat(&index.with_default_metadata())?
+                    .ok_or_else(|| {
+                        ShapeError::Unsupported(
+                            "standard basis index is not linear natural arithmetic".to_owned(),
+                        )
+                    })?;
+                self.builder.record_projection(
+                    index.with_default_metadata(),
+                    index_value.clone(),
+                    &[&dimension],
+                );
+                self.builder
+                    .assert_if_relevant(index_value.ge(1), &[&dimension]);
+                self.builder
+                    .assert_if_relevant(index_value.le(&dimension), &[&dimension]);
             }
-            shape => shape,
+            RawExpr::Monop(op, inner) => {
+                let shape = self.builder.shape_of(inner)?;
+                match (op, shape) {
+                    (Monop::Inverse | Monop::Trace | Monop::Det, Shape::Matrix(rows, cols)) => {
+                        self.builder.assert_dimensions_equal(&rows, &cols);
+                    }
+                    (Monop::Trace | Monop::Det | Monop::Inverse, shape) => {
+                        self.builder.assert_typing_failure(&shape);
+                    }
+                    (Monop::Norm2, _) => {
+                        return Err(ShapeError::Unsupported(
+                            "2-norm must be lowered before dimension inference".to_owned(),
+                        ));
+                    }
+                    (
+                        Monop::Neg
+                        | Monop::Transpose
+                        | Monop::Norm1
+                        | Monop::NormInfty
+                        | Monop::NormFrob,
+                        _,
+                    ) => {}
+                }
+            }
+            RawExpr::Binop(Binop::ElementOf, left, right) => {
+                let RawExpr::Variable(variable) = &left.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "type membership requires a variable subject".to_owned(),
+                    ));
+                };
+                let RawExpr::Type(expected) = &right.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "type membership requires a type expression".to_owned(),
+                    ));
+                };
+                let actual = self
+                    .builder
+                    .variable_types
+                    .get(variable)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ShapeError::InvalidTyping(
+                            "membership subject has no inferred type".to_owned(),
+                        )
+                    })?;
+                self.builder
+                    .constrain_shape_type(&actual, &erase_typed_type(expected))?;
+            }
+            RawExpr::Binop(Binop::Cast, target, value) => {
+                let RawExpr::Type(target) = &target.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "cast target must be a type expression".to_owned(),
+                    ));
+                };
+                let value = self.builder.shape_of(value)?;
+                match (erase_typed_type(target), value) {
+                    (TypeExpr::Real, Shape::Real) => {}
+                    (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
+                        self.builder
+                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
+                        self.builder
+                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                    }
+                    (TypeExpr::Matrix(rows, cols), Shape::Real) => {
+                        let rows_expression = rows.clone();
+                        let cols_expression = cols.clone();
+                        let rows = self.builder.lower_nat(&rows)?.ok_or_else(|| {
+                            ShapeError::Unsupported(
+                                "cast row dimension is not linear natural arithmetic".to_owned(),
+                            )
+                        })?;
+                        let cols = self.builder.lower_nat(&cols)?.ok_or_else(|| {
+                            ShapeError::Unsupported(
+                                "cast column dimension is not linear natural arithmetic".to_owned(),
+                            )
+                        })?;
+                        self.builder
+                            .record_projection(rows_expression, rows.clone(), &[&rows]);
+                        self.builder
+                            .record_projection(cols_expression, cols.clone(), &[&cols]);
+                        self.builder
+                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
+                        self.builder
+                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                    }
+                    (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => {
+                        return Err(ShapeError::Unsupported(
+                            "only real and 1x1 matrix casts are supported".to_owned(),
+                        ));
+                    }
+                    (TypeExpr::Real | TypeExpr::Matrix(_, _), shape) => {
+                        self.builder.assert_typing_failure(&shape)
+                    }
+                }
+            }
+            RawExpr::Binop(Binop::SingleSubscript, sequence, index) => {
+                if !matches!(self.builder.shape_of(sequence)?, Shape::Seq(_, _)) {
+                    return Err(ShapeError::InvalidTyping(
+                        "subscripted expression is not a sequence".to_owned(),
+                    ));
+                }
+                if !matches!(index.raw, RawExpr::Variable(_) | RawExpr::NatLiteral(_))
+                    && self
+                        .builder
+                        .lower_nat(&index.with_default_metadata())?
+                        .is_none()
+                {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence index must be natural-number arithmetic".to_owned(),
+                    ));
+                }
+            }
+            RawExpr::Binop(Binop::Power, base, _) => {
+                if let Shape::Matrix(rows, cols) = self.builder.shape_of(base)? {
+                    self.builder.assert_dimensions_equal(&rows, &cols);
+                }
+            }
+            RawExpr::Binop(Binop::Div, left, right) => {
+                for operand in [left, right] {
+                    if let Shape::Matrix(rows, cols) = self.builder.shape_of(operand)? {
+                        self.builder
+                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
+                        self.builder
+                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                    }
+                }
+            }
+            RawExpr::Binop(Binop::InnerProd, _, _) => {}
+            RawExpr::Finop(Finop::Plus, expressions) => {
+                let (first, rest) = expressions
+                    .split_first()
+                    .ok_or_else(|| ShapeError::InvalidTyping("empty addition".to_owned()))?;
+                let mut shape = self.builder.shape_of(first)?;
+                for expression in rest {
+                    shape = self
+                        .builder
+                        .add_shapes(shape, self.builder.shape_of(expression)?)?;
+                }
+            }
+            RawExpr::Finop(Finop::Times, expressions) => {
+                let (first, rest) = expressions
+                    .split_first()
+                    .ok_or_else(|| ShapeError::InvalidTyping("empty multiplication".to_owned()))?;
+                let mut shape = self.builder.shape_of(first)?;
+                for expression in rest {
+                    shape = self
+                        .builder
+                        .multiply_shapes(shape, self.builder.shape_of(expression)?)?;
+                }
+            }
+            RawExpr::Finop(Finop::And | Finop::Or, expressions) => {
+                if expressions.is_empty() {
+                    return Err(ShapeError::InvalidTyping(
+                        "logical finite operations require at least one operand".to_owned(),
+                    ));
+                }
+                for operand in expressions {
+                    if !matches!(self.builder.shape_of(operand)?, Shape::Bool) {
+                        return Err(ShapeError::InvalidTyping(
+                            "logical operations require Boolean operands".to_owned(),
+                        ));
+                    }
+                }
+            }
+            RawExpr::Finop(Finop::Max | Finop::Min, _) | RawExpr::Triop(_, _, _, _) => {
+                return Err(ShapeError::Unsupported(
+                    "expression has unsupported dimension semantics".to_owned(),
+                ));
+            }
+            RawExpr::CmpChain(chain) => {
+                let mut previous = self.builder.shape_of(&chain.start)?;
+                for (_, current) in &chain.assertions {
+                    let current = self.builder.shape_of(current)?;
+                    self.builder.equal_shapes(&previous, &current);
+                    previous = current;
+                }
+            }
+            RawExpr::LogicChain(chain) => {
+                if !matches!(self.builder.shape_of(&chain.start)?, Shape::Bool) {
+                    return Err(ShapeError::InvalidTyping(
+                        "logical operations require Boolean operands".to_owned(),
+                    ));
+                }
+                for (_, operand) in &chain.assertions {
+                    if !matches!(self.builder.shape_of(operand)?, Shape::Bool) {
+                        return Err(ShapeError::InvalidTyping(
+                            "logical operations require Boolean operands".to_owned(),
+                        ));
+                    }
+                }
+            }
+            RawExpr::Hole
+            | RawExpr::IdentityMatrix { .. }
+            | RawExpr::ZeroMatrix { .. }
+            | RawExpr::Type(_)
+            | RawExpr::Variable(_)
+            | RawExpr::NatLiteral(_)
+            | RawExpr::Matrix(_)
+            | RawExpr::Seqop(_, _, _) => {}
+        }
+        Ok(())
+    }
+}
+
+impl Visit<TypedMetadata> for OperatorCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+        if self.error.is_some() {
+            return;
+        }
+        visit::visit_expr(self, node);
+        if node.meta.get_type().is_ok()
+            && let Err(error) = self.constrain(node)
+        {
+            self.error = Some(error);
         }
     }
+}
 
-    fn infer_block_matrix(&mut self, matrix: &Matrix<Expr<()>>) -> Result<Shape, ShapeError> {
-        let expected_elements = matrix.rows.checked_mul(matrix.cols).ok_or_else(|| {
-            ShapeError::Unsupported("matrix dimensions overflow usize".to_owned())
-        })?;
-        if matrix.elements.len() != expected_elements {
-            return Err(ShapeError::InvalidTyping(
-                "matrix element count does not match its dimensions".to_owned(),
-            ));
-        }
-        if (matrix.rows == 0) != (matrix.cols == 0) {
-            return Err(ShapeError::InvalidTyping(
-                "matrix dimensions must both be zero or both be nonzero".to_owned(),
-            ));
-        }
-        if matrix.rows == 0 {
-            return Ok(Shape::Matrix(Int::from_u64(0), Int::from_u64(0)));
-        }
+struct BlockMatrixCompatibilityVisitor<'a, 'builder> {
+    builder: &'a mut DimensionConstraintBuilder<'builder>,
+    error: Option<ShapeError>,
+}
 
-        let dimensions = matrix
-            .elements
-            .iter()
-            .map(|element| block_shape_dimensions(self.infer(element)?))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut row_heights = Vec::with_capacity(matrix.rows);
-        for row in 0..matrix.rows {
-            let height = dimensions[row * matrix.cols].0.clone();
-            for column in 1..matrix.cols {
-                self.assert_dimensions_equal(&height, &dimensions[row * matrix.cols + column].0);
-            }
-            row_heights.push(height);
+impl Visit<TypedMetadata> for BlockMatrixCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+        if self.error.is_some() {
+            return;
         }
-        let mut column_widths = Vec::with_capacity(matrix.cols);
-        for column in 0..matrix.cols {
-            let width = dimensions[column].1.clone();
-            for row in 1..matrix.rows {
-                self.assert_dimensions_equal(&width, &dimensions[row * matrix.cols + column].1);
+        visit::visit_expr(self, node);
+        let RawExpr::Matrix(matrix) = &node.raw else {
+            return;
+        };
+        let result = (|| {
+            let expected = matrix.rows.checked_mul(matrix.cols).ok_or_else(|| {
+                ShapeError::Unsupported("matrix dimensions overflow usize".to_owned())
+            })?;
+            if matrix.elements.len() != expected {
+                return Err(ShapeError::InvalidTyping(
+                    "matrix element count does not match its dimensions".to_owned(),
+                ));
             }
-            column_widths.push(width);
+            if (matrix.rows == 0) != (matrix.cols == 0) {
+                return Err(ShapeError::InvalidTyping(
+                    "matrix dimensions must both be zero or both be nonzero".to_owned(),
+                ));
+            }
+            if matrix.rows == 0 {
+                return Ok(());
+            }
+            let dimensions = matrix
+                .elements
+                .iter()
+                .map(|element| block_shape_dimensions(self.builder.shape_of(element)?))
+                .collect::<Result<Vec<_>, _>>()?;
+            for row in 0..matrix.rows {
+                let height = &dimensions[row * matrix.cols].0;
+                for column in 1..matrix.cols {
+                    self.builder
+                        .assert_dimensions_equal(height, &dimensions[row * matrix.cols + column].0);
+                }
+            }
+            for column in 0..matrix.cols {
+                let width = &dimensions[column].1;
+                for row in 1..matrix.rows {
+                    self.builder
+                        .assert_dimensions_equal(width, &dimensions[row * matrix.cols + column].1);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.error = Some(error);
         }
-        Ok(Shape::Matrix(
-            Int::add(&row_heights),
-            Int::add(&column_widths),
-        ))
     }
+}
+
+struct SequenceCompatibilityVisitor<'a, 'builder> {
+    builder: &'a mut DimensionConstraintBuilder<'builder>,
+    error: Option<ShapeError>,
+}
+
+impl Visit<TypedMetadata> for SequenceCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+        if self.error.is_some() {
+            return;
+        }
+        visit::visit_expr(self, node);
+        let RawExpr::Seqop(op, range, body) = &node.raw else {
+            return;
+        };
+        let result = (|| {
+            let from_key = range.from.with_default_metadata();
+            let to_key = range.to.with_default_metadata();
+            let from = self.builder.lower_nat(&from_key)?.ok_or_else(|| {
+                ShapeError::Unsupported(
+                    "sequence lower bound is not linear natural arithmetic".to_owned(),
+                )
+            })?;
+            let to = self.builder.lower_nat(&to_key)?.ok_or_else(|| {
+                ShapeError::Unsupported(
+                    "sequence upper bound is not linear natural arithmetic".to_owned(),
+                )
+            })?;
+            self.builder.assert_if_relevant(from.ge(1), &[&from]);
+            self.builder.assert_if_relevant(from.le(&to), &[&from, &to]);
+            let lengths =
+                indexed_sequence_lengths(body, &range.index_variable, self.builder.variable_types)?;
+            if lengths.is_empty() {
+                return Err(ShapeError::InvalidTyping(
+                    "sequence operation body does not index a sequence".to_owned(),
+                ));
+            }
+            for length in lengths {
+                self.builder
+                    .assert_if_relevant(to.le(&length), &[&to, &length]);
+            }
+            if matches!(self.builder.mode, ConstraintMode::Permanent) {
+                self.builder.projections.insert(from_key, from);
+                self.builder.projections.insert(to_key, to);
+            }
+            if matches!(op, SeqOp::Prod)
+                && let Shape::Matrix(rows, cols) = self.builder.shape_of(body)?
+            {
+                self.builder.assert_dimensions_equal(&rows, &cols);
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.error = Some(error);
+        }
+    }
+}
+
+fn erase_typed_type(ty: &TypeExpr<TypedMetadata>) -> TypeExpr<()> {
+    match ty {
+        TypeExpr::Bool => TypeExpr::Bool,
+        TypeExpr::Nat => TypeExpr::Nat,
+        TypeExpr::Int => TypeExpr::Int,
+        TypeExpr::Real => TypeExpr::Real,
+        TypeExpr::Matrix(rows, cols) => {
+            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
+        }
+        TypeExpr::Seq(element, length) => TypeExpr::Seq(
+            element.with_default_metadata(),
+            length.with_default_metadata(),
+        ),
+    }
+}
+
+fn run_dimension_constraint_visitors(
+    builder: &mut DimensionConstraintBuilder<'_>,
+    expressions: &[Expr<TypedMetadata>],
+) -> Result<(), ShapeError> {
+    for expression in expressions {
+        let mut visitor = OperatorCompatibilityVisitor {
+            builder,
+            error: None,
+        };
+        visitor.visit_expr(expression);
+        if let Some(error) = visitor.error {
+            return Err(error);
+        }
+    }
+    for expression in expressions {
+        let mut visitor = BlockMatrixCompatibilityVisitor {
+            builder,
+            error: None,
+        };
+        visitor.visit_expr(expression);
+        if let Some(error) = visitor.error {
+            return Err(error);
+        }
+    }
+    for expression in expressions {
+        let mut visitor = SequenceCompatibilityVisitor {
+            builder,
+            error: None,
+        };
+        visitor.visit_expr(expression);
+        if let Some(error) = visitor.error {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
@@ -1309,6 +1498,44 @@ fn shape_dimensions(shape: &Shape) -> Vec<Int> {
     }
 }
 
+fn generated_dimension_variables(
+    variable_types: &BTreeMap<Variable, Shape>,
+) -> BTreeMap<Variable, Int> {
+    fn insert_shape(
+        result: &mut BTreeMap<Variable, Int>,
+        variable: &Variable,
+        prefix: &str,
+        shape: &Shape,
+    ) {
+        match shape {
+            Shape::Matrix(rows, cols) => {
+                result.insert(
+                    Variable::new(format!("{}_{{{prefix}rows}}", variable.z3_name())),
+                    rows.clone(),
+                );
+                result.insert(
+                    Variable::new(format!("{}_{{{prefix}cols}}", variable.z3_name())),
+                    cols.clone(),
+                );
+            }
+            Shape::Seq(element, length) => {
+                result.insert(
+                    Variable::new(format!("{}_{{{prefix}length}}", variable.z3_name())),
+                    length.clone(),
+                );
+                insert_shape(result, variable, &format!("{prefix}element_"), element);
+            }
+            Shape::Bool | Shape::Nat | Shape::Int | Shape::Real => {}
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    for (variable, shape) in variable_types {
+        insert_shape(&mut result, variable, "", shape);
+    }
+    result
+}
+
 fn concrete_type(model: &z3::Model, shape: &Shape) -> Result<Type, ShapeError> {
     Ok(match shape {
         Shape::Bool => Type::Bool,
@@ -1323,89 +1550,68 @@ fn concrete_type(model: &z3::Model, shape: &Shape) -> Result<Type, ShapeError> {
     })
 }
 
-fn indexed_sequence_lengths(
-    expression: &Expr<()>,
+fn indexed_sequence_lengths<Metadata>(
+    expression: &Expr<Metadata>,
     index: &Variable,
     variable_types: &BTreeMap<Variable, Shape>,
 ) -> Result<Vec<Int>, ShapeError> {
-    let mut lengths = BTreeMap::new();
-    collect_indexed_sequence_lengths(expression, index, variable_types, &mut lengths)?;
-    Ok(lengths.into_values().collect())
-}
+    struct Collector<'a> {
+        index: &'a Variable,
+        variable_types: &'a BTreeMap<Variable, Shape>,
+        lengths: BTreeMap<Variable, Int>,
+        error: Option<ShapeError>,
+    }
+    impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_binop(
+            &mut self,
+            op: &Binop,
+            base: &Expr<Metadata>,
+            subscript: &Expr<Metadata>,
+        ) {
+            if matches!(op, Binop::SingleSubscript)
+                && matches!(&subscript.raw, RawExpr::Variable(variable) if variable == self.index)
+            {
+                let RawExpr::Variable(variable) = &base.raw else {
+                    self.error = Some(ShapeError::Unsupported(
+                        "sequence subscript base must be a variable".to_owned(),
+                    ));
+                    return;
+                };
+                let Some(Shape::Seq(_, length)) = self.variable_types.get(variable) else {
+                    self.error = Some(ShapeError::InvalidTyping(
+                        "subscripted variable is not a sequence".to_owned(),
+                    ));
+                    return;
+                };
+                self.lengths.insert(variable.clone(), length.clone());
+            }
+            visit::visit_raw_expr_binop(self, op, base, subscript);
+        }
 
-fn collect_indexed_sequence_lengths(
-    expression: &Expr<()>,
-    index: &Variable,
-    variable_types: &BTreeMap<Variable, Shape>,
-    lengths: &mut BTreeMap<Variable, Int>,
-) -> Result<(), ShapeError> {
-    match &expression.raw {
-        RawExpr::Binop(Binop::SingleSubscript, base, subscript) if matches!(&subscript.raw, RawExpr::Variable(variable) if variable == index) =>
-        {
-            let RawExpr::Variable(variable) = &base.raw else {
-                return Err(ShapeError::Unsupported(
-                    "sequence subscript base must be a variable".to_owned(),
-                ));
-            };
-            let Some(Shape::Seq(_, length)) = variable_types.get(variable) else {
-                return Err(ShapeError::InvalidTyping(
-                    "subscripted variable is not a sequence".to_owned(),
-                ));
-            };
-            lengths.insert(variable.clone(), length.clone());
-        }
-        RawExpr::StandardBasis {
-            index: basis_index, ..
-        } => {
-            collect_indexed_sequence_lengths(basis_index, index, variable_types, lengths)?;
-        }
-        RawExpr::IdentityMatrix { .. }
-        | RawExpr::ZeroMatrix { .. }
-        | RawExpr::Type(_)
-        | RawExpr::Hole
-        | RawExpr::Variable(_)
-        | RawExpr::NatLiteral(_) => {}
-        RawExpr::Matrix(matrix) => {
-            for element in &matrix.elements {
-                collect_indexed_sequence_lengths(element, index, variable_types, lengths)?;
-            }
-        }
-        RawExpr::Monop(_, inner) => {
-            collect_indexed_sequence_lengths(inner, index, variable_types, lengths)?
-        }
-        RawExpr::Binop(_, left, right) => {
-            collect_indexed_sequence_lengths(left, index, variable_types, lengths)?;
-            collect_indexed_sequence_lengths(right, index, variable_types, lengths)?;
-        }
-        RawExpr::Triop(_, first, second, third) => {
-            for expression in [first, second, third] {
-                collect_indexed_sequence_lengths(expression, index, variable_types, lengths)?;
-            }
-        }
-        RawExpr::Finop(_, expressions) => {
-            for expression in expressions {
-                collect_indexed_sequence_lengths(expression, index, variable_types, lengths)?;
-            }
-        }
-        RawExpr::CmpChain(chain) => {
-            collect_indexed_sequence_lengths(&chain.start, index, variable_types, lengths)?;
-            for (_, expression) in &chain.assertions {
-                collect_indexed_sequence_lengths(expression, index, variable_types, lengths)?;
-            }
-        }
-        RawExpr::LogicChain(chain) => {
-            collect_indexed_sequence_lengths(&chain.start, index, variable_types, lengths)?;
-            for (_, expression) in &chain.assertions {
-                collect_indexed_sequence_lengths(expression, index, variable_types, lengths)?;
-            }
-        }
-        RawExpr::Seqop(_, _, _) => {
-            return Err(ShapeError::Unsupported(
+        fn visit_raw_expr_seqop(
+            &mut self,
+            _op: &SeqOp,
+            _range: &crate::Range<Metadata>,
+            _body: &Expr<Metadata>,
+        ) {
+            self.error = Some(ShapeError::Unsupported(
                 "nested sequence operations are not supported".to_owned(),
             ));
         }
     }
-    Ok(())
+
+    let mut collector = Collector {
+        index,
+        variable_types,
+        lengths: BTreeMap::new(),
+        error: None,
+    };
+    collector.visit_expr(expression);
+    if let Some(error) = collector.error {
+        Err(error)
+    } else {
+        Ok(collector.lengths.into_values().collect())
+    }
 }
 
 fn guessed_shape(variable: &Variable, generated_names: &mut BTreeSet<String>) -> Shape {
@@ -1439,130 +1645,100 @@ fn variable_z3_name(variable: &Variable) -> String {
     variable.z3_name()
 }
 
-fn collect_variables(expression: &Expr<()>, variables: &mut BTreeSet<Variable>) {
-    collect_variables_bound(expression, variables, &BTreeSet::new());
-}
-
-fn collect_variables_bound(
-    expression: &Expr<()>,
+fn collect_variables<Metadata>(
+    expression: &Expr<Metadata>,
     variables: &mut BTreeSet<Variable>,
-    bound: &BTreeSet<Variable>,
-) {
-    match &expression.raw {
-        RawExpr::Variable(variable) => {
-            if !bound.contains(variable) {
-                variables.insert(variable.clone());
-            }
-        }
-        RawExpr::StandardBasis { index, .. } => collect_variables_bound(index, variables, bound),
-        RawExpr::Type(ty) => collect_type_dimension_variables(ty, variables),
-        RawExpr::Matrix(matrix) => {
-            for expression in &matrix.elements {
-                collect_variables_bound(expression, variables, bound);
-            }
-        }
-        RawExpr::Monop(_, expression) => collect_variables_bound(expression, variables, bound),
-        RawExpr::Binop(_, left, right) => {
-            collect_variables_bound(left, variables, bound);
-            collect_variables_bound(right, variables, bound);
-        }
-        RawExpr::Triop(_, first, second, third) => {
-            collect_variables_bound(first, variables, bound);
-            collect_variables_bound(second, variables, bound);
-            collect_variables_bound(third, variables, bound);
-        }
-        RawExpr::Finop(_, expressions) => {
-            for expression in expressions {
-                collect_variables_bound(expression, variables, bound);
-            }
-        }
-        RawExpr::CmpChain(chain) => {
-            collect_variables_bound(&chain.start, variables, bound);
-            for (_, expression) in &chain.assertions {
-                collect_variables_bound(expression, variables, bound);
-            }
-        }
-        RawExpr::LogicChain(chain) => {
-            collect_variables_bound(&chain.start, variables, bound);
-            for (_, expression) in &chain.assertions {
-                collect_variables_bound(expression, variables, bound);
-            }
-        }
-        RawExpr::Seqop(_, range, body) => {
-            collect_variables_bound(&range.from, variables, bound);
-            collect_variables_bound(&range.to, variables, bound);
-            let mut body_bound = bound.clone();
-            body_bound.insert(range.index_variable.clone());
-            collect_variables_bound(body, variables, &body_bound);
-        }
-        RawExpr::IdentityMatrix { .. }
-        | RawExpr::ZeroMatrix { .. }
-        | RawExpr::Hole
-        | RawExpr::NatLiteral(_) => {}
+) -> Result<(), ShapeError> {
+    struct Collector<'a> {
+        variables: &'a mut BTreeSet<Variable>,
+        active_binders: BTreeSet<Variable>,
+        seen_binders: BTreeSet<Variable>,
+        error: Option<ShapeError>,
     }
+    impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_variable(&mut self, variable: &Variable) {
+            if self.active_binders.contains(variable) {
+                return;
+            }
+            if self.seen_binders.contains(variable) {
+                self.error = Some(ShapeError::InvalidTyping(format!(
+                    "sequence index {} collides with a free variable",
+                    variable_z3_name(variable)
+                )));
+                return;
+            }
+            self.variables.insert(variable.clone());
+        }
+
+        fn visit_raw_expr_seqop(
+            &mut self,
+            _op: &SeqOp,
+            range: &crate::Range<Metadata>,
+            body: &Expr<Metadata>,
+        ) {
+            self.visit_expr(&range.from);
+            self.visit_expr(&range.to);
+            if self.active_binders.contains(&range.index_variable)
+                || self.variables.contains(&range.index_variable)
+            {
+                self.error = Some(ShapeError::InvalidTyping(format!(
+                    "sequence index {} collides with an enclosing or free variable",
+                    variable_z3_name(&range.index_variable)
+                )));
+                return;
+            }
+            self.seen_binders.insert(range.index_variable.clone());
+            self.active_binders.insert(range.index_variable.clone());
+            self.visit_expr(body);
+            self.active_binders.remove(&range.index_variable);
+        }
+    }
+    let mut collector = Collector {
+        variables,
+        active_binders: BTreeSet::new(),
+        seen_binders: BTreeSet::new(),
+        error: None,
+    };
+    collector.visit_expr(expression);
+    collector.error.map_or(Ok(()), Err)
 }
 
 fn collect_type_dimension_variables(ty: &TypeExpr<()>, variables: &mut BTreeSet<Variable>) {
     match ty {
         TypeExpr::Matrix(rows, cols) => {
-            collect_variables(rows, variables);
-            collect_variables(cols, variables);
+            collect_variables(rows, variables)
+                .expect("type dimensions cannot bind sequence indices");
+            collect_variables(cols, variables)
+                .expect("type dimensions cannot bind sequence indices");
         }
         TypeExpr::Seq(element, size) => {
-            collect_variables(element, variables);
-            collect_variables(size, variables);
+            collect_variables(element, variables)
+                .expect("type expressions cannot bind sequence indices");
+            collect_variables(size, variables)
+                .expect("type dimensions cannot bind sequence indices");
         }
         _ => {}
     }
 }
 
-fn collect_range_bound_variables(expression: &Expr<()>, variables: &mut BTreeSet<Variable>) {
-    match &expression.raw {
-        RawExpr::Seqop(_, range, body) => {
-            collect_variables(&range.from, variables);
-            collect_variables(&range.to, variables);
-            collect_range_bound_variables(body, variables);
+fn collect_range_bound_variables<Metadata>(
+    expression: &Expr<Metadata>,
+    variables: &mut BTreeSet<Variable>,
+) {
+    struct Collector<'a>(&'a mut BTreeSet<Variable>);
+    impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_seqop(
+            &mut self,
+            _op: &SeqOp,
+            range: &crate::Range<Metadata>,
+            body: &Expr<Metadata>,
+        ) {
+            collect_variables(&range.from, self.0).expect("sequence bounds cannot bind indices");
+            collect_variables(&range.to, self.0).expect("sequence bounds cannot bind indices");
+            self.visit_expr(body);
         }
-        RawExpr::StandardBasis { index, .. } => collect_range_bound_variables(index, variables),
-        RawExpr::Matrix(matrix) => {
-            for element in &matrix.elements {
-                collect_range_bound_variables(element, variables);
-            }
-        }
-        RawExpr::Monop(_, inner) => collect_range_bound_variables(inner, variables),
-        RawExpr::Binop(_, left, right) => {
-            collect_range_bound_variables(left, variables);
-            collect_range_bound_variables(right, variables);
-        }
-        RawExpr::Triop(_, first, second, third) => {
-            collect_range_bound_variables(first, variables);
-            collect_range_bound_variables(second, variables);
-            collect_range_bound_variables(third, variables);
-        }
-        RawExpr::Finop(_, expressions) => {
-            for expression in expressions {
-                collect_range_bound_variables(expression, variables);
-            }
-        }
-        RawExpr::CmpChain(chain) => {
-            collect_range_bound_variables(&chain.start, variables);
-            for (_, expression) in &chain.assertions {
-                collect_range_bound_variables(expression, variables);
-            }
-        }
-        RawExpr::LogicChain(chain) => {
-            collect_range_bound_variables(&chain.start, variables);
-            for (_, expression) in &chain.assertions {
-                collect_range_bound_variables(expression, variables);
-            }
-        }
-        RawExpr::IdentityMatrix { .. }
-        | RawExpr::ZeroMatrix { .. }
-        | RawExpr::Type(_)
-        | RawExpr::Hole
-        | RawExpr::Variable(_)
-        | RawExpr::NatLiteral(_) => {}
     }
+    Collector(variables).visit_expr(expression);
 }
 
 fn natural_literal(expression: &Expr<()>) -> Option<u64> {
@@ -1626,12 +1802,12 @@ mod tests {
     use ratex_parser::parse;
 
     use super::{
-        ShapeError, collect_implicit_dimensions, extract_environment_iterator,
+        ShapeError, collect_implicit_dimensions, collect_variables, extract_environment_iterator,
         extract_environment_iterator_with_context, extract_prepared_environment_iterator,
         infer_symbolic_type_environment,
     };
     use crate::{
-        Annotation, Expr, Matrix, RawExpr, SeqType, Type, Variable, from_tex,
+        Annotation, Expr, Finop, Matrix, Range, RawExpr, SeqOp, SeqType, Type, Variable, from_tex,
         preprocessing::prepare_expression, visit_mut::VisitContext,
     };
 
@@ -1641,6 +1817,45 @@ mod tests {
 
     fn environments(tex: &[&str]) -> super::EnvironmentIterator {
         extract_environment_iterator(tex.iter().map(|tex| expression(tex)), 10).unwrap()
+    }
+
+    fn sequence(index: &str, body: Expr<()>) -> Expr<()> {
+        Expr::new(RawExpr::Seqop(
+            SeqOp::Sum,
+            Range {
+                index_variable: Variable::new(index),
+                from: Expr::new(RawExpr::NatLiteral(1)),
+                to: Expr::new(RawExpr::NatLiteral(2)),
+            },
+            body,
+        ))
+    }
+
+    #[test]
+    fn sequence_binders_reject_collisions_but_allow_sibling_reuse() {
+        let variable = || Expr::new(RawExpr::Variable(Variable::new("i")));
+        let nested = sequence("i", sequence("i", variable()));
+        assert!(matches!(
+            collect_variables(&nested, &mut BTreeSet::new()),
+            Err(ShapeError::InvalidTyping(_))
+        ));
+
+        let global_collision = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![variable(), sequence("i", variable())],
+        ));
+        assert!(matches!(
+            collect_variables(&global_collision, &mut BTreeSet::new()),
+            Err(ShapeError::InvalidTyping(_))
+        ));
+
+        let siblings = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![sequence("i", variable()), sequence("i", variable())],
+        ));
+        let mut free = BTreeSet::new();
+        collect_variables(&siblings, &mut free).unwrap();
+        assert!(!free.contains(&Variable::new("i")));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
-    Binop, Environment, Expr, Finop, LogicChain, Matrix, Monop, RawExpr, Type, TypeExpr, Variable,
+    Binop, Environment, Expr, Finop, LogicChain, Matrix, Monop, RawExpr, SeqOp, Triop, Type,
+    TypeExpr, Variable,
     visit_mut::{VisitContext, VisitMut},
 };
 
@@ -47,6 +48,181 @@ pub trait TypeLookup {
     fn type_of(&self, variable: &Variable) -> Option<TypeExpr<()>>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeRuleOperand {
+    Value {
+        ty: TypeExpr<()>,
+        expression: Expr<()>,
+    },
+    Type {
+        ty: TypeExpr<()>,
+        expression: Expr<()>,
+    },
+    NoValue {
+        expression: Expr<()>,
+    },
+}
+
+impl TypeRuleOperand {
+    fn value(&self) -> Result<TypeExpr<()>, TypeError> {
+        match self {
+            Self::Value { ty, .. } => Ok(ty.clone()),
+            Self::Type { .. } | Self::NoValue { .. } => {
+                Err(TypeError::Invalid("expected a value operand"))
+            }
+        }
+    }
+
+    fn type_expression(&self) -> Result<TypeExpr<()>, TypeError> {
+        match self {
+            Self::Type { ty, .. } => Ok(ty.clone()),
+            Self::Value { .. } | Self::NoValue { .. } => {
+                Err(TypeError::Invalid("expected a type-expression operand"))
+            }
+        }
+    }
+
+    pub fn expression(&self) -> &Expr<()> {
+        match self {
+            Self::Value { expression, .. }
+            | Self::Type { expression, .. }
+            | Self::NoValue { expression } => expression,
+        }
+    }
+}
+
+pub type TypeRule = fn(&[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError>;
+
+#[derive(Clone, Default)]
+pub struct OperatorTypeRules {
+    monops: HashMap<Monop, TypeRule>,
+    binops: HashMap<Binop, TypeRule>,
+    triops: HashMap<Triop, TypeRule>,
+    finops: HashMap<Finop, TypeRule>,
+    seqops: HashMap<SeqOp, TypeRule>,
+}
+
+impl OperatorTypeRules {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_monop(&mut self, op: Monop, rule: TypeRule) {
+        assert!(
+            self.monops.insert(op, rule).is_none(),
+            "duplicate unary type rule"
+        );
+    }
+    pub fn register_binop(&mut self, op: Binop, rule: TypeRule) {
+        assert!(
+            self.binops.insert(op, rule).is_none(),
+            "duplicate binary type rule"
+        );
+    }
+    pub fn register_triop(&mut self, op: Triop, rule: TypeRule) {
+        assert!(
+            self.triops.insert(op, rule).is_none(),
+            "duplicate ternary type rule"
+        );
+    }
+    pub fn register_finop(&mut self, op: Finop, rule: TypeRule) {
+        assert!(
+            self.finops.insert(op, rule).is_none(),
+            "duplicate finite type rule"
+        );
+    }
+    pub fn register_seqop(&mut self, op: SeqOp, rule: TypeRule) {
+        assert!(
+            self.seqops.insert(op, rule).is_none(),
+            "duplicate sequence type rule"
+        );
+    }
+
+    pub fn standard() -> Self {
+        let mut rules = Self::core();
+        crate::operator_visitors::register_type_rules(&mut rules);
+        rules
+    }
+
+    pub fn core() -> Self {
+        let mut rules = Self::new();
+        rules.register_monop(Monop::Neg, numeric_identity_rule);
+        rules.register_monop(Monop::Transpose, transpose_rule);
+        for op in [
+            Monop::Trace,
+            Monop::Det,
+            Monop::Norm1,
+            Monop::NormInfty,
+            Monop::NormFrob,
+        ] {
+            rules.register_monop(op, real_result_rule);
+        }
+        rules.register_monop(Monop::Inverse, matrix_identity_rule);
+        rules.register_binop(Binop::Div, division_rule);
+        rules.register_binop(Binop::Power, first_value_rule);
+        rules.register_binop(Binop::InnerProd, real_result_rule);
+        rules.register_binop(Binop::Cast, cast_rule);
+        rules.register_binop(Binop::ElementOf, bool_result_rule);
+        rules.register_binop(Binop::SingleSubscript, subscript_rule);
+        rules.register_triop(Triop::DoubleSubscript, real_result_rule);
+        rules.register_finop(Finop::Plus, addition_rule);
+        rules.register_finop(Finop::Times, multiplication_rule);
+        rules.register_finop(Finop::And, bool_result_rule);
+        rules.register_finop(Finop::Or, bool_result_rule);
+        rules.register_finop(Finop::Max, scalar_fold_rule);
+        rules.register_finop(Finop::Min, scalar_fold_rule);
+        rules.register_seqop(SeqOp::Sum, first_value_rule);
+        rules.register_seqop(SeqOp::Prod, first_value_rule);
+        rules
+    }
+
+    fn infer_monop(
+        &self,
+        op: Monop,
+        operands: &[TypeRuleOperand],
+    ) -> Result<TypeExpr<()>, TypeError> {
+        self.monops
+            .get(&op)
+            .ok_or(TypeError::Unsupported("unregistered unary operator"))?(operands)
+    }
+    fn infer_binop(
+        &self,
+        op: Binop,
+        operands: &[TypeRuleOperand],
+    ) -> Result<TypeExpr<()>, TypeError> {
+        self.binops
+            .get(&op)
+            .ok_or(TypeError::Unsupported("unregistered binary operator"))?(operands)
+    }
+    fn infer_triop(
+        &self,
+        op: Triop,
+        operands: &[TypeRuleOperand],
+    ) -> Result<TypeExpr<()>, TypeError> {
+        self.triops
+            .get(&op)
+            .ok_or(TypeError::Unsupported("unregistered ternary operator"))?(operands)
+    }
+    fn infer_finop(
+        &self,
+        op: Finop,
+        operands: &[TypeRuleOperand],
+    ) -> Result<TypeExpr<()>, TypeError> {
+        self.finops
+            .get(&op)
+            .ok_or(TypeError::Unsupported("unregistered finite operator"))?(operands)
+    }
+    fn infer_seqop(
+        &self,
+        op: SeqOp,
+        operands: &[TypeRuleOperand],
+    ) -> Result<TypeExpr<()>, TypeError> {
+        self.seqops
+            .get(&op)
+            .ok_or(TypeError::Unsupported("unregistered sequence operator"))?(operands)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SymbolicTypeEnvironment {
     pub types: HashMap<Variable, TypeExpr<()>>,
@@ -74,14 +250,16 @@ impl TypeLookup for Environment {
 
 pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
+    rules: &'a OperatorTypeRules,
     lexical_types: HashMap<Variable, TypeExpr<()>>,
     error: Option<TypeError>,
 }
 
 impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
-    pub fn new(types: &'a Lookup) -> Self {
+    pub fn new(types: &'a Lookup, rules: &'a OperatorTypeRules) -> Self {
         Self {
             types,
+            rules,
             lexical_types: HashMap::new(),
             error: None,
         }
@@ -125,44 +303,18 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                 }),
             RawExpr::NatLiteral(_) => TypeExpr::Nat,
             RawExpr::Matrix(matrix) => infer_matrix_type(matrix)?,
-            RawExpr::Monop(op, inner) => infer_monop(*op, node_type(inner)?)?,
-            RawExpr::Binop(Binop::ElementOf, _, _) => TypeExpr::Bool,
-            RawExpr::Binop(Binop::Cast, target, _) => {
-                let RawExpr::Type(target) = &target.raw else {
-                    return Ok(None);
-                };
-                erase_type_metadata(target)
-            }
-            RawExpr::Binop(Binop::SingleSubscript, sequence, _) => {
-                let TypeExpr::Seq(element, _) = node_type(sequence)? else {
-                    return Err(TypeError::Invalid(
-                        "subscripted expression is not a sequence",
-                    ));
-                };
-                let RawExpr::Type(element) = &element.raw else {
-                    return Err(TypeError::Invalid(
-                        "sequence element must be a type expression",
-                    ));
-                };
-                element.clone()
-            }
-            RawExpr::Binop(Binop::Power, base, _) => node_type(base)?,
-            RawExpr::Binop(Binop::Div, left, right) => {
-                division_type(node_type(left)?, node_type(right)?)?
-            }
-            RawExpr::Binop(Binop::InnerProd, _, _) => TypeExpr::Real,
-            RawExpr::Triop(_, _, _, _) => TypeExpr::Real,
-            RawExpr::Finop(Finop::And | Finop::Or, _) => TypeExpr::Bool,
-            RawExpr::Finop(Finop::Plus | Finop::Times, expressions) if expressions.is_empty() => {
-                return Ok(None);
-            }
-            RawExpr::Finop(Finop::Plus, expressions) => fold_types(expressions, add_type)?,
-            RawExpr::Finop(Finop::Times, expressions) => fold_types(expressions, multiply_type)?,
-            RawExpr::Finop(Finop::Max | Finop::Min, expressions) => {
-                fold_types(expressions, scalar_lub)?
-            }
+            RawExpr::Monop(op, inner) => self.rules.infer_monop(*op, &[operand(inner)])?,
+            RawExpr::Binop(op, left, right) => self
+                .rules
+                .infer_binop(*op, &[operand(left), operand(right)])?,
+            RawExpr::Triop(op, first, second, third) => self
+                .rules
+                .infer_triop(*op, &[operand(first), operand(second), operand(third)])?,
+            RawExpr::Finop(op, expressions) => self
+                .rules
+                .infer_finop(*op, &expressions.iter().map(operand).collect::<Vec<_>>())?,
             RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => TypeExpr::Bool,
-            RawExpr::Seqop(_, _, body) => node_type(body)?,
+            RawExpr::Seqop(op, _, body) => self.rules.infer_seqop(*op, &[operand(body)])?,
         };
         Ok(Some(ty))
     }
@@ -229,16 +381,20 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 RawExpr::Seqop(_, range, body) => {
                     self.visit_expr_mut(context, &mut range.from);
                     self.visit_expr_mut(context, &mut range.to);
+                    if self.lexical_types.contains_key(&range.index_variable)
+                        || self.types.type_of(&range.index_variable).is_some()
+                    {
+                        self.error = Some(TypeError::Invalid(
+                            "sequence index collides with a global variable or enclosing binder",
+                        ));
+                        return;
+                    }
                     let previous = self
                         .lexical_types
                         .insert(range.index_variable.clone(), TypeExpr::Nat);
                     self.visit_expr_mut(context, body);
-                    if let Some(previous) = previous {
-                        self.lexical_types
-                            .insert(range.index_variable.clone(), previous);
-                    } else {
-                        self.lexical_types.remove(&range.index_variable);
-                    }
+                    assert!(previous.is_none());
+                    self.lexical_types.remove(&range.index_variable);
                 }
             }
         }
@@ -255,6 +411,139 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
 
 fn node_type<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> Result<TypeExpr<()>, TypeError> {
     expression.meta.get_type()
+}
+
+fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> TypeRuleOperand {
+    let erased = expression.with_default_metadata();
+    match &expression.raw {
+        RawExpr::Type(ty) => TypeRuleOperand::Type {
+            ty: erase_type_metadata(ty),
+            expression: erased,
+        },
+        RawExpr::Hole => TypeRuleOperand::NoValue { expression: erased },
+        _ => node_type(expression)
+            .map(|ty| TypeRuleOperand::Value {
+                ty,
+                expression: erased.clone(),
+            })
+            .unwrap_or(TypeRuleOperand::NoValue { expression: erased }),
+    }
+}
+
+fn exactly(operands: &[TypeRuleOperand], count: usize) -> Result<&[TypeRuleOperand], TypeError> {
+    (operands.len() == count)
+        .then_some(operands)
+        .ok_or(TypeError::Invalid(
+            "operator has the wrong number of operands",
+        ))
+}
+
+fn first_value_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    if !(1..=2).contains(&operands.len()) {
+        return Err(TypeError::Invalid(
+            "operator has the wrong number of operands",
+        ));
+    }
+    operands
+        .first()
+        .ok_or(TypeError::Invalid("operator is missing an operand"))?
+        .value()
+}
+
+fn numeric_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    require_numeric(exactly(operands, 1)?[0].value()?)
+}
+
+fn matrix_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    match exactly(operands, 1)?[0].value()? {
+        matrix @ TypeExpr::Matrix(_, _) => Ok(matrix),
+        _ => Err(TypeError::Invalid("operation requires a matrix")),
+    }
+}
+
+fn transpose_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    match exactly(operands, 1)?[0].value()? {
+        TypeExpr::Matrix(rows, cols) => Ok(TypeExpr::Matrix(cols, rows)),
+        _ => Err(TypeError::Invalid("transpose requires a matrix")),
+    }
+}
+
+fn real_result_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    if operands.is_empty() {
+        return Err(TypeError::Invalid("operator is missing an operand"));
+    }
+    for operand in operands {
+        operand.value()?;
+    }
+    Ok(TypeExpr::Real)
+}
+
+pub(crate) fn real_operator_type_rule(
+    operands: &[TypeRuleOperand],
+) -> Result<TypeExpr<()>, TypeError> {
+    real_result_rule(operands)
+}
+
+fn bool_result_rule(_operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    Ok(TypeExpr::Bool)
+}
+
+fn cast_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let operands = exactly(operands, 2)?;
+    operands[1].value()?;
+    match operands[0].type_expression() {
+        Ok(ty) => Ok(ty),
+        Err(_) => operands[1].value(),
+    }
+}
+
+fn subscript_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let operands = exactly(operands, 2)?;
+    operands[1].value()?;
+    let TypeExpr::Seq(element, _) = operands[0].value()? else {
+        return Err(TypeError::Invalid(
+            "subscripted expression is not a sequence",
+        ));
+    };
+    let RawExpr::Type(element) = &element.raw else {
+        return Err(TypeError::Invalid(
+            "sequence element must be a type expression",
+        ));
+    };
+    Ok(element.clone())
+}
+
+fn division_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let operands = exactly(operands, 2)?;
+    division_type(operands[0].value()?, operands[1].value()?)
+}
+
+fn fold_operand_types(
+    operands: &[TypeRuleOperand],
+    operation: BinaryTypeOperation,
+) -> Result<TypeExpr<()>, TypeError> {
+    let mut operands = operands.iter();
+    let first = operands
+        .next()
+        .ok_or(TypeError::Invalid("finite operation is empty"))?
+        .value()?;
+    operands.try_fold(first, |left, right| operation(left, right.value()?))
+}
+
+fn addition_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    if operands.is_empty() {
+        return Ok(TypeExpr::Real);
+    }
+    fold_operand_types(operands, add_type)
+}
+fn multiplication_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    if operands.is_empty() {
+        return Ok(TypeExpr::Real);
+    }
+    fold_operand_types(operands, multiply_type)
+}
+fn scalar_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    fold_operand_types(operands, scalar_lub)
 }
 
 fn erase_type_metadata<Metadata>(ty: &TypeExpr<Metadata>) -> TypeExpr<()> {
@@ -292,26 +581,6 @@ fn natural(value: u64) -> Expr<()> {
 }
 fn implicit_dimension(value: crate::ImplicitDimension) -> Expr<()> {
     Expr::new(RawExpr::Variable(Variable::new(value.z3_name())))
-}
-
-fn infer_monop(op: Monop, inner: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
-    match op {
-        Monop::Neg => require_numeric(inner),
-        Monop::Transpose => match inner {
-            TypeExpr::Matrix(r, c) => Ok(TypeExpr::Matrix(c, r)),
-            _ => Err(TypeError::Invalid("transpose requires a matrix")),
-        },
-        Monop::Trace
-        | Monop::Det
-        | Monop::Norm1
-        | Monop::Norm2
-        | Monop::NormInfty
-        | Monop::NormFrob => Ok(TypeExpr::Real),
-        Monop::Inverse => match inner {
-            matrix @ TypeExpr::Matrix(_, _) => Ok(matrix),
-            _ => Err(TypeError::Invalid("inverse requires a matrix")),
-        },
-    }
 }
 
 fn infer_matrix_type<Metadata: MaybeTyped>(
@@ -381,17 +650,6 @@ fn sum_dimensions(mut dimensions: Vec<Expr<()>>) -> Expr<()> {
 
 type BinaryTypeOperation = fn(TypeExpr<()>, TypeExpr<()>) -> Result<TypeExpr<()>, TypeError>;
 
-fn fold_types<Metadata: MaybeTyped>(
-    expressions: &[Expr<Metadata>],
-    op: BinaryTypeOperation,
-) -> Result<TypeExpr<()>, TypeError> {
-    let mut expressions = expressions.iter();
-    let first = expressions
-        .next()
-        .ok_or(TypeError::Invalid("finite operation is empty"))?;
-    expressions.try_fold(node_type(first)?, |left, right| op(left, node_type(right)?))
-}
-
 fn require_numeric(ty: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
     match ty {
         TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real | TypeExpr::Matrix(_, _) => Ok(ty),
@@ -444,8 +702,12 @@ fn division_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{MaybeTyped, SymbolicTypeEnvironment, TypeResolver, TypedMetadata};
-    use crate::{Expr, Finop, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext};
+    use super::{
+        MaybeTyped, OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata,
+    };
+    use crate::{
+        Binop, Expr, Finop, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext,
+    };
     use ratex_parser::parse;
     use std::collections::HashMap;
 
@@ -461,7 +723,7 @@ mod tests {
         };
         let parsed: Expr<()> = from_tex::expr(&parse("A B").unwrap()).unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        TypeResolver::new(&types)
+        TypeResolver::new(&types, &OperatorTypeRules::standard())
             .resolve(
                 &mut expression,
                 VisitContext {
@@ -497,7 +759,7 @@ mod tests {
             from_tex::expr(&parse(r"\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix}").unwrap())
                 .unwrap();
         let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
-        TypeResolver::new(&types)
+        TypeResolver::new(&types, &OperatorTypeRules::standard())
             .resolve(
                 &mut expression,
                 VisitContext {
@@ -519,5 +781,57 @@ mod tests {
                 )),
             )
         );
+    }
+
+    #[test]
+    fn missing_and_duplicate_operator_rules_are_explicit() {
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
+        };
+        let parsed: Expr<()> = from_tex::expr(&parse("x^2").unwrap()).unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        assert!(matches!(
+            TypeResolver::new(&types, &OperatorTypeRules::new()).resolve(
+                &mut expression,
+                VisitContext {
+                    logical_polarity: true
+                },
+            ),
+            Err(super::TypeError::Unsupported(_))
+        ));
+
+        let mut rules = OperatorTypeRules::new();
+        rules.register_binop(Binop::Power, super::first_value_rule);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rules.register_binop(Binop::Power, super::first_value_rule);
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn core_rules_reject_surface_norms() {
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([(
+                Variable::new("v"),
+                TypeExpr::Matrix(
+                    Expr::new(RawExpr::NatLiteral(2)),
+                    Expr::new(RawExpr::NatLiteral(1)),
+                ),
+            )]),
+        };
+        let parsed: Expr<()> =
+            from_tex::expr(&parse(r"\left\lVert v \right\rVert_2").unwrap()).unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        assert!(matches!(
+            TypeResolver::new(&types, &OperatorTypeRules::core()).resolve(
+                &mut expression,
+                VisitContext {
+                    logical_polarity: true
+                },
+            ),
+            Err(super::TypeError::Unsupported(_))
+        ));
     }
 }
