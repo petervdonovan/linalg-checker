@@ -140,7 +140,7 @@ Model
 
 ## Conclusion
 
-Unsat up to dimension 2
+Unsat
 
 # Determinant multiplicativity
 
@@ -155,7 +155,7 @@ Unsat up to dimension 2
 
 ## Conclusion
 
-Unsat up to dimension 2
+Unsat
 
 # Defined scalar square root
 
@@ -228,7 +228,7 @@ The existence of $A^{\frac{1}{2}}$ was assumed without checking.
 
 ## Conclusion
 
-Unsat up to dimension 2
+Unsat
 
 # Negative two-norm
 
@@ -242,7 +242,7 @@ Unsat up to dimension 2
 
 ## Conclusion
 
-Unsat up to dimension 2
+Unsat
 
 # Bordered block matrix
 

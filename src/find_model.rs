@@ -178,6 +178,7 @@ impl TestCase<NotSolvedYet> {
             Err(ShapeError::Unknown(_)) => ModelOrUnsat::Unknown,
             Err(error) => return Err(error.into()),
             Ok(environments) => {
+                let dimension_bound_is_exhaustive = environments.dimension_bound_is_exhaustive();
                 let mut conclusion = None;
                 for environment in environments {
                     let environment = match environment {
@@ -202,7 +203,13 @@ impl TestCase<NotSolvedYet> {
                         ModelOrUnsat::UnsatUpToDimension(_) => unreachable!(),
                     }
                 }
-                conclusion.unwrap_or(ModelOrUnsat::UnsatUpToDimension(max_dimension))
+                conclusion.unwrap_or({
+                    if dimension_bound_is_exhaustive {
+                        ModelOrUnsat::Unsat
+                    } else {
+                        ModelOrUnsat::UnsatUpToDimension(max_dimension)
+                    }
+                })
             }
         };
         Ok(TestCase {
@@ -243,6 +250,8 @@ Not solved yet"#;
 
 ## Assumptions
 
+- $A = A$
+
 ## Sentences
 
 ## Conclusion
@@ -274,5 +283,44 @@ Not solved yet"#;
             error.to_string(),
             "scalar-matrix comparisons are not supported"
         );
+    }
+
+    #[test]
+    fn exhaustive_and_bounded_contradictions_have_distinct_conclusions() {
+        let fixed = r#"# Fixed
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Sentences
+
+- $A \ne A$
+
+## Conclusion
+
+Not solved yet"#;
+        let symbolic = r#"# Symbolic
+
+## Assumptions
+
+- $A = A$
+
+## Sentences
+
+- $A \ne A$
+
+## Conclusion
+
+Not solved yet"#;
+        let solved = TestCases(vec![
+            TestCase::<NotSolvedYet>::parse_str(fixed),
+            TestCase::<NotSolvedYet>::parse_str(symbolic),
+        ])
+        .find_models(2)
+        .unwrap();
+
+        assert_eq!(solved.0[0].conclusion, ModelOrUnsat::Unsat);
+        assert_eq!(solved.0[1].conclusion, ModelOrUnsat::UnsatUpToDimension(2));
     }
 }

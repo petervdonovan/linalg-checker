@@ -98,6 +98,7 @@ pub struct EnvironmentIterator {
     max_dimension_sum: u64,
     dimensionless_yielded: bool,
     finished: bool,
+    dimension_bound_is_exhaustive: bool,
     hidden_variables: BTreeSet<Variable>,
 }
 
@@ -241,6 +242,8 @@ fn extract_environment_iterator_with_hidden(
     let max_dimension_sum = dimension_count.checked_mul(max_dimension).ok_or_else(|| {
         ShapeError::Unsupported("maximum environment dimension sum overflows u64".to_owned())
     })?;
+    let dimension_bound_is_exhaustive =
+        dimension_bound_is_exhaustive(&mut solver, &dimensions, max_dimension);
     let mut iterator = EnvironmentIterator {
         solver,
         variable_types,
@@ -252,6 +255,7 @@ fn extract_environment_iterator_with_hidden(
         max_dimension_sum,
         dimensionless_yielded: false,
         finished,
+        dimension_bound_is_exhaustive,
         hidden_variables,
     };
     if !iterator.dimensions.is_empty() && !iterator.finished {
@@ -262,6 +266,27 @@ fn extract_environment_iterator_with_hidden(
         iterator.push_dimension_sum();
     }
     Ok(iterator)
+}
+
+fn dimension_bound_is_exhaustive(
+    solver: &mut Solver,
+    dimensions: &[Int],
+    max_dimension: u64,
+) -> bool {
+    if dimensions.is_empty() {
+        return true;
+    }
+
+    let max_dimension = Int::from_u64(max_dimension);
+    let exceeds_bound = dimensions
+        .iter()
+        .map(|dimension| dimension.gt(&max_dimension))
+        .collect::<Vec<_>>();
+    solver.push();
+    solver.assert(Bool::or(&exceeds_bound));
+    let result = solver.check();
+    solver.pop(1);
+    matches!(result, SatResult::Unsat)
 }
 
 struct EnvironmentSpecification {
@@ -384,6 +409,10 @@ fn check_contextual_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
 }
 
 impl EnvironmentIterator {
+    pub fn dimension_bound_is_exhaustive(&self) -> bool {
+        self.dimension_bound_is_exhaustive
+    }
+
     fn push_dimension_sum(&mut self) {
         self.solver.push();
         self.solver
@@ -1859,6 +1888,32 @@ mod tests {
         assert!(environments.iter().all(|environment| {
             matches!(environment.types[&Variable::new("A")], Type::Matrix(rows, cols) if rows <= 2 && cols <= 2)
         }));
+    }
+
+    #[test]
+    fn reports_whether_the_dimension_bound_is_exhaustive() {
+        let dimensionless =
+            extract_environment_iterator([expression("a = a")].into_iter(), 0).unwrap();
+        assert!(dimensionless.dimension_bound_is_exhaustive());
+
+        let fixed = extract_environment_iterator(
+            [expression(r"A \in \mathbb{R}^{2 \times 2}")].into_iter(),
+            2,
+        )
+        .unwrap();
+        assert!(fixed.dimension_bound_is_exhaustive());
+
+        let unconstrained =
+            extract_environment_iterator([expression("A = A")].into_iter(), 2).unwrap();
+        assert!(!unconstrained.dimension_bound_is_exhaustive());
+
+        let gapped = extract_environment_iterator(
+            [expression(r"A \in \mathbb{R}^{4 \times 4}")].into_iter(),
+            2,
+        )
+        .unwrap();
+        assert!(!gapped.dimension_bound_is_exhaustive());
+        assert_eq!(gapped.count(), 0);
     }
 
     #[test]

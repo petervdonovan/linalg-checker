@@ -9,9 +9,7 @@
 1. $x = x$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -27,9 +25,7 @@
 3. $x = x$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -45,9 +41,7 @@
 1. $A = A$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -113,11 +107,9 @@
 2. $-x > -y$
 
    <details>
-   <summary>✅ likely</summary>
+   <summary>✅ verified</summary>
 
-   No counterexamples found up to a maximum dimension of 2.
-
-   This may follow from the following facts:
+   This follows from the following facts:
 
    - $x < y$
    </details>
@@ -131,36 +123,28 @@
 1. $I = \begin{bmatrix}1\end{bmatrix}$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
 2. $I = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
 3. $\mathbb{0} = \begin{bmatrix}0 & 0\end{bmatrix}$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
 4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -180,7 +164,7 @@
 
    The negation of $U U^\top = I$ is satisfied by:
 
-   - $U = \begin{bmatrix}\frac{-3}{4} \\ -\left(\frac{7}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
+   - $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
    </details>
 
 # Logic-chain preprocessing
@@ -195,11 +179,9 @@
 1. $x = 0 \iff x \le 0 \implies x = x$
 
    <details>
-   <summary>✅ likely</summary>
+   <summary>✅ verified</summary>
 
-   No counterexamples found up to a maximum dimension of 2.
-
-   This may follow from the following facts:
+   This follows from the following facts:
 
    - $x = 0$
    </details>
@@ -216,9 +198,7 @@
 1. $x^{\frac{1}{2}} \ge 0$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -286,9 +266,7 @@
 1. $\left\lVert v \right\rVert_{2} \ge 0$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -338,9 +316,7 @@
 1. $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
@@ -357,9 +333,7 @@
 1. $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
 
    <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
+   <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>

@@ -99,6 +99,7 @@ pub enum StepCheck {
 pub struct StepValidationData {
     pub checks: Vec<StepCheck>,
     pub max_dimension: Option<u64>,
+    pub environments_exhaustive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +134,7 @@ impl Argument {
         for step in &mut self.steps {
             step.validation.checks.clear();
             step.validation.max_dimension = Some(max_dimension);
+            step.validation.environments_exhaustive = false;
         }
 
         let symbolic_types = infer_symbolic_type_environment(&self.assumptions)?;
@@ -175,6 +177,11 @@ impl Argument {
             Err(error) => return Err(error.into()),
         };
 
+        let environments_exhaustive = environments.dimension_bound_is_exhaustive();
+        for step in &mut self.steps {
+            step.validation.environments_exhaustive = environments_exhaustive;
+        }
+
         let mut satisfiable_assumption_count = 0;
         let mut assumption_unknown = false;
         for environment in environments {
@@ -205,7 +212,9 @@ impl Argument {
         }
 
         if satisfiable_assumption_count == 0 && !assumption_unknown {
-            self.record_inconsistent_assumptions(Some(max_dimension));
+            self.record_inconsistent_assumptions(
+                (!environments_exhaustive).then_some(max_dimension),
+            );
         }
         Ok(())
     }
@@ -268,7 +277,8 @@ impl Argument {
                 &prepared_positive[index],
                 max_dimension,
             )?;
-            if extensions.is_empty() {
+            self.steps[index].validation.environments_exhaustive &= extensions.exhaustive;
+            if extensions.environments.is_empty() {
                 self.steps[index]
                     .validation
                     .checks
@@ -280,7 +290,7 @@ impl Argument {
 
             let mut accepted = Vec::new();
             let mut failed = false;
-            for extension in extensions {
+            for extension in extensions.environments {
                 let extension = Rc::new(extension);
                 let negative_assertion =
                     match lower_prepared_boolean(&extension, &prepared_negative[index]) {
@@ -420,7 +430,7 @@ fn step_environment_extensions(
     symbolic_types: &SymbolicTypeEnvironment,
     step: &PreparedExpression,
     max_dimension: u64,
-) -> Result<Vec<Environment>, ArgumentValidationError> {
+) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let mut declarations = Vec::new();
     for (variable, ty) in &base.types {
         let declaration = Expr::new(RawExpr::Binop(
@@ -446,10 +456,16 @@ fn step_environment_extensions(
     declarations.push(step.clone());
     let iterator = match extract_prepared_environment_iterator(&declarations, &[], max_dimension) {
         Ok(iterator) => iterator,
-        Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => return Ok(Vec::new()),
+        Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
+            return Ok(StepEnvironmentExtensions {
+                environments: Vec::new(),
+                exhaustive: true,
+            });
+        }
         Err(error) => return Err(error.into()),
     };
-    iterator
+    let exhaustive = iterator.dimension_bound_is_exhaustive();
+    let environments = iterator
         .map(|environment| {
             let mut environment = environment?;
             environment.equalities.extend(base.equalities.clone());
@@ -459,7 +475,16 @@ fn step_environment_extensions(
             Ok(environment)
         })
         .collect::<Result<Vec<_>, ShapeError>>()
-        .map_err(Into::into)
+        .map_err(ArgumentValidationError::from)?;
+    Ok(StepEnvironmentExtensions {
+        environments,
+        exhaustive,
+    })
+}
+
+struct StepEnvironmentExtensions {
+    environments: Vec<Environment>,
+    exhaustive: bool,
 }
 
 fn assert_natural_constraints(
@@ -843,19 +868,30 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
         .collect();
     let explanation = if supporting_facts.is_empty() {
         "No premises seemed necessary to show this.".to_owned()
+    } else if step.validation.environments_exhaustive {
+        format!(
+            "This follows from the following facts:\n\n{}",
+            expression_bullets(&supporting_facts)
+        )
     } else {
         format!(
             "This may follow from the following facts:\n\n{}",
             expression_bullets(&supporting_facts)
         )
     };
-    let max_dimension = step
-        .validation
-        .max_dimension
-        .unwrap_or_else(|| panic!("validated step is missing its maximum dimension"));
-    Some(format!(
-        "<details>\n<summary>✅ likely</summary>\n\nNo counterexamples found up to a maximum dimension of {max_dimension}.\n\n{explanation}\n</details>"
-    ))
+    if step.validation.environments_exhaustive {
+        Some(format!(
+            "<details>\n<summary>✅ verified</summary>\n\n{explanation}\n</details>"
+        ))
+    } else {
+        let max_dimension = step
+            .validation
+            .max_dimension
+            .unwrap_or_else(|| panic!("validated step is missing its maximum dimension"));
+        Some(format!(
+            "<details>\n<summary>✅ likely</summary>\n\nNo counterexamples found up to a maximum dimension of {max_dimension}.\n\n{explanation}\n</details>"
+        ))
+    }
 }
 
 fn expression_bullets(expressions: &[Expr<()>]) -> String {
@@ -926,9 +962,9 @@ mod tests {
         assert!(Rc::ptr_eq(second_environment, third_environment));
 
         let rendered = argument.to_string();
-        assert!(rendered.contains("✅ likely"));
+        assert!(rendered.contains("✅ verified"));
         assert!(rendered.contains("❌ counterexample found"));
-        assert!(rendered.contains("maximum dimension of 0"));
+        assert!(!rendered.contains("maximum dimension of 0"));
     }
 
     #[test]
@@ -1009,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn likely_step_accumulates_supporting_facts_from_unsat_cores() {
+    fn verified_step_accumulates_supporting_facts_from_unsat_cores() {
         let mut argument = Argument::parse_str(
             r#"# Supported
 
@@ -1033,14 +1069,14 @@ mod tests {
         assert!(
             argument
                 .to_string()
-                .contains("This may follow from the following facts:")
+                .contains("This follows from the following facts:")
         );
     }
 
     #[test]
-    fn value_level_inconsistency_is_bounded() {
+    fn value_level_inconsistency_reflects_dimension_exhaustiveness() {
         let mut argument = Argument::parse_str(
-            r#"# Bounded inconsistency
+            r#"# Dimensionless inconsistency
 
 ## Assumptions
 
@@ -1051,6 +1087,26 @@ mod tests {
 ## Steps
 
 1. $x = x$"#,
+        );
+        argument.validate(3).unwrap();
+        assert!(matches!(
+            argument.steps[0].validation.checks.last(),
+            Some(StepCheck::InconsistentAssumptions {
+                max_dimension: None
+            })
+        ));
+
+        let mut argument = Argument::parse_str(
+            r#"# Bounded inconsistency
+
+## Assumptions
+
+- $A = A$
+- $A \ne A$
+
+## Steps
+
+1. $A = A$"#,
         );
         argument.validate(3).unwrap();
         assert!(
@@ -1065,6 +1121,51 @@ mod tests {
                     }
                 ))
         );
+    }
+
+    #[test]
+    fn verified_requires_base_and_step_local_exhaustiveness() {
+        let mut fixed = Argument::parse_str(
+            r#"# Fixed
+
+## Assumptions
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+## Steps
+
+1. $A = A$"#,
+        );
+        fixed.validate(2).unwrap();
+        let rendered = fixed.to_string();
+        assert!(rendered.contains("✅ verified"));
+        assert!(!rendered.contains("maximum dimension"));
+
+        let mut symbolic = Argument::parse_str(
+            r#"# Symbolic
+
+## Assumptions
+
+- $A = A$
+
+## Steps
+
+1. $A = A$"#,
+        );
+        symbolic.validate(2).unwrap();
+        assert!(symbolic.to_string().contains("✅ likely"));
+
+        let mut step_local = Argument::parse_str(
+            r#"# Step local
+
+## Assumptions
+
+## Steps
+
+1. $I = I$"#,
+        );
+        step_local.validate(2).unwrap();
+        assert!(step_local.to_string().contains("✅ likely"));
     }
 
     #[test]
