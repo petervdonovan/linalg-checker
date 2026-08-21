@@ -49,27 +49,29 @@ pub trait TypeLookup {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeRuleOperand {
-    value_type: Option<TypeExpr<()>>,
-    expression: Expr<()>,
+pub enum TypeRuleOperand {
+    Value(TypeExpr<()>),
+    TypeExpression(TypeExpr<()>),
+    NoValue,
 }
 
 impl TypeRuleOperand {
     fn value(&self) -> Result<TypeExpr<()>, TypeError> {
-        self.value_type
-            .clone()
-            .ok_or(TypeError::Invalid("expected a value operand"))
-    }
-
-    fn type_expression(&self) -> Result<TypeExpr<()>, TypeError> {
-        match &self.expression.raw {
-            RawExpr::Type(ty) => Ok(ty.clone()),
-            _ => Err(TypeError::Invalid("expected a type-expression operand")),
+        match self {
+            Self::Value(ty) => Ok(ty.clone()),
+            Self::TypeExpression(_) | Self::NoValue => {
+                Err(TypeError::Invalid("expected a value operand"))
+            }
         }
     }
 
-    pub fn expression(&self) -> &Expr<()> {
-        &self.expression
+    fn type_expression(&self) -> Result<TypeExpr<()>, TypeError> {
+        match self {
+            Self::TypeExpression(ty) => Ok(ty.clone()),
+            Self::Value(_) | Self::NoValue => {
+                Err(TypeError::Invalid("expected a type-expression operand"))
+            }
+        }
     }
 }
 
@@ -396,13 +398,12 @@ fn node_type<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> Result<TypeEx
 }
 
 fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> TypeRuleOperand {
-    let value_type = match expression.raw {
-        RawExpr::Type(_) | RawExpr::Hole => None,
-        _ => node_type(expression).ok(),
-    };
-    TypeRuleOperand {
-        value_type,
-        expression: expression.with_default_metadata(),
+    match &expression.raw {
+        RawExpr::Type(ty) => TypeRuleOperand::TypeExpression(ty.with_default_metadata()),
+        RawExpr::Hole => TypeRuleOperand::NoValue,
+        _ => node_type(expression)
+            .map(TypeRuleOperand::Value)
+            .unwrap_or(TypeRuleOperand::NoValue),
     }
 }
 
