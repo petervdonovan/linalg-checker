@@ -68,6 +68,24 @@ pub enum TypeExpr<Metadata> {
     Seq(Expr<Metadata>, Expr<Metadata>),
 }
 
+impl<Metadata> TypeExpr<Metadata> {
+    pub fn with_default_metadata<NewMetadata: Default>(&self) -> TypeExpr<NewMetadata> {
+        match self {
+            Self::Bool => TypeExpr::Bool,
+            Self::Nat => TypeExpr::Nat,
+            Self::Int => TypeExpr::Int,
+            Self::Real => TypeExpr::Real,
+            Self::Matrix(rows, cols) => {
+                TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
+            }
+            Self::Seq(element, size) => TypeExpr::Seq(
+                element.with_default_metadata(),
+                size.with_default_metadata(),
+            ),
+        }
+    }
+}
+
 impl From<Type> for TypeExpr<()> {
     fn from(ty: Type) -> Self {
         match ty {
@@ -280,19 +298,7 @@ impl<Metadata> Expr<Metadata> {
                 rows: *rows,
                 cols: *cols,
             },
-            RawExpr::Type(ty) => RawExpr::Type(match ty {
-                TypeExpr::Bool => TypeExpr::Bool,
-                TypeExpr::Nat => TypeExpr::Nat,
-                TypeExpr::Int => TypeExpr::Int,
-                TypeExpr::Real => TypeExpr::Real,
-                TypeExpr::Matrix(rows, cols) => {
-                    TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
-                }
-                TypeExpr::Seq(element, size) => TypeExpr::Seq(
-                    element.with_default_metadata(),
-                    size.with_default_metadata(),
-                ),
-            }),
+            RawExpr::Type(ty) => RawExpr::Type(ty.with_default_metadata()),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
             RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {

@@ -761,18 +761,11 @@ impl DimensionConstraintBuilder<'_> {
         &mut self,
         expression: &Expr<TypedMetadata>,
     ) -> Result<(), ShapeError> {
-        if let RawExpr::CmpChain(chain) = &expression.raw {
-            let chain = CmpChain {
-                start: chain.start.with_default_metadata(),
-                assertions: chain
-                    .assertions
-                    .iter()
-                    .map(|(cmp, expression)| (*cmp, expression.with_default_metadata()))
-                    .collect(),
-            };
-            if let Some(comparison) = self.natural_comparison(&chain)? {
-                self.solver.assert(comparison);
-            }
+        let expression: Expr<()> = expression.with_default_metadata();
+        if let RawExpr::CmpChain(chain) = &expression.raw
+            && let Some(comparison) = self.natural_comparison(chain)?
+        {
+            self.solver.assert(comparison);
         }
         Ok(())
     }
@@ -999,7 +992,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         )
                     })?;
                 self.builder
-                    .constrain_shape_type(&actual, &erase_typed_type(expected))?;
+                    .constrain_shape_type(&actual, &expected.with_default_metadata())?;
             }
             RawExpr::Binop(Binop::Cast, target, value) => {
                 let RawExpr::Type(target) = &target.raw else {
@@ -1008,7 +1001,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ));
                 };
                 let value = self.builder.shape_of(value)?;
-                match (erase_typed_type(target), value) {
+                match (target.with_default_metadata(), value) {
                     (TypeExpr::Real, Shape::Real) => {}
                     (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
                         self.builder
@@ -1283,22 +1276,6 @@ impl Visit<TypedMetadata> for SequenceCompatibilityVisitor<'_, '_> {
         if let Err(error) = result {
             self.error = Some(error);
         }
-    }
-}
-
-fn erase_typed_type(ty: &TypeExpr<TypedMetadata>) -> TypeExpr<()> {
-    match ty {
-        TypeExpr::Bool => TypeExpr::Bool,
-        TypeExpr::Nat => TypeExpr::Nat,
-        TypeExpr::Int => TypeExpr::Int,
-        TypeExpr::Real => TypeExpr::Real,
-        TypeExpr::Matrix(rows, cols) => {
-            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
-        }
-        TypeExpr::Seq(element, length) => TypeExpr::Seq(
-            element.with_default_metadata(),
-            length.with_default_metadata(),
-        ),
     }
 }
 

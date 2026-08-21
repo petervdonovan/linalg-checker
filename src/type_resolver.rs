@@ -417,7 +417,7 @@ fn operand<Metadata: MaybeTyped>(expression: &Expr<Metadata>) -> TypeRuleOperand
     let erased = expression.with_default_metadata();
     match &expression.raw {
         RawExpr::Type(ty) => TypeRuleOperand::Type {
-            ty: erase_type_metadata(ty),
+            ty: ty.with_default_metadata(),
             expression: erased,
         },
         RawExpr::Hole => TypeRuleOperand::NoValue { expression: erased },
@@ -544,22 +544,6 @@ fn multiplication_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, Typ
 }
 fn scalar_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
     fold_operand_types(operands, scalar_lub)
-}
-
-fn erase_type_metadata<Metadata>(ty: &TypeExpr<Metadata>) -> TypeExpr<()> {
-    match ty {
-        TypeExpr::Bool => TypeExpr::Bool,
-        TypeExpr::Nat => TypeExpr::Nat,
-        TypeExpr::Int => TypeExpr::Int,
-        TypeExpr::Real => TypeExpr::Real,
-        TypeExpr::Matrix(rows, cols) => {
-            TypeExpr::Matrix(rows.with_default_metadata(), cols.with_default_metadata())
-        }
-        TypeExpr::Seq(element, size) => TypeExpr::Seq(
-            element.with_default_metadata(),
-            size.with_default_metadata(),
-        ),
-    }
 }
 
 pub(crate) fn type_expr(ty: Type) -> TypeExpr<()> {
