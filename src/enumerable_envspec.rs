@@ -229,10 +229,10 @@ fn append_side_condition_definitions(
     Ok(())
 }
 
-fn extract_typed_environment_iterator_with_hidden(
+fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     symbolic_types: &SymbolicTypeEnvironment,
-    assumptions: Vec<Expr<TypedMetadata>>,
-    contextual_expressions: Vec<Expr<TypedMetadata>>,
+    assumptions: Vec<Expr<Metadata>>,
+    contextual_expressions: Vec<Expr<Metadata>>,
     max_dimension: u64,
     hidden_types: BTreeMap<Variable, TypeExpr<()>>,
 ) -> Result<EnvironmentIterator, ShapeError> {
@@ -276,7 +276,7 @@ fn extract_typed_environment_iterator_with_hidden(
             context.constrain_top_level_assertion(assumption)?;
         }
         run_dimension_constraint_visitors(&mut context, &assumptions)?;
-        let known = context.known_equalities_typed(&assumptions)?;
+        let known = context.known_equalities(&assumptions)?;
         check_base_constraints(context.solver)?;
         context.mode = ConstraintMode::Contextual;
         run_dimension_constraint_visitors(&mut context, &contextual_expressions)?;
@@ -713,9 +713,9 @@ impl DimensionConstraintBuilder<'_> {
         }
     }
 
-    fn known_equalities(
+    fn known_equalities<Metadata>(
         &self,
-        assumptions: &[Expr<()>],
+        assumptions: &[Expr<Metadata>],
     ) -> Result<HashMap<Expr<()>, u64>, ShapeError> {
         let mut equalities = HashMap::new();
         for assumption in assumptions {
@@ -727,10 +727,10 @@ impl DimensionConstraintBuilder<'_> {
             };
             let pair = match (&start.raw, &right.raw) {
                 (_, RawExpr::NatLiteral(value)) if self.lower_nat(start)?.is_some() => {
-                    Some((start.clone(), *value))
+                    Some((start.with_default_metadata(), *value))
                 }
                 (RawExpr::NatLiteral(value), _) if self.lower_nat(right)?.is_some() => {
-                    Some((right.clone(), *value))
+                    Some((right.with_default_metadata(), *value))
                 }
                 _ => None,
             };
@@ -746,22 +746,10 @@ impl DimensionConstraintBuilder<'_> {
         Ok(equalities)
     }
 
-    fn known_equalities_typed(
-        &self,
-        assumptions: &[Expr<TypedMetadata>],
-    ) -> Result<HashMap<Expr<()>, u64>, ShapeError> {
-        let erased = assumptions
-            .iter()
-            .map(Expr::with_default_metadata)
-            .collect::<Vec<_>>();
-        self.known_equalities(&erased)
-    }
-
-    fn constrain_top_level_assertion(
+    fn constrain_top_level_assertion<Metadata>(
         &mut self,
-        expression: &Expr<TypedMetadata>,
+        expression: &Expr<Metadata>,
     ) -> Result<(), ShapeError> {
-        let expression: Expr<()> = expression.with_default_metadata();
         if let RawExpr::CmpChain(chain) = &expression.raw
             && let Some(comparison) = self.natural_comparison(chain)?
         {
@@ -770,7 +758,10 @@ impl DimensionConstraintBuilder<'_> {
         Ok(())
     }
 
-    fn natural_comparison(&self, chain: &CmpChain<()>) -> Result<Option<Bool>, ShapeError> {
+    fn natural_comparison<Metadata>(
+        &self,
+        chain: &CmpChain<Metadata>,
+    ) -> Result<Option<Bool>, ShapeError> {
         let Some(mut previous) = self.lower_nat(&chain.start)? else {
             return Ok(None);
         };
@@ -785,11 +776,14 @@ impl DimensionConstraintBuilder<'_> {
         Ok(Some(Bool::and(&clauses)))
     }
 
-    fn lower_nat(&self, expression: &Expr<()>) -> Result<Option<Int>, ShapeError> {
+    fn lower_nat<Metadata>(&self, expression: &Expr<Metadata>) -> Result<Option<Int>, ShapeError> {
         lower_nat_with_symbols(expression, self.natural_symbols)
     }
 
-    fn shape_of(&self, expression: &Expr<TypedMetadata>) -> Result<Shape, ShapeError> {
+    fn shape_of<Metadata: MaybeTyped>(
+        &self,
+        expression: &Expr<Metadata>,
+    ) -> Result<Shape, ShapeError> {
         let ty = expression
             .meta
             .get_type()
@@ -801,10 +795,10 @@ impl DimensionConstraintBuilder<'_> {
         compile_type_expr(ty, self.natural_symbols)
     }
 
-    fn constrain_shape_type(
+    fn constrain_shape_type<Metadata>(
         &mut self,
         actual: &Shape,
-        expected: &TypeExpr<()>,
+        expected: &TypeExpr<Metadata>,
     ) -> Result<(), ShapeError> {
         match (actual, expected) {
             (Shape::Bool, TypeExpr::Bool)
@@ -823,12 +817,12 @@ impl DimensionConstraintBuilder<'_> {
                     )
                 })?;
                 self.record_projection(
-                    expected_rows.clone(),
+                    expected_rows.with_default_metadata(),
                     row_value.clone(),
                     &[rows, &row_value],
                 );
                 self.record_projection(
-                    expected_cols.clone(),
+                    expected_cols.with_default_metadata(),
                     col_value.clone(),
                     &[cols, &col_value],
                 );
@@ -847,7 +841,7 @@ impl DimensionConstraintBuilder<'_> {
                         "nested sequence constraints are not supported".to_owned(),
                     ));
                 }
-                let expected_length_expression = expected_length.clone();
+                let expected_length_expression = expected_length.with_default_metadata();
                 let expected_length = self.lower_nat(expected_length)?.ok_or_else(|| {
                     ShapeError::Unsupported(
                         "sequence length is not linear natural arithmetic".to_owned(),
@@ -924,18 +918,18 @@ struct OperatorCompatibilityVisitor<'a, 'builder> {
 }
 
 impl OperatorCompatibilityVisitor<'_, '_> {
-    fn constrain(&mut self, expression: &Expr<TypedMetadata>) -> Result<(), ShapeError> {
+    fn constrain<Metadata: MaybeTyped>(
+        &mut self,
+        expression: &Expr<Metadata>,
+    ) -> Result<(), ShapeError> {
         match &expression.raw {
             RawExpr::StandardBasis { index, dimension } => {
                 let dimension = self.builder.implicit_dimension(*dimension);
-                let index_value = self
-                    .builder
-                    .lower_nat(&index.with_default_metadata())?
-                    .ok_or_else(|| {
-                        ShapeError::Unsupported(
-                            "standard basis index is not linear natural arithmetic".to_owned(),
-                        )
-                    })?;
+                let index_value = self.builder.lower_nat(index)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "standard basis index is not linear natural arithmetic".to_owned(),
+                    )
+                })?;
                 self.builder.record_projection(
                     index.with_default_metadata(),
                     index_value.clone(),
@@ -991,8 +985,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             "membership subject has no inferred type".to_owned(),
                         )
                     })?;
-                self.builder
-                    .constrain_shape_type(&actual, &expected.with_default_metadata())?;
+                self.builder.constrain_shape_type(&actual, expected)?;
             }
             RawExpr::Binop(Binop::Cast, target, value) => {
                 let RawExpr::Type(target) = &target.raw else {
@@ -1001,7 +994,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ));
                 };
                 let value = self.builder.shape_of(value)?;
-                match (target.with_default_metadata(), value) {
+                match (target, value) {
                     (TypeExpr::Real, Shape::Real) => {}
                     (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
                         self.builder
@@ -1010,14 +1003,14 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             .assert_dimensions_equal(&cols, &Int::from_u64(1));
                     }
                     (TypeExpr::Matrix(rows, cols), Shape::Real) => {
-                        let rows_expression = rows.clone();
-                        let cols_expression = cols.clone();
-                        let rows = self.builder.lower_nat(&rows)?.ok_or_else(|| {
+                        let rows_expression = rows.with_default_metadata();
+                        let cols_expression = cols.with_default_metadata();
+                        let rows = self.builder.lower_nat(rows)?.ok_or_else(|| {
                             ShapeError::Unsupported(
                                 "cast row dimension is not linear natural arithmetic".to_owned(),
                             )
                         })?;
-                        let cols = self.builder.lower_nat(&cols)?.ok_or_else(|| {
+                        let cols = self.builder.lower_nat(cols)?.ok_or_else(|| {
                             ShapeError::Unsupported(
                                 "cast column dimension is not linear natural arithmetic".to_owned(),
                             )
@@ -1048,10 +1041,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ));
                 }
                 if !matches!(index.raw, RawExpr::Variable(_) | RawExpr::NatLiteral(_))
-                    && self
-                        .builder
-                        .lower_nat(&index.with_default_metadata())?
-                        .is_none()
+                    && self.builder.lower_nat(index)?.is_none()
                 {
                     return Err(ShapeError::InvalidTyping(
                         "sequence index must be natural-number arithmetic".to_owned(),
@@ -1150,8 +1140,8 @@ impl OperatorCompatibilityVisitor<'_, '_> {
     }
 }
 
-impl Visit<TypedMetadata> for OperatorCompatibilityVisitor<'_, '_> {
-    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+impl<Metadata: MaybeTyped> Visit<Metadata> for OperatorCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<Metadata>) {
         if self.error.is_some() {
             return;
         }
@@ -1169,8 +1159,8 @@ struct BlockMatrixCompatibilityVisitor<'a, 'builder> {
     error: Option<ShapeError>,
 }
 
-impl Visit<TypedMetadata> for BlockMatrixCompatibilityVisitor<'_, '_> {
-    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+impl<Metadata: MaybeTyped> Visit<Metadata> for BlockMatrixCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<Metadata>) {
         if self.error.is_some() {
             return;
         }
@@ -1227,8 +1217,8 @@ struct SequenceCompatibilityVisitor<'a, 'builder> {
     error: Option<ShapeError>,
 }
 
-impl Visit<TypedMetadata> for SequenceCompatibilityVisitor<'_, '_> {
-    fn visit_expr(&mut self, node: &Expr<TypedMetadata>) {
+impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, '_> {
+    fn visit_expr(&mut self, node: &Expr<Metadata>) {
         if self.error.is_some() {
             return;
         }
@@ -1239,12 +1229,12 @@ impl Visit<TypedMetadata> for SequenceCompatibilityVisitor<'_, '_> {
         let result = (|| {
             let from_key = range.from.with_default_metadata();
             let to_key = range.to.with_default_metadata();
-            let from = self.builder.lower_nat(&from_key)?.ok_or_else(|| {
+            let from = self.builder.lower_nat(&range.from)?.ok_or_else(|| {
                 ShapeError::Unsupported(
                     "sequence lower bound is not linear natural arithmetic".to_owned(),
                 )
             })?;
-            let to = self.builder.lower_nat(&to_key)?.ok_or_else(|| {
+            let to = self.builder.lower_nat(&range.to)?.ok_or_else(|| {
                 ShapeError::Unsupported(
                     "sequence upper bound is not linear natural arithmetic".to_owned(),
                 )
@@ -1279,9 +1269,9 @@ impl Visit<TypedMetadata> for SequenceCompatibilityVisitor<'_, '_> {
     }
 }
 
-fn run_dimension_constraint_visitors(
+fn run_dimension_constraint_visitors<Metadata: MaybeTyped>(
     builder: &mut DimensionConstraintBuilder<'_>,
-    expressions: &[Expr<TypedMetadata>],
+    expressions: &[Expr<Metadata>],
 ) -> Result<(), ShapeError> {
     for expression in expressions {
         let mut visitor = OperatorCompatibilityVisitor {
@@ -1370,8 +1360,8 @@ fn compile_type_expr(
     })
 }
 
-fn lower_nat_with_symbols(
-    expression: &Expr<()>,
+fn lower_nat_with_symbols<Metadata>(
+    expression: &Expr<Metadata>,
     natural_symbols: &BTreeMap<Variable, Int>,
 ) -> Result<Option<Int>, ShapeError> {
     match &expression.raw {
@@ -1612,7 +1602,7 @@ fn collect_range_bound_variables<Metadata>(
     Collector(variables).visit_expr(expression);
 }
 
-fn natural_literal(expression: &Expr<()>) -> Option<u64> {
+fn natural_literal<Metadata>(expression: &Expr<Metadata>) -> Option<u64> {
     match &expression.raw {
         RawExpr::NatLiteral(value) => Some(*value),
         _ => None,
@@ -1668,14 +1658,15 @@ fn model_u64(model: &z3::Model, expression: &Int) -> Result<u64, ShapeError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use ratex_parser::parse;
+    use z3::{SatResult, Solver, ast::Int};
 
     use super::{
         ShapeError, collect_implicit_dimensions, collect_variables, extract_environment_iterator,
         extract_environment_iterator_with_context, extract_prepared_environment_iterator,
-        infer_symbolic_type_environment,
+        infer_symbolic_type_environment, lower_nat_with_symbols,
     };
     use crate::{
         Annotation, Expr, Finop, Matrix, Range, RawExpr, SeqOp, SeqType, Type, Variable, from_tex,
