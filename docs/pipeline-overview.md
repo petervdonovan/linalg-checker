@@ -1,150 +1,348 @@
-**Pipeline Overview**
+# Pipeline Overview
 
-1. Parse into `Expr<()>`.
-2. Infer variable types into `SymbolicTypeEnvironment`.
-3. Clone into `Expr<TypedMetadata>` and resolve symbolic node types.
-4. Run desugaring visitors, producing rewritten expressions and `SideCondition`s.
-5. Resolve types again using core operator rules.
-6. Generate dimensional constraints and enumerate concrete `Environment`s.
-7. Lower a `PreparedExpression` under one concrete environment to Z3.
-8. Assert side-condition definitions and solve.
+The checker has two distinct inference phases:
 
-**Expression Metadata**
+1. **Symbolic preparation**, which is independent of concrete dimensions.
+2. **Concrete elaboration**, which runs after a natural-number environment has
+   been selected.
 
-[TypedMetadata](/home/peter/school/leantutor/linalg-checker/src/type_resolver.rs:31) contains:
+Only after both phases does the checker construct value-level Z3 expressions.
+This separation lets preprocessing preserve symbolic matrix and sequence sizes,
+while keeping environment-dependent expansion out of the Z3 core.
 
-```rust
-Option<TypeExpr<()>>
+```mermaid
+flowchart LR
+    MD[Markdown / TeX] --> AST["Expr&lt;()&gt;"]
+    AST --> STE[SymbolicTypeEnvironment]
+    AST --> PREP[PreparedExpression]
+    STE --> PREP
+    PREP --> DIM[Dimension constraints]
+    DIM --> ENV[Environment]
+    PREP --> ELAB[Concrete elaboration]
+    ENV --> ELAB
+    ELAB --> Z3[Scalar-cell Z3 lowering]
+    Z3 --> SOLVE[Solver query]
+    SOLVE --> RESULT[Model, counterexample, or proof result]
 ```
 
-It stores the symbolic value type of each expression node. Examples:
+## 1. Parsing
 
-- `A`: `Matrix(A_rows, A_cols)`
-- `A B`: `Matrix(A_rows, B_cols)`
-- `x + y`: the symbolic scalar least upper bound
-- comparison: `Bool`
+Markdown workflows parse list items containing TeX through `from_tex` into
+`Expr<()>`. At this point:
 
-It does not store:
+- the tree retains the user's surface syntax;
+- context-dependent constants such as `I`, `e_i`, and `\mathbb{0}` already have
+  distinct `ImplicitDimension` nonces;
+- there is no type annotation on an expression node;
+- no Z3 objects have been constructed.
 
-- Concrete dimensions.
-- Variable declarations.
-- Z3 expressions.
-- Dimension constraints.
-- Side conditions.
-- Logical polarity.
-- Source locations.
+The Markdown modules differ mainly in their section structure:
 
-`TypeExpr` dimension expressions themselves have `()` metadata. Therefore metadata records a node’s symbolic result type, but does not recursively type the expressions appearing inside that type.
+- `find_model` parses `Assumptions`, `Sentences`, and `Conclusion`;
+- `find_model_given_environment` parses `Environment`, `Sentences`, and
+  `Conclusion`;
+- `validate_argument` parses `Assumptions` followed by ordered `Steps`.
 
-**Variable Types**
+## 2. Symbolic Variable Types
 
-[SymbolicTypeEnvironment](/home/peter/school/leantutor/linalg-checker/src/type_resolver.rs:209) is the authoritative mapping:
+`infer_symbolic_type_environment` builds a `SymbolicTypeEnvironment`:
 
-```rust
+```text
 Variable -> TypeExpr<()>
 ```
 
-It comes from explicit memberships, natural-variable usage, and name-based guesses. `TypeResolver` uses this for variable leaves and writes resulting types into node metadata.
+It uses explicit type memberships from the assumptions first, then natural
+number usage and name-based guesses. For example, an untyped uppercase `A` is
+assigned a symbolic matrix type whose dimensions are expressions such as
+`A_{rows}` and `A_{cols}`.
 
-Lexically bound sequence indices are kept separately in `TypeResolver::lexical_types`. They are temporary traversal state and never enter the global symbolic environment.
+This map describes variable leaves. It does not contain concrete dimensions or
+the result type of every AST node. For argument validation, only assumptions are
+used to build this base variable-type environment; a step does not get to change
+the class of user structures being tested.
 
-**Operator Rules**
+## 3. Symbolic Preparation
 
-`OperatorTypeRules` contains the functions that calculate parent types from child types.
-
-Each rule receives temporary `TypeRuleOperand`s containing:
-
-- The child’s resolved value type, when it has one.
-- A metadata-free snapshot of the child syntax.
-
-The syntax snapshot supports rules such as casts and subscripts. It is not used to recover child types: those are passed explicitly through `value_type`.
-
-**Visitor Context**
-
-[VisitContext](/home/peter/school/leantutor/linalg-checker/src/visit_mut.rs:29) carries `logical_polarity` top-down during traversal.
-
-Polarity is not stored in node metadata. `PreparedExpression.context` retains it afterward as provenance so callers can verify that positive and negative preparations are used correctly.
-
-**Desugaring Results**
-
-[PreparedExpression](/home/peter/school/leantutor/linalg-checker/src/preprocessing.rs:12) carries three things between preprocessing and later stages:
+`prepare_expression` converts one surface expression into a
+`PreparedExpression`:
 
 ```rust
-expression: Expr<TypedMetadata>
-side_conditions: Vec<SideCondition<TypedMetadata>>
-context: VisitContext
-```
-
-A `SideCondition` explicitly carries information that cannot live on one rewritten node:
-
-- Introduced synthetic variable.
-- User-facing display name.
-- Symbolic introduced type.
-- Defining assertions.
-- Existence classification and checkable assertions.
-
-Synthetic variable types temporarily extend the type lookup during the second type-resolution pass.
-
-**Why Type Resolution Runs Twice**
-
-The first pass types surface syntax so visitors can distinguish scalar and matrix operations.
-
-Visitors then introduce new core expressions and synthetic variables. The second pass validates and types that rewritten core syntax. Some visitor-created nodes are provisionally typed, but the second pass is authoritative for the completed tree.
-
-This is intentional recomputation, though it is one place where future cleanup may separate construction-time annotations from final validation more clearly.
-
-**Dimension Inference**
-
-Dimension inference reads symbolic types from node metadata, but stores its working information separately:
-
-- `Shape`: solver-backed scalar, matrix, or sequence shape.
-- `natural_symbols`: dimension variable to Z3 integer.
-- `implicit_dimensions`: nonce to Z3 integer.
-- `projections`: metadata-free expression to Z3 integer.
-- The Z3 solver itself: compatibility, positivity, and ordering constraints.
-
-Constraints are asserted directly into the solver. There is no dimension-constraint IR.
-
-`ConstraintMode` is temporary builder state controlling whether constraints are permanent or contextual. It is not attached to expressions or individual constraints.
-
-**Concrete Environments**
-
-A yielded [Environment](/home/peter/school/leantutor/linalg-checker/src/lib.rs:143) contains:
-
-```rust
-types: Variable -> Type
-equalities: Expr<()> -> u64
-implicit_dimensions: ImplicitDimension -> u64
-```
-
-These are model-dependent facts and therefore should not be expression metadata.
-
-`equalities` supplies concrete values needed for:
-
-- Symbolic power exponents.
-- Sequence bounds.
-- Symbolic cast dimensions.
-- Basis-vector indices and other projections.
-
-Metadata-free keys are intentional here: metadata must not affect whether two environment-dependent expressions denote the same projection.
-
-**Z3 Boundary**
-
-[to_z3](/home/peter/school/leantutor/linalg-checker/src/to_z3.rs:460) receives:
-
-- A typed, preprocessed expression.
-- Its symbolic side conditions.
-- One concrete environment.
-
-It temporarily extends the concrete environment with synthetic variable types and returns:
-
-```rust
-ToZ3Result {
-    expression: Z3Object,
-    side_conditions: Vec<LoweredSideCondition>,
+pub struct PreparedExpression {
+    pub expression: Expr<TypedMetadata>,
+    pub side_conditions: Vec<SideCondition<TypedMetadata, TypeExpr<()>>>,
+    pub context: VisitContext,
 }
 ```
 
-The lowered side conditions retain definitions and existence classifications. Model-finding callers assert definitions explicitly and handle existence warnings separately.
+`TypedMetadata` contains `Option<TypeExpr<()>>`. A resolved annotation is the
+symbolic value type of that exact node. It may contain symbolic dimensions; it
+is not a concrete `Type` and is not a cache of environment data.
 
-Synthetic variables are omitted from extracted user models because model extraction iterates over `Environment::types`, not the private extended lowering environment.
+Preparation runs a fixpoint over the main expression and every assertion in its
+side-condition forest:
+
+```mermaid
+flowchart TD
+    START[Clone with empty TypedMetadata] --> TYPE[Resolve currently derivable core types]
+    TYPE --> LOGIC[Lower logic chains]
+    LOGIC --> N2SQ[Lower squared 2-norm]
+    N2SQ --> N2[Lower 2-norm]
+    N2 --> SQRT[Lower square roots]
+    SQRT --> MERGE[Merge side conditions and synthetic types]
+    MERGE --> CHANGED{Any rewrite?}
+    CHANGED -- yes --> TYPE
+    CHANGED -- no --> CHECK[Validate complete typing and core surface syntax]
+    CHECK --> PREP[PreparedExpression]
+```
+
+Typing is monotone. Existing annotations are retained, while newly generated
+nodes begin unresolved and are typed on a later iteration. The final
+no-rewrite iteration therefore leaves authoritative metadata on the entire
+prepared forest.
+
+`OperatorTypeRules::core()` computes parent types from typed children. Structural
+forms such as literals, variables, matrices, chains, and sequence binders are
+handled directly by `TypeResolver`.
+
+### Logical polarity
+
+`VisitContext.logical_polarity` records how the expression will be used in a
+Boolean context. It is propagated top-down by mutable visitors and retained in
+`PreparedExpression.context` as provenance.
+
+Preparation does not negate an expression. Argument validation prepares each
+step twice:
+
+- positive preparation for adding an accepted step as a premise;
+- negative-polarity preparation for a counterexample query, after which the
+  caller explicitly negates the lowered Boolean.
+
+### Side conditions
+
+Desugaring may introduce a synthetic variable and associated obligations. A
+symbolic `SideCondition` contains:
+
+- the internal introduced variable;
+- a user-facing display name;
+- its symbolic `TypeExpr<()>`;
+- defining assertions;
+- an existence classification: `Guaranteed`, `Checkable`, or `Assumed`.
+
+For example, square-root preprocessing replaces a root with a deterministic
+synthetic variable and records the equation defining that variable. Synthetic
+variables are internal and are not included when user models are extracted.
+
+## 4. Dimension Constraints and Environment Enumeration
+
+`extract_prepared_environment_iterator` compiles symbolic types and prepared
+expressions into an incremental integer Z3 solver. It then runs the ordered,
+read-only dimension-constraint visitors:
+
+1. operator compatibility;
+2. block-matrix compatibility;
+3. sequence range and index compatibility.
+
+These visitors read `TypedMetadata`; they do not infer result types recursively.
+They assert constraints through one `DimensionConstraintBuilder`. There is no
+separate dimension-constraint IR.
+
+Top-level memberships and natural comparisons are handled explicitly in
+addition to the recursive visitors. Generated side-condition definitions are
+also included because they may imply dimensions, such as the squareness needed
+for a matrix root.
+
+The builder has two traversal modes:
+
+- **Permanent**: all constraints from assumptions and generated definitions are
+  asserted.
+- **Contextual**: constraints are retained only when they depend on an implicit
+  nonce dimension.
+
+This prevents ordinary sentences from narrowing user matrix dimensions while
+still allowing a sentence-local `I` or `\mathbb{0}` to acquire dimensions.
+
+### Concrete environments
+
+An `Environment` contains only:
+
+```rust
+pub struct Environment {
+    pub natural_assignment: HashMap<NaturalParameter, u64>,
+}
+```
+
+`NaturalParameter` is either a user `Variable` or an `ImplicitDimension` nonce.
+Concrete variable types are not duplicated in the environment: they are obtained
+by evaluating the symbolic `TypeExpr` stored in metadata against this assignment.
+`Environment::evaluate_natural` delegates expression evaluation to the shared Z3
+natural-arithmetic lowering.
+
+The iterator:
+
+- assigns all free natural parameters, excluding lexical sequence binders;
+- enforces positivity for structural dimensions and sequence lengths;
+- bounds parameters and resulting structural dimensions by `max_dimension`;
+- enumerates assignments by increasing sum;
+- blocks each complete natural assignment after yielding it;
+- separately checks whether any admissible assignment exists beyond the bound.
+
+That last query distinguishes bounded results such as "likely" or "unsat up to
+dimension 2" from exhaustive results such as "verified" or "unsat".
+
+## 5. Post-Enumeration Concrete Elaboration
+
+`elaborate(environment, prepared)` deep-clones the complete prepared forest and
+specializes it for one selected environment. Symbolic metadata remains the
+source of type information; dimensions are evaluated on demand through the
+environment. Type resolution is not rerun.
+
+The elaboration fixpoint runs these fallible mutable visitors:
+
+1. **Membership elaboration** checks concrete type compatibility and lowers
+   natural membership to nonnegativity.
+2. **Sequence elaboration** evaluates ranges and indices, substitutes lexical
+   indices, unrolls exactly the selected terms, and materializes indexed values.
+3. **Concrete-leaf elaboration** materializes matrix variables, identity and zero
+   matrices, standard basis vectors, and implicit dimensions.
+4. **Matrix elaboration** flattens block matrices and expands matrix operations,
+   casts, powers, transpose, trace, determinant, and matrix comparisons.
+
+The result is an `ElaboratedExpression`. Its side conditions now carry concrete
+`Type` values rather than symbolic `TypeExpr`s.
+
+```mermaid
+flowchart LR
+    PREP[PreparedExpression<br/>symbolic TypeExpr metadata] --> E[elaborate]
+    ENV[Environment<br/>natural assignment] --> E
+    E --> EE[ElaboratedExpression<br/>concrete side-condition types]
+    EE --> CORE[Scalar-cell core]
+```
+
+Matrix-valued results remain possible, but only as flat row-major matrices of
+scalar expressions. No matrix arithmetic is allowed to reach core Z3 lowering.
+Residual sequence syntax, implicit constants, casts, powers, block matrices, or
+matrix operators produce `ElaborationError` before Z3 construction.
+
+## 6. Z3 Construction and Side Conditions
+
+`to_z3(environment, prepared)` is the standard boundary. It calls `elaborate`
+and then lowers the scalar-cell core into:
+
+```rust
+pub struct ToZ3Result {
+    pub expression: Z3Object,
+    pub side_conditions: Vec<LoweredSideCondition>,
+}
+```
+
+Core lowering supports scalar literals and variables, scalar arithmetic,
+Boolean finite operations, scalar comparisons, simple implication, and flat
+matrix values. Integer/real promotion happens here.
+
+Callers must positively assert every defining assertion in the returned side
+conditions. Existence is handled separately:
+
+- `Guaranteed` needs no warning query;
+- `Checkable` supplies assertions whose satisfiability demonstrates possible
+  undefinedness;
+- `Assumed` produces an unchecked-existence warning.
+
+## 7. Argument Validation
+
+Argument validation is the most complete consumer of the pipeline. Assumptions
+determine base environments; each step is then challenged in every applicable
+environment using one incremental value-level solver per base environment.
+
+```mermaid
+flowchart TD
+    A[Parse assumptions and ordered steps] --> T[Infer symbolic variable types from assumptions]
+    T --> P[Prepare assumptions and positive/negative forms of every step]
+    P --> B[Enumerate base environments from assumptions only]
+    B --> S[Create one value solver for this environment]
+    S --> AS[Assert natural assignment, assumptions, and definitions]
+    AS --> STEP[Next step]
+    STEP --> EXT[Enumerate step-local dimensional extensions]
+    EXT --> NEG[Push definitions and NOT of negative-polarity lowering]
+    NEG --> CHECK{Solver result}
+    CHECK -- sat --> CEX[Extract counterexample]
+    CHECK -- unknown --> UNK[Record unknown]
+    CHECK -- unsat --> EXIST[Check existence side conditions]
+    EXIST --> ACCEPT[Lower positively and collect accepted extension]
+    ACCEPT --> TRACK[Pop query; track accepted step as a premise]
+    TRACK --> STEP
+```
+
+### Base and step-local dimensions
+
+Only assumptions constrain base environment enumeration. For a particular step,
+`step_environment_extensions` fixes the complete base natural assignment and
+enumerates any additional nonce parameters required to make that step
+dimensionally meaningful.
+
+If no extension exists, the step is recorded as dimensionally invalid for that
+base environment. It is not allowed to remove that environment from the
+counterexample search. This is especially important for operations such as a
+matrix square root introduced only by a step.
+
+### Incremental value solving
+
+For each base environment, assumptions are asserted once and tracked for unsat
+cores. For each step-local extension, validation:
+
+1. lowers the negative-polarity prepared form;
+2. pushes a solver scope;
+3. asserts its defining side conditions and the explicit negation of the step;
+4. checks for a counterexample;
+5. pops the scope;
+6. if no counterexample exists, checks existence warnings and lowers the step
+   positively;
+7. after all extensions succeed, tracks the accepted positive step as a premise
+   for later steps.
+
+An unsat core supplies the assumptions and previous accepted steps shown as
+supporting facts. A discovered counterexample has priority over tentative
+successes from other environments. Validation may stop once every step has a
+counterexample.
+
+If every admissible environment was searched, success is rendered as
+`verified`; otherwise it is `likely` up to the configured dimension bound.
+
+## 8. Other Workflows
+
+### `find_model`
+
+The flagship model finder shares symbolic typing, preparation, environment
+enumeration, elaboration, and Z3 lowering with argument validation.
+
+- Assumptions determine ordinary environment constraints.
+- Sentence expressions are passed in contextual mode, so their ordinary shape
+  constraints do not narrow user dimensions. Constraints involving sentence-local
+  implicit nonces still apply, and generated side-condition definitions are
+  permanent typing obligations.
+- For each environment, assumptions and sentences are asserted together in a
+  fresh value solver.
+- The first satisfiable environment yields a user-variable model.
+- Exhaustive failure yields `Unsat`; bounded failure yields
+  `UnsatUpToDimension(max_dimension)`.
+
+### `find_model_given_environment`
+
+This workflow receives explicit `Environment` declarations in Markdown instead
+of enumerating environments. It:
+
+1. infers symbolic variable types from those declarations;
+2. extracts direct natural assignments from declaration equalities;
+3. prepares declarations and sentences;
+4. elaborates and solves them under that one environment.
+
+Its Markdown environment remains expression-valued, but the runtime
+`Environment` still contains only the natural assignment.
+
+### Shared model extraction
+
+Model extraction iterates over the user inventory in
+`SymbolicTypeEnvironment`, concretizes each symbolic type using the selected
+environment, and evaluates the corresponding lowered Z3 constants. Sequence
+elements are prepared and elaborated through the normal indexed-expression path.
+Synthetic variables and implicit dimensions are deliberately excluded from
+presented models.
