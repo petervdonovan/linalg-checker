@@ -42,6 +42,9 @@ pub trait Visit<Metadata> {
     fn visit_raw_expr_hole(&mut self) {
         visit_raw_expr_hole(self);
     }
+    fn visit_raw_expr_implicit_dimension(&mut self, dimension: &ImplicitDimension) {
+        visit_raw_expr_implicit_dimension(self, dimension);
+    }
     fn visit_raw_expr_identity_matrix(&mut self, dimension: &ImplicitDimension) {
         visit_raw_expr_identity_matrix(self, dimension);
     }
@@ -107,6 +110,7 @@ pub fn visit_metadata<V: Visit<M> + ?Sized, M>(_v: &mut V, _n: &M) {}
 pub fn visit_raw_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &RawExpr<M>) {
     match n {
         RawExpr::Hole => v.visit_raw_expr_hole(),
+        RawExpr::ImplicitDimension(dimension) => v.visit_raw_expr_implicit_dimension(dimension),
         RawExpr::IdentityMatrix { dimension } => v.visit_raw_expr_identity_matrix(dimension),
         RawExpr::StandardBasis { index, dimension } => {
             v.visit_raw_expr_standard_basis(index, dimension)
@@ -162,6 +166,11 @@ pub fn visit_logic_chain<V: Visit<M> + ?Sized, M>(v: &mut V, n: &LogicChain<M>) 
 }
 pub fn visit_variable<V: Visit<M> + ?Sized, M>(_v: &mut V, _n: &Variable) {}
 pub fn visit_raw_expr_hole<V: Visit<M> + ?Sized, M>(_v: &mut V) {}
+pub fn visit_raw_expr_implicit_dimension<V: Visit<M> + ?Sized, M>(
+    _v: &mut V,
+    _dimension: &ImplicitDimension,
+) {
+}
 pub fn visit_raw_expr_identity_matrix<V: Visit<M> + ?Sized, M>(_v: &mut V, _d: &ImplicitDimension) {
 }
 pub fn visit_raw_expr_standard_basis<V: Visit<M> + ?Sized, M>(
@@ -265,6 +274,7 @@ mod tests {
             fn visit_raw_expr(&mut self, node: &RawExpr<()>) {
                 self.0.insert(match node {
                     RawExpr::Hole => "hole",
+                    RawExpr::ImplicitDimension(_) => "implicit dimension",
                     RawExpr::IdentityMatrix { .. } => "identity",
                     RawExpr::StandardBasis { .. } => "basis",
                     RawExpr::ZeroMatrix { .. } => "zero",
@@ -287,6 +297,7 @@ mod tests {
         let literal = || Expr::new(RawExpr::NatLiteral(1));
         let expressions = vec![
             Expr::new(RawExpr::Hole),
+            Expr::new(RawExpr::ImplicitDimension(d)),
             Expr::new(RawExpr::IdentityMatrix { dimension: d }),
             Expr::new(RawExpr::StandardBasis {
                 index: literal(),
@@ -332,6 +343,6 @@ mod tests {
         for expression in &expressions {
             visitor.visit_expr(expression);
         }
-        assert_eq!(visitor.0.len(), 15);
+        assert_eq!(visitor.0.len(), 16);
     }
 }

@@ -8,8 +8,13 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
-    Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
-    type_resolver::TypeError, visit_mut::Existence, z3_utils::compare_int,
+    Monop, NaturalEvaluationError, NaturalParameter, Range, RawExpr, SeqOp, Type, TypeExpr,
+    Variable,
+    elaboration::{ElaborationError, elaborate},
+    preprocessing::PreparedExpression,
+    type_resolver::{MaybeTyped, TypeError},
+    visit_mut::Existence,
+    z3_utils::compare_int,
 };
 
 #[derive(Clone)]
@@ -20,12 +25,11 @@ pub enum Z3Object {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToZ3Error {
+    Elaboration(ElaborationError),
     Type(TypeError),
+    Natural(NaturalEvaluationError),
     Unsupported(&'static str),
-    MissingVariableType(Variable),
     MissingImplicitDimension(ImplicitDimension),
-    MissingPowerExponent,
-    MissingCastDimension,
     InvalidOperands(&'static str),
     Shape(&'static str),
     Empty(&'static str),
@@ -36,26 +40,15 @@ pub enum ToZ3Error {
 impl Display for ToZ3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Elaboration(error) => error.fmt(f),
             Self::Type(error) => error.fmt(f),
+            Self::Natural(error) => error.fmt(f),
             Self::Unsupported(message)
             | Self::InvalidOperands(message)
             | Self::Shape(message)
             | Self::Empty(message) => f.write_str(message),
-            Self::MissingVariableType(variable) => {
-                write!(
-                    f,
-                    "variable {} is missing from the type environment",
-                    variable.z3_name()
-                )
-            }
             Self::MissingImplicitDimension(_) => {
                 f.write_str("an implicit matrix dimension is missing from the environment")
-            }
-            Self::MissingPowerExponent => {
-                f.write_str("power exponent is missing from the equality environment")
-            }
-            Self::MissingCastDimension => {
-                f.write_str("cast dimension is missing from the equality environment")
             }
             Self::DimensionOverflow => f.write_str("matrix dimensions overflow usize"),
             Self::InvalidMatrixLiteral => {
@@ -70,6 +63,18 @@ impl Error for ToZ3Error {}
 impl From<TypeError> for ToZ3Error {
     fn from(error: TypeError) -> Self {
         Self::Type(error)
+    }
+}
+
+impl From<ElaborationError> for ToZ3Error {
+    fn from(error: ElaborationError) -> Self {
+        Self::Elaboration(error)
+    }
+}
+
+impl From<NaturalEvaluationError> for ToZ3Error {
+    fn from(error: NaturalEvaluationError) -> Self {
+        Self::Natural(error)
     }
 }
 
@@ -450,41 +455,29 @@ pub fn to_z3(
     environment: &Environment,
     prepared: &PreparedExpression,
 ) -> Result<ToZ3Result, ToZ3Error> {
-    let expression = &prepared.expression;
-    let side_conditions = &prepared.side_conditions;
+    let elaborated = elaborate(environment, prepared)?;
+    let expression = &elaborated.expression;
+    let side_conditions = &elaborated.side_conditions;
 
-    let mut lowering_environment = environment.clone();
-    for condition in side_conditions {
-        assert!(
-            lowering_environment
-                .types
-                .insert(
-                    condition.introduced_variable.clone(),
-                    concrete_side_type(environment, &condition.introduced_type)?,
-                )
-                .is_none(),
-            "synthetic square-root variable collides with an environment variable"
-        );
-    }
-    let expression = lower(&lowering_environment, expression)?;
+    let expression = lower(environment, expression)?;
     let side_conditions = side_conditions
         .iter()
         .map(|condition| {
             Ok(LoweredSideCondition {
                 introduced_variable: condition.introduced_variable.clone(),
                 display_name: condition.display_name.clone(),
-                introduced_type: concrete_side_type(environment, &condition.introduced_type)?,
+                introduced_type: condition.introduced_type.clone(),
                 defining_assertions: condition
                     .defining_assertions
                     .iter()
-                    .map(|assertion| lower(&lowering_environment, assertion))
+                    .map(|assertion| lower(environment, assertion))
                     .collect::<Result<_, _>>()?,
                 existence: match &condition.existence {
                     Existence::Guaranteed => LoweredExistence::Guaranteed,
                     Existence::Checkable(assertions) => LoweredExistence::Checkable(
                         assertions
                             .iter()
-                            .map(|assertion| lower(&lowering_environment, assertion))
+                            .map(|assertion| lower(environment, assertion))
                             .collect::<Result<_, _>>()?,
                     ),
                     Existence::Assumed => LoweredExistence::Assumed,
@@ -498,33 +491,15 @@ pub fn to_z3(
     })
 }
 
-fn concrete_side_type(environment: &Environment, ty: &TypeExpr<()>) -> Result<Type, ToZ3Error> {
-    Ok(match ty {
-        TypeExpr::Bool => Type::Bool,
-        TypeExpr::Nat => Type::Nat,
-        TypeExpr::Int => Type::Int,
-        TypeExpr::Real => Type::Real,
-        TypeExpr::Matrix(rows, cols) => Type::Matrix(
-            concrete_cast_dimension(environment, rows)?,
-            concrete_cast_dimension(environment, cols)?,
-        ),
-        TypeExpr::Seq(element, size) => {
-            let RawExpr::Type(element) = &element.raw else {
-                return Err(ToZ3Error::InvalidOperands(
-                    "sequence element must be a type expression",
-                ));
-            };
-            Type::Seq(Box::new(crate::SeqType {
-                t: concrete_side_type(environment, element)?,
-                n: concrete_cast_dimension(environment, size)?,
-            }))
-        }
-    })
-}
-
-fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ3Error> {
+fn lower<Metadata: MaybeTyped + Clone>(
+    γ: &Environment,
+    e: &Expr<Metadata>,
+) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
         RawExpr::Hole => Err(ToZ3Error::Unsupported("holes are not supported by to_z3")),
+        RawExpr::ImplicitDimension(dimension) => Ok(Z3Object::Z3(
+            Int::from_u64(implicit_dimension(γ, *dimension)?).into(),
+        )),
         RawExpr::IdentityMatrix { dimension } => {
             let dimension = implicit_dimension(γ, *dimension)?;
             matrix_constant(dimension, dimension, |row, col| u64::from(row == col))
@@ -548,24 +523,27 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             "type expressions are not supported by to_z3",
         )),
         RawExpr::Variable(variable) => {
-            let τ = γ
-                .types
-                .get(variable)
-                .ok_or_else(|| ToZ3Error::MissingVariableType(variable.clone()))?;
-            lower_typed_name(variable.z3_name(), τ)
+            let ty = e.meta.get_type()?.concretize(γ)?;
+            lower_typed_name(variable.z3_name(), &ty)
         }
-        RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(Int::from_u64(*value).into())),
+        RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(
+            match e.meta.get_type()? {
+                TypeExpr::Real => Real::from_int(&Int::from_u64(*value)).into(),
+                TypeExpr::Nat | TypeExpr::Int => Int::from_u64(*value).into(),
+                _ => {
+                    return Err(ToZ3Error::InvalidOperands(
+                        "numeric literal has a nonnumeric scalar type",
+                    ));
+                }
+            },
+        )),
         RawExpr::Monop(Monop::Trace, inner) => trace(lower(γ, inner)?),
         RawExpr::Monop(Monop::Det, inner) => determinant(lower(γ, inner)?),
         RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
         RawExpr::Monop(Monop::Transpose, inner) => transpose(lower(γ, inner)?),
         RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
         RawExpr::Binop(Binop::Power, base, exponent) => {
-            let exponent = γ
-                .equalities
-                .get(&exponent.with_default_metadata())
-                .copied()
-                .ok_or(ToZ3Error::MissingPowerExponent)?;
+            let exponent = concrete_nat(γ, exponent)?;
             lower_power(γ, base, exponent)
         }
         RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
@@ -594,21 +572,7 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
 
 /// Lowers a validated core natural-number expression without rerunning the
 /// symbolic preprocessing pipeline.
-pub(crate) fn lower_core_integer<Metadata>(
-    environment: &Environment,
-    expression: &Expr<Metadata>,
-) -> Result<Int, ToZ3Error> {
-    let Z3Object::Z3(expression) = lower(environment, expression)? else {
-        return Err(ToZ3Error::InvalidOperands(
-            "natural expression must lower to an integer",
-        ));
-    };
-    expression.as_int().ok_or(ToZ3Error::InvalidOperands(
-        "natural expression must lower to an integer",
-    ))
-}
-
-fn lower_block_matrix<Metadata>(
+fn lower_block_matrix<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     matrix: &Matrix<Expr<Metadata>>,
 ) -> Result<Z3Object, ToZ3Error> {
@@ -717,7 +681,7 @@ fn numeric_block(value: Z3Object) -> Result<Matrix<Z3Object>, ToZ3Error> {
     }
 }
 
-fn lower_boolean<Metadata>(
+fn lower_boolean<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     expression: &Expr<Metadata>,
 ) -> Result<Bool, ToZ3Error> {
@@ -731,7 +695,7 @@ fn lower_boolean<Metadata>(
     ))
 }
 
-fn lower_boolean_finite<Metadata>(
+fn lower_boolean_finite<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     expressions: &[Expr<Metadata>],
     op: Finop,
@@ -754,7 +718,7 @@ fn lower_boolean_finite<Metadata>(
     }))
 }
 
-fn lower_logic_chain<Metadata>(
+fn lower_logic_chain<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     chain: &LogicChain<Metadata>,
 ) -> Result<Z3Object, ToZ3Error> {
@@ -776,7 +740,7 @@ fn lower_logic_chain<Metadata>(
     }
 }
 
-fn lower_cast<Metadata>(
+fn lower_cast<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     target: &Expr<Metadata>,
     value: &Expr<Metadata>,
@@ -836,14 +800,7 @@ fn concrete_cast_dimension<Metadata>(
     environment: &Environment,
     expression: &Expr<Metadata>,
 ) -> Result<u64, ToZ3Error> {
-    if let RawExpr::NatLiteral(value) = expression.raw {
-        return Ok(value);
-    }
-    environment
-        .equalities
-        .get(&expression.with_default_metadata())
-        .copied()
-        .ok_or(ToZ3Error::MissingCastDimension)
+    environment.evaluate_natural(expression).map_err(Into::into)
 }
 
 fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
@@ -882,8 +839,8 @@ fn implicit_dimension(
     dimension: ImplicitDimension,
 ) -> Result<u64, ToZ3Error> {
     environment
-        .implicit_dimensions
-        .get(&dimension)
+        .natural_assignment
+        .get(&NaturalParameter::ImplicitDimension(dimension))
         .copied()
         .ok_or(ToZ3Error::MissingImplicitDimension(dimension))
 }
@@ -913,7 +870,7 @@ fn matrix_constant(
     }))
 }
 
-fn lower_subscript<Metadata>(
+fn lower_subscript<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     base: &Expr<Metadata>,
     index: &Expr<Metadata>,
@@ -923,7 +880,7 @@ fn lower_subscript<Metadata>(
             "sequence subscript base must be a variable",
         ));
     };
-    let Some(Type::Seq(sequence)) = environment.types.get(variable) else {
+    let Type::Seq(sequence) = base.meta.get_type()?.concretize(environment)? else {
         return Err(ToZ3Error::InvalidOperands(
             "subscripted variable is not a sequence",
         ));
@@ -938,31 +895,23 @@ fn lower_subscript<Metadata>(
 }
 
 pub(crate) fn lower_sequence_element(
-    environment: &Environment,
     variable: &Variable,
     index: u64,
+    sequence: &crate::SeqType,
 ) -> Result<Z3Object, ToZ3Error> {
-    lower_subscript(
-        environment,
-        &Expr::<()>::new(RawExpr::Variable(variable.clone())),
-        &Expr::new(RawExpr::NatLiteral(index)),
-    )
+    if index == 0 || index > sequence.n {
+        return Err(ToZ3Error::InvalidOperands(
+            "sequence index is outside its one-based bounds",
+        ));
+    }
+    lower_typed_name(format!("{}_{{{index}}}", variable.z3_name()), &sequence.t)
 }
 
 fn concrete_nat<Metadata>(
     environment: &Environment,
     expression: &Expr<Metadata>,
 ) -> Result<u64, ToZ3Error> {
-    if let RawExpr::NatLiteral(value) = expression.raw {
-        return Ok(value);
-    }
-    environment
-        .equalities
-        .get(&expression.with_default_metadata())
-        .copied()
-        .ok_or(ToZ3Error::Unsupported(
-            "sequence bound is missing from the equality environment",
-        ))
+    environment.evaluate_natural(expression).map_err(Into::into)
 }
 
 fn transpose(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
@@ -984,7 +933,7 @@ fn transpose(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
     }))
 }
 
-fn lower_sequence<Metadata>(
+fn lower_sequence<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     op: SeqOp,
     range: &Range<Metadata>,
@@ -1010,15 +959,16 @@ fn lower_sequence<Metadata>(
     }
 }
 
-fn substitute_index<Metadata>(
+fn substitute_index<Metadata: Clone>(
     expression: &Expr<Metadata>,
     variable: &Variable,
     value: u64,
-) -> Expr<()> {
+) -> Expr<Metadata> {
     let recurse = |expression: &Expr<Metadata>| substitute_index(expression, variable, value);
     let raw = match &expression.raw {
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
+        RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
             dimension: *dimension,
         },
@@ -1070,20 +1020,20 @@ fn substitute_index<Metadata>(
                 to: recurse(&range.to),
             },
             if range.index_variable == *variable {
-                body.with_default_metadata()
+                crate::deep_clone::deep_clone(body)
             } else {
                 recurse(body)
             },
         ),
     };
-    Expr::new(raw)
+    Expr::with_metadata(expression.meta.clone(), raw)
 }
 
-fn substitute_type<Metadata>(
+fn substitute_type<Metadata: Clone>(
     ty: &TypeExpr<Metadata>,
     variable: &Variable,
     value: u64,
-) -> TypeExpr<()> {
+) -> TypeExpr<Metadata> {
     match ty {
         TypeExpr::Bool => TypeExpr::Bool,
         TypeExpr::Nat => TypeExpr::Nat,
@@ -1100,7 +1050,7 @@ fn substitute_type<Metadata>(
     }
 }
 
-fn lower_membership<Metadata>(
+fn lower_membership<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     left: &Expr<Metadata>,
     right: &Expr<Metadata>,
@@ -1108,10 +1058,8 @@ fn lower_membership<Metadata>(
     let (RawExpr::Variable(variable), RawExpr::Type(expected)) = (&left.raw, &right.raw) else {
         return Ok(Z3Object::Z3(Bool::from_bool(false).into()));
     };
-    let Some(actual) = environment.types.get(variable) else {
-        return Ok(Z3Object::Z3(Bool::from_bool(false).into()));
-    };
-    let result = match (actual, expected) {
+    let actual = left.meta.get_type()?.concretize(environment)?;
+    let result = match (&actual, expected) {
         (Type::Bool, TypeExpr::Bool)
         | (Type::Int, TypeExpr::Int)
         | (Type::Real, TypeExpr::Real) => Bool::from_bool(true),
@@ -1195,25 +1143,15 @@ fn lower_dimension<Metadata>(
     expression: &Expr<Metadata>,
     axis: &str,
 ) -> Result<Int, ToZ3Error> {
-    let Z3Object::Z3(expression) = lower(environment, expression)? else {
-        return Err(ToZ3Error::InvalidOperands(match axis {
-            "row" => "matrix row dimension must be a natural-number scalar",
-            _ => "matrix column dimension must be a natural-number scalar",
-        }));
-    };
-    expression
-        .as_int()
-        .ok_or(ToZ3Error::InvalidOperands(match axis {
-            "row" => "matrix row dimension must be a natural-number scalar",
-            _ => "matrix column dimension must be a natural-number scalar",
-        }))
+    let _ = axis;
+    Ok(Int::from_u64(environment.evaluate_natural(expression)?))
 }
 
 fn dimension_name(variable: &Variable, axis: &str) -> String {
     format!("{}_{{{axis}}}", variable.z3_name())
 }
 
-fn lower_cmp_chain<Metadata>(
+fn lower_cmp_chain<Metadata: MaybeTyped + Clone>(
     γ: &Environment,
     chain: &CmpChain<Metadata>,
 ) -> Result<Z3Object, ToZ3Error> {
@@ -1237,7 +1175,7 @@ fn lower_cmp_chain<Metadata>(
     Ok(Z3Object::Z3(result.into()))
 }
 
-fn lower_power<Metadata>(
+fn lower_power<Metadata: MaybeTyped + Clone>(
     γ: &Environment,
     base: &Expr<Metadata>,
     exponent: u64,
@@ -1307,7 +1245,7 @@ fn matrix_identity(matrix: &Matrix<Z3Object>) -> Result<Matrix<Z3Object>, ToZ3Er
     })
 }
 
-fn lower_finite<Metadata>(
+fn lower_finite<Metadata: MaybeTyped + Clone>(
     γ: &Environment,
     expressions: &[Expr<Metadata>],
     operation: fn(Z3Object, Z3Object) -> Result<Z3Object, ToZ3Error>,
@@ -1344,12 +1282,52 @@ mod tests {
     };
 
     use crate::{
-        Binop, Cmp, CmpChain, Expr, Finop, Matrix, Monop, RawExpr, SeqType, Type, TypeExpr,
-        Variable, from_tex,
+        Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Matrix, Monop, NaturalParameter,
+        RawExpr, SeqType, Type, TypeExpr, Variable, from_tex,
         preprocessing::prepare_expression,
-        to_z3::{Environment, ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
+        to_z3::{ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
+        type_resolver::{
+            OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata, type_expr,
+        },
         visit_mut::VisitContext,
     };
+
+    #[derive(Clone, Default)]
+    struct Environment {
+        types: HashMap<Variable, Type>,
+        equalities: HashMap<Expr<()>, u64>,
+        implicit_dimensions: HashMap<ImplicitDimension, u64>,
+    }
+
+    impl Environment {
+        fn symbolic_types(&self) -> SymbolicTypeEnvironment {
+            let mut types = self
+                .types
+                .iter()
+                .map(|(variable, ty)| (variable.clone(), type_expr(ty.clone())))
+                .collect::<HashMap<_, _>>();
+            for expression in self.equalities.keys() {
+                if let RawExpr::Variable(variable) = &expression.raw {
+                    types.entry(variable.clone()).or_insert(TypeExpr::Nat);
+                }
+            }
+            SymbolicTypeEnvironment { types }
+        }
+
+        fn assignment(&self) -> crate::Environment {
+            let mut natural_assignment = self
+                .implicit_dimensions
+                .iter()
+                .map(|(dimension, value)| (NaturalParameter::ImplicitDimension(*dimension), *value))
+                .collect::<HashMap<_, _>>();
+            for (expression, value) in &self.equalities {
+                if let RawExpr::Variable(variable) = &expression.raw {
+                    natural_assignment.insert(NaturalParameter::Variable(variable.clone()), *value);
+                }
+            }
+            crate::Environment { natural_assignment }
+        }
+    }
 
     const POSITIVE: VisitContext = VisitContext {
         logical_polarity: true,
@@ -1368,8 +1346,8 @@ mod tests {
         expression: &Expr<Metadata>,
         context: VisitContext,
     ) -> Result<ToZ3Result, ToZ3Error> {
-        let prepared = prepare_expression(environment, expression, context)?;
-        prepared_to_z3(environment, &prepared)
+        let prepared = prepare_expression(&environment.symbolic_types(), expression, context)?;
+        prepared_to_z3(&environment.assignment(), &prepared)
     }
 
     fn to_z3<Metadata: Clone>(environment: Environment, expression: Expr<Metadata>) -> Z3Object {
@@ -1707,7 +1685,9 @@ mod tests {
                 matrix_target("m", "n"),
                 value(),
             )),
-            ToZ3Error::MissingCastDimension,
+            ToZ3Error::Natural(crate::NaturalEvaluationError::MissingAssignment(
+                NaturalParameter::Variable(Variable::new("m")),
+            )),
         );
         assert_lowering_error(
             environment(),
@@ -1808,14 +1788,26 @@ mod tests {
                 .collect(),
             ..Environment::default()
         };
+        let types = environment.symbolic_types();
+        let runtime = environment.assignment();
+        let rules = OperatorTypeRules::core();
+        let mut iff = expression(r"p \iff q").with_default_metadata::<TypedMetadata>();
+        TypeResolver::new(&types, &rules)
+            .resolve(&mut iff, POSITIVE)
+            .unwrap();
+        let mut implications =
+            expression(r"p \implies q \implies r").with_default_metadata::<TypedMetadata>();
+        TypeResolver::new(&types, &rules)
+            .resolve(&mut implications, POSITIVE)
+            .unwrap();
         assert_eq!(
-            super::lower(&environment, &expression(r"p \iff q")).err(),
+            super::lower(&runtime, &iff).err(),
             Some(ToZ3Error::Unsupported(
                 "biconditional must be lowered before to_z3"
             ))
         );
         assert_eq!(
-            super::lower(&environment, &expression(r"p \implies q \implies r")).err(),
+            super::lower(&runtime, &implications).err(),
             Some(ToZ3Error::Unsupported(
                 "multi-edge logic chains must be lowered before to_z3"
             ))
@@ -1856,7 +1848,14 @@ mod tests {
             Expr::new(RawExpr::Type(TypeExpr::Real)),
         ));
         assert_eq!(
-            scalar(Environment::default(), membership).to_string(),
+            scalar(
+                Environment {
+                    types: HashMap::from([(Variable::new("x"), Type::Matrix(2, 2),)]),
+                    ..Environment::default()
+                },
+                membership,
+            )
+            .to_string(),
             "false"
         );
     }
@@ -1867,7 +1866,7 @@ mod tests {
         let n = Variable::new("n");
         let d = Variable::new("d");
         let p = Variable::new("p");
-        let environment = Environment {
+        let environment = |p_value| Environment {
             types: [
                 (a.clone(), Type::Matrix(3, 8)),
                 (n.clone(), Type::Nat),
@@ -1877,12 +1876,16 @@ mod tests {
             .into_iter()
             .collect(),
             implicit_dimensions: HashMap::new(),
-            equalities: Default::default(),
+            equalities: HashMap::from([
+                (Expr::new(RawExpr::Variable(n.clone())), 3),
+                (Expr::new(RawExpr::Variable(d.clone())), 4),
+                (Expr::new(RawExpr::Variable(p.clone())), p_value),
+            ]),
         };
         let variable = |variable| Expr::new(RawExpr::Variable(variable));
         let membership = Expr::new(RawExpr::Binop(
             Binop::ElementOf,
-            variable(a),
+            variable(a.clone()),
             Expr::new(RawExpr::Type(TypeExpr::Matrix(
                 variable(n.clone()),
                 Expr::new(RawExpr::Finop(
@@ -1891,21 +1894,15 @@ mod tests {
                 )),
             ))),
         ));
-        let assertion = scalar(environment, membership).as_bool().unwrap();
+        let assertion = scalar(environment(4), membership.clone())
+            .as_bool()
+            .unwrap();
         let solver = Solver::new();
         solver.assert(assertion);
-        solver.push();
-        solver.assert(Int::new_const(n.z3_name()).eq(3));
-        solver.assert(Int::new_const(d.z3_name()).eq(4));
-        solver.assert(Int::new_const(p.z3_name()).eq(4));
         assert_eq!(solver.check(), SatResult::Sat);
-        solver.pop(1);
-        solver.push();
-        solver.assert(Int::new_const(n.z3_name()).eq(3));
-        solver.assert(Int::new_const(d.z3_name()).eq(4));
-        solver.assert(Int::new_const(p.z3_name()).eq(5));
+        let solver = Solver::new();
+        solver.assert(scalar(environment(5), membership).as_bool().unwrap());
         assert_eq!(solver.check(), SatResult::Unsat);
-        solver.pop(1);
     }
 
     #[test]
@@ -2176,7 +2173,9 @@ mod tests {
                 ..Environment::default()
             },
             power,
-            ToZ3Error::MissingPowerExponent,
+            ToZ3Error::Natural(crate::NaturalEvaluationError::MissingAssignment(
+                NaturalParameter::Variable(Variable::new("n")),
+            )),
         );
     }
 

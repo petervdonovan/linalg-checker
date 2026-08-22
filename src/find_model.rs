@@ -195,7 +195,7 @@ impl TestCase<NotSolvedYet> {
                         .chain(prepared_sentences.iter())
                         .cloned()
                         .collect::<Vec<_>>();
-                    match solve_prepared_environment(&environment, &prepared)? {
+                    match solve_prepared_environment(&environment, &symbolic_types, &prepared)? {
                         ModelOrUnsat::Unsat => {}
                         result @ (ModelOrUnsat::Model(_, _) | ModelOrUnsat::Unknown) => {
                             conclusion = Some(result);

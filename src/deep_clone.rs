@@ -3,6 +3,7 @@ use crate::{CmpChain, Expr, LogicChain, Matrix, Range, RawExpr, TypeExpr};
 pub(crate) fn deep_clone<Metadata: Clone>(expression: &Expr<Metadata>) -> Expr<Metadata> {
     let raw = match &expression.raw {
         RawExpr::Hole => RawExpr::Hole,
+        RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
             dimension: *dimension,
         },

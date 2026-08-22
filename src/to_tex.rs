@@ -43,6 +43,12 @@ fn expr_with_mode<Metadata>(
 ) -> fmt::Result {
     match &e.raw {
         crate::RawExpr::Hole => write!(f, r"\square"),
+        crate::RawExpr::ImplicitDimension(dimension) if verbose => {
+            write!(f, r"\text{{dim}}_{{{}}}", dimension.id())
+        }
+        crate::RawExpr::ImplicitDimension(_) => {
+            panic!("implicit dimension leaves cannot be rendered in ordinary TeX")
+        }
         crate::RawExpr::IdentityMatrix { dimension } if verbose => {
             write!(f, "I_{{\\text{{dim}}_{}}}", dimension.id())
         }

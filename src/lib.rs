@@ -1,6 +1,7 @@
 #![allow(mixed_script_confusables)]
 
 mod deep_clone;
+pub mod elaboration;
 pub mod enumerable_envspec;
 pub mod find_model;
 pub mod find_model_given_environment;
@@ -19,6 +20,8 @@ mod z3_utils;
 
 use std::{
     collections::HashMap,
+    error::Error,
+    fmt,
     ops::Deref,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
@@ -59,6 +62,48 @@ pub struct SeqType {
     pub n: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NaturalParameter {
+    Variable(Variable),
+    ImplicitDimension(ImplicitDimension),
+}
+
+impl NaturalParameter {
+    pub(crate) fn z3_name(&self) -> String {
+        match self {
+            Self::Variable(variable) => variable.z3_name(),
+            Self::ImplicitDimension(dimension) => dimension.z3_name(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NaturalEvaluationError {
+    MissingAssignment(NaturalParameter),
+    UnsupportedSyntax(&'static str),
+    EmptyOperation(&'static str),
+    NotANumeral,
+    Overflow,
+}
+
+impl fmt::Display for NaturalEvaluationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingAssignment(parameter) => {
+                write!(f, "missing natural assignment for {parameter:?}")
+            }
+            Self::UnsupportedSyntax(message) => f.write_str(message),
+            Self::EmptyOperation(operation) => {
+                write!(f, "natural {operation} cannot be empty")
+            }
+            Self::NotANumeral => f.write_str("natural expression did not simplify to a numeral"),
+            Self::Overflow => f.write_str("natural expression is outside the u64 range"),
+        }
+    }
+}
+
+impl Error for NaturalEvaluationError {}
+
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Clone)]
 pub enum TypeExpr<Metadata> {
     Bool,
@@ -85,6 +130,30 @@ impl<Metadata> TypeExpr<Metadata> {
             ),
         }
     }
+
+    pub fn concretize(&self, environment: &Environment) -> Result<Type, NaturalEvaluationError> {
+        match self {
+            Self::Bool => Ok(Type::Bool),
+            Self::Nat => Ok(Type::Nat),
+            Self::Int => Ok(Type::Int),
+            Self::Real => Ok(Type::Real),
+            Self::Matrix(rows, cols) => Ok(Type::Matrix(
+                environment.evaluate_natural(rows)?,
+                environment.evaluate_natural(cols)?,
+            )),
+            Self::Seq(element, size) => {
+                let RawExpr::Type(element) = &element.raw else {
+                    return Err(NaturalEvaluationError::UnsupportedSyntax(
+                        "a sequence element must be a type expression",
+                    ));
+                };
+                Ok(Type::Seq(Box::new(SeqType {
+                    t: element.concretize(environment)?,
+                    n: environment.evaluate_natural(size)?,
+                })))
+            }
+        }
+    }
 }
 
 impl From<Type> for TypeExpr<()> {
@@ -106,45 +175,18 @@ impl From<Type> for TypeExpr<()> {
     }
 }
 
-impl TypeExpr<()> {
-    pub fn concrete(&self) -> Option<Type> {
-        match self {
-            Self::Bool => Some(Type::Bool),
-            Self::Nat => Some(Type::Nat),
-            Self::Int => Some(Type::Int),
-            Self::Real => Some(Type::Real),
-            Self::Matrix(rows, cols) => {
-                let (RawExpr::NatLiteral(rows), RawExpr::NatLiteral(cols)) = (&rows.raw, &cols.raw)
-                else {
-                    return None;
-                };
-                Some(if (*rows, *cols) == (1, 1) {
-                    Type::Real
-                } else {
-                    Type::Matrix(*rows, *cols)
-                })
-            }
-            Self::Seq(element, size) => {
-                let RawExpr::Type(element) = &element.raw else {
-                    return None;
-                };
-                let RawExpr::NatLiteral(n) = size.raw else {
-                    return None;
-                };
-                Some(Type::Seq(Box::new(SeqType {
-                    t: element.concrete()?,
-                    n,
-                })))
-            }
-        }
-    }
-}
-
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Environment {
-    pub types: HashMap<Variable, Type>,
-    pub equalities: HashMap<Expr<()>, u64>,
-    pub implicit_dimensions: HashMap<ImplicitDimension, u64>,
+    pub natural_assignment: HashMap<NaturalParameter, u64>,
+}
+
+impl Environment {
+    pub fn evaluate_natural<Metadata>(
+        &self,
+        expression: &Expr<Metadata>,
+    ) -> Result<u64, NaturalEvaluationError> {
+        crate::z3_utils::evaluate_natural(expression, &self.natural_assignment)
+    }
 }
 
 pub type Model = Vec<Expr<()>>;
@@ -288,6 +330,7 @@ impl<Metadata> Expr<Metadata> {
     pub fn with_default_metadata<NewMetadata: Default>(&self) -> Expr<NewMetadata> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
+            RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
             RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
                 dimension: *dimension,
             },
@@ -434,6 +477,9 @@ where
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
     Hole,
+    /// An internal natural-valued leaf used to preserve a context-dependent
+    /// matrix constant's dimension through symbolic typing.
+    ImplicitDimension(ImplicitDimension),
     IdentityMatrix {
         dimension: ImplicitDimension,
     },
@@ -460,7 +506,12 @@ pub enum RawExpr<Metadata> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, Finop, ImplicitDimension, RawExpr, TypeExpr, Variable};
+    use std::collections::HashMap;
+
+    use super::{
+        Environment, Expr, Finop, ImplicitDimension, NaturalEvaluationError, NaturalParameter,
+        RawExpr, Type, TypeExpr, Variable,
+    };
 
     struct MetadataWithoutClone;
 
@@ -474,6 +525,69 @@ mod tests {
     fn default_metadata_preserves_holes() {
         let expression: Expr<()> = Expr::with_metadata(1, RawExpr::Hole).with_default_metadata();
         assert!(matches!(expression.raw, RawExpr::Hole));
+    }
+
+    #[test]
+    fn natural_parameters_keep_variables_and_nonces_distinct() {
+        let dimension = ImplicitDimension::fresh();
+        assert_ne!(
+            NaturalParameter::Variable(Variable::new(dimension.z3_name())),
+            NaturalParameter::ImplicitDimension(dimension)
+        );
+    }
+
+    #[test]
+    fn evaluates_natural_expressions_and_concretizes_symbolic_types() {
+        let n = Variable::new("n");
+        let dimension = ImplicitDimension::fresh();
+        let environment = Environment {
+            natural_assignment: HashMap::from([
+                (NaturalParameter::Variable(n.clone()), 2),
+                (NaturalParameter::ImplicitDimension(dimension), 1),
+            ]),
+        };
+        let rows: Expr<()> = Expr::new(RawExpr::ImplicitDimension(dimension));
+        let cols: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                Expr::new(RawExpr::Variable(n)),
+                Expr::new(RawExpr::NatLiteral(1)),
+            ],
+        ));
+        assert_eq!(environment.evaluate_natural(&cols), Ok(3));
+        assert_eq!(
+            TypeExpr::Matrix(rows, cols).concretize(&environment),
+            Ok(Type::Matrix(1, 3))
+        );
+
+        assert_eq!(
+            TypeExpr::<()>::Matrix(
+                Expr::new(RawExpr::NatLiteral(1)),
+                Expr::new(RawExpr::NatLiteral(1)),
+            )
+            .concretize(&Environment::default()),
+            Ok(Type::Matrix(1, 1))
+        );
+    }
+
+    #[test]
+    fn natural_evaluation_reports_missing_assignments_and_overflow() {
+        let missing: Expr<()> = Expr::new(RawExpr::Variable(Variable::new("n")));
+        assert!(matches!(
+            Environment::default().evaluate_natural(&missing),
+            Err(NaturalEvaluationError::MissingAssignment(_))
+        ));
+        let overflow: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Times,
+            vec![
+                Expr::new(RawExpr::NatLiteral(u64::MAX)),
+                Expr::new(RawExpr::NatLiteral(2)),
+            ],
+        ));
+        assert_eq!(
+            Environment::default().evaluate_natural(&overflow),
+            Err(NaturalEvaluationError::Overflow)
+        );
     }
 
     #[test]

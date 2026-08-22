@@ -10,8 +10,8 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, RawExpr, SeqOp,
-    SeqType, Type, TypeExpr, Variable,
+    Binop, CmpChain, Environment, Expr, Finop, ImplicitDimension, Monop, NaturalEvaluationError,
+    NaturalParameter, RawExpr, SeqOp, TypeExpr, Variable,
     preprocessing::PreparedExpression,
     preprocessing::prepare_expression,
     type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata},
@@ -122,17 +122,13 @@ enum Shape {
 
 pub struct EnvironmentIterator {
     solver: Solver,
-    variable_types: BTreeMap<Variable, Shape>,
-    implicit_dimensions: Vec<(ImplicitDimension, Int)>,
-    dimensions: Vec<Int>,
-    known_equalities: HashMap<Expr<()>, u64>,
-    projections: Vec<(Expr<()>, Int)>,
+    parameters: Vec<(NaturalParameter, Int)>,
+    parameter_values: Vec<Int>,
     dimension_sum: u64,
     max_dimension_sum: u64,
     dimensionless_yielded: bool,
     finished: bool,
     dimension_bound_is_exhaustive: bool,
-    hidden_variables: BTreeSet<Variable>,
 }
 
 pub fn extract_environment_iterator<Metadata>(
@@ -256,7 +252,6 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     let CompiledSymbolicTypes {
         variable_types,
         natural_symbols,
-        natural_environment,
     } = compile_symbolic_types(
         &mut solver,
         symbolic_types,
@@ -264,63 +259,62 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         &implicit_dimensions,
     )?;
     assert_positive_matrix_dimensions(&mut solver, &variable_types);
-    let (known_equalities, projections) = {
-        let mut projections = BTreeMap::new();
+    {
         let mut context = DimensionConstraintBuilder {
             solver: &mut solver,
             variable_types: &variable_types,
             natural_symbols: &natural_symbols,
-            natural_environment: &natural_environment,
             implicit_dimensions: &implicit_dimensions,
-            projections: &mut projections,
             mode: ConstraintMode::Permanent,
         };
         for assumption in &assumptions {
             context.constrain_top_level_assertion(assumption)?;
         }
         run_dimension_constraint_visitors(&mut context, &assumptions)?;
-        let known = context.known_equalities(&assumptions)?;
         check_base_constraints(context.solver)?;
         context.mode = ConstraintMode::Contextual;
         run_dimension_constraint_visitors(&mut context, &contextual_expressions)?;
         check_contextual_constraints(context.solver)?;
-        (known, projections.into_iter().collect())
-    };
+    }
 
-    let dimensions: Vec<Int> = variable_types
+    let parameters = natural_symbols.into_iter().collect::<Vec<_>>();
+    let parameter_values = parameters
         .iter()
-        .filter(|(variable, _)| !hidden_variables.contains(*variable))
-        .flat_map(|(_, shape)| shape_dimensions(shape))
-        .chain(implicit_dimensions.values().cloned())
-        .collect();
-    let finished = !dimensions.is_empty() && max_dimension == 0;
-    let dimension_count = u64::try_from(dimensions.len()).map_err(|_| {
-        ShapeError::Unsupported("too many environment dimensions to enumerate".to_owned())
-    })?;
-    let max_dimension_sum = dimension_count.checked_mul(max_dimension).ok_or_else(|| {
-        ShapeError::Unsupported("maximum environment dimension sum overflows u64".to_owned())
-    })?;
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let structural_dimensions = variable_types
+        .values()
+        .flat_map(shape_dimensions)
+        .collect::<Vec<_>>();
+    let mut exhaustiveness_values = parameter_values.clone();
+    exhaustiveness_values.extend(structural_dimensions.iter().cloned());
     let dimension_bound_is_exhaustive =
-        dimension_bound_is_exhaustive(&mut solver, &dimensions, max_dimension);
+        dimension_bound_is_exhaustive(&mut solver, &exhaustiveness_values, max_dimension);
+    let max_dimension_value = Int::from_u64(max_dimension);
+    for value in &parameter_values {
+        solver.assert(value.le(&max_dimension_value));
+    }
+    for dimension in &structural_dimensions {
+        solver.assert(dimension.le(&max_dimension_value));
+    }
+    let finished = false;
+    let parameter_count = u64::try_from(parameter_values.len()).map_err(|_| {
+        ShapeError::Unsupported("too many natural parameters to enumerate".to_owned())
+    })?;
+    let max_dimension_sum = parameter_count.checked_mul(max_dimension).ok_or_else(|| {
+        ShapeError::Unsupported("maximum natural-parameter sum overflows u64".to_owned())
+    })?;
     let mut iterator = EnvironmentIterator {
         solver,
-        variable_types,
-        implicit_dimensions: implicit_dimensions.into_iter().collect(),
-        dimensions,
-        known_equalities,
-        projections,
-        dimension_sum: dimension_count,
+        parameters,
+        parameter_values,
+        dimension_sum: 0,
         max_dimension_sum,
         dimensionless_yielded: false,
         finished,
         dimension_bound_is_exhaustive,
-        hidden_variables,
     };
-    if !iterator.dimensions.is_empty() && !iterator.finished {
-        let max_dimension = Int::from_u64(max_dimension);
-        for dimension in &iterator.dimensions {
-            iterator.solver.assert(dimension.le(&max_dimension));
-        }
+    if !iterator.parameter_values.is_empty() && !iterator.finished {
         iterator.push_dimension_sum();
     }
     Ok(iterator)
@@ -363,7 +357,7 @@ fn collect_environment_specification(
     };
     for assumption in assumptions {
         collect_variables(assumption, &mut specification.variables)?;
-        collect_range_bound_variables(assumption, &mut specification.dimension_variables);
+        collect_natural_position_variables(assumption, &mut specification.dimension_variables);
         let RawExpr::Binop(Binop::ElementOf, left, right) = &assumption.raw else {
             continue;
         };
@@ -390,8 +384,7 @@ fn collect_environment_specification(
 
 struct CompiledSymbolicTypes {
     variable_types: BTreeMap<Variable, Shape>,
-    natural_symbols: BTreeMap<Variable, Int>,
-    natural_environment: Environment,
+    natural_symbols: BTreeMap<NaturalParameter, Int>,
 }
 
 fn compile_symbolic_types(
@@ -416,7 +409,12 @@ fn compile_symbolic_types(
 
     let mut natural_symbols = implicit_dimensions
         .iter()
-        .map(|(dimension, symbol)| (Variable::new(dimension.z3_name()), symbol.clone()))
+        .map(|(dimension, symbol)| {
+            (
+                NaturalParameter::ImplicitDimension(*dimension),
+                symbol.clone(),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     for variable in natural_variables {
         if let Some(ty) = symbolic_types.types.get(&variable)
@@ -427,49 +425,27 @@ fn compile_symbolic_types(
                 variable_z3_name(&variable)
             )));
         }
-        let symbol = implicit_dimensions
-            .iter()
-            .find(|(dimension, _)| variable.name == dimension.z3_name())
-            .map(|(_, symbol)| symbol.clone())
-            .unwrap_or_else(|| Int::new_const(variable_z3_name(&variable)));
+        let parameter = NaturalParameter::Variable(variable.clone());
+        let symbol = Int::new_const(parameter.z3_name());
         solver.assert(symbol.ge(0));
-        if let Some(previous) = natural_symbols.insert(variable.clone(), symbol.clone()) {
-            assert_eq!(
-                previous, symbol,
-                "implicit dimension names must map to their nonce symbols"
-            );
-        }
+        assert!(natural_symbols.insert(parameter, symbol).is_none());
     }
 
-    let natural_environment = Environment {
-        types: natural_symbols
-            .keys()
-            .cloned()
-            .map(|variable| (variable, Type::Nat))
-            .collect(),
-        ..Environment::default()
-    };
-    for (variable, symbol) in &natural_symbols {
+    for (parameter, symbol) in &natural_symbols {
         assert_eq!(
             symbol,
-            &Int::new_const(variable.z3_name()),
+            &Int::new_const(parameter.z3_name()),
             "natural lowering must reuse the environment-query symbol names"
         );
     }
 
     let variable_types = all_types
         .into_iter()
-        .map(|(variable, ty)| {
-            Ok((
-                variable,
-                compile_type_expr(&ty, &natural_symbols, &natural_environment)?,
-            ))
-        })
+        .map(|(variable, ty)| Ok((variable, compile_type_expr(&ty, &natural_symbols)?)))
         .collect::<Result<_, ShapeError>>()?;
     Ok(CompiledSymbolicTypes {
         variable_types,
         natural_symbols,
-        natural_environment,
     })
 }
 
@@ -520,32 +496,19 @@ impl EnvironmentIterator {
     fn push_dimension_sum(&mut self) {
         self.solver.push();
         self.solver
-            .assert(Int::add(&self.dimensions).eq(Int::from_u64(self.dimension_sum)));
+            .assert(Int::add(&self.parameter_values).eq(Int::from_u64(self.dimension_sum)));
     }
 
     fn environment_from_model(&self, model: &z3::Model) -> Result<Environment, ShapeError> {
-        let mut environment = Environment {
-            equalities: self.known_equalities.clone(),
-            ..Environment::default()
-        };
-        for (variable, shape) in &self.variable_types {
-            if self.hidden_variables.contains(variable) {
-                continue;
-            }
-            let ty = concrete_type(model, shape)?;
-            environment.types.insert(variable.clone(), ty);
-        }
-        for (dimension, expression) in &self.implicit_dimensions {
-            environment
-                .implicit_dimensions
-                .insert(*dimension, model_u64(model, expression)?);
-        }
-        for (expression, projection) in &self.projections {
-            environment
-                .equalities
-                .insert(expression.clone(), model_u64(model, projection)?);
-        }
-        Ok(environment)
+        Ok(Environment {
+            natural_assignment: self
+                .parameters
+                .iter()
+                .map(|(parameter, expression)| {
+                    Ok((parameter.clone(), model_u64(model, expression)?))
+                })
+                .collect::<Result<_, ShapeError>>()?,
+        })
     }
 
     fn advance_dimension_sum(&mut self) {
@@ -566,20 +529,34 @@ impl Iterator for EnvironmentIterator {
         if self.finished {
             return None;
         }
-        if self.dimensions.is_empty() {
+        if self.parameter_values.is_empty() {
             if self.dimensionless_yielded {
                 self.finished = true;
                 return None;
             }
             self.dimensionless_yielded = true;
-            return Some(
-                self.environment_from_model(
-                    &self
-                        .solver
-                        .get_model()
-                        .expect("satisfiable solver must have a model"),
+            return match self.solver.check() {
+                SatResult::Sat => Some(
+                    self.environment_from_model(
+                        &self
+                            .solver
+                            .get_model()
+                            .expect("satisfiable solver must have a model"),
+                    ),
                 ),
-            );
+                SatResult::Unsat => {
+                    self.finished = true;
+                    None
+                }
+                SatResult::Unknown => {
+                    self.finished = true;
+                    Some(Err(ShapeError::Unknown(
+                        self.solver
+                            .get_reason_unknown()
+                            .unwrap_or_else(|| "unknown reason".to_owned()),
+                    )))
+                }
+            };
         }
 
         loop {
@@ -597,9 +574,8 @@ impl Iterator for EnvironmentIterator {
                         }
                     };
                     let blocker = self
-                        .dimensions
+                        .parameter_values
                         .iter()
-                        .chain(self.projections.iter().map(|(_, value)| value))
                         .map(|expression| {
                             let value = model
                                 .eval(expression, false)
@@ -648,6 +624,9 @@ fn collect_implicit_dimensions<Metadata>(
 ) {
     struct Collector<'a>(&'a mut BTreeSet<ImplicitDimension>);
     impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_implicit_dimension(&mut self, dimension: &ImplicitDimension) {
+            self.0.insert(*dimension);
+        }
         fn visit_raw_expr_identity_matrix(&mut self, dimension: &ImplicitDimension) {
             self.0.insert(*dimension);
         }
@@ -680,10 +659,8 @@ enum ConstraintMode {
 struct DimensionConstraintBuilder<'a> {
     solver: &'a mut Solver,
     variable_types: &'a BTreeMap<Variable, Shape>,
-    natural_symbols: &'a BTreeMap<Variable, Int>,
-    natural_environment: &'a Environment,
+    natural_symbols: &'a BTreeMap<NaturalParameter, Int>,
     implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
-    projections: &'a mut BTreeMap<Expr<()>, Int>,
     mode: ConstraintMode,
 }
 
@@ -724,53 +701,10 @@ impl DimensionConstraintBuilder<'_> {
         self.assert_if_relevant(left.eq(right), &[left, right]);
     }
 
-    fn record_projection(&mut self, expression: Expr<()>, value: Int, dimensions: &[&Int]) {
-        if matches!(self.mode, ConstraintMode::Permanent)
-            || dimensions
-                .iter()
-                .any(|dimension| self.is_implicit_dimension(dimension))
-        {
-            self.projections.insert(expression, value);
-        }
-    }
-
     fn assert_typing_failure(&mut self, shape: &Shape) {
         if matches!(self.mode, ConstraintMode::Permanent) || self.shape_depends_on_implicit(shape) {
             self.solver.assert(Bool::from_bool(false));
         }
-    }
-
-    fn known_equalities<Metadata>(
-        &self,
-        assumptions: &[Expr<Metadata>],
-    ) -> Result<HashMap<Expr<()>, u64>, ShapeError> {
-        let mut equalities = HashMap::new();
-        for assumption in assumptions {
-            let RawExpr::CmpChain(CmpChain { start, assertions }) = &assumption.raw else {
-                continue;
-            };
-            let [(Cmp::Eq, right)] = assertions.as_slice() else {
-                continue;
-            };
-            let pair = match (&start.raw, &right.raw) {
-                (_, RawExpr::NatLiteral(value)) if self.lower_nat(start)?.is_some() => {
-                    Some((start.with_default_metadata(), *value))
-                }
-                (RawExpr::NatLiteral(value), _) if self.lower_nat(right)?.is_some() => {
-                    Some((right.with_default_metadata(), *value))
-                }
-                _ => None,
-            };
-            if let Some((expression, value)) = pair
-                && let Some(previous) = equalities.insert(expression, value)
-                && previous != value
-            {
-                return Err(ShapeError::Unsat(
-                    "a natural expression has conflicting known values".to_owned(),
-                ));
-            }
-        }
-        Ok(equalities)
     }
 
     fn constrain_top_level_assertion<Metadata>(
@@ -804,7 +738,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn lower_nat<Metadata>(&self, expression: &Expr<Metadata>) -> Result<Option<Int>, ShapeError> {
-        lower_nat_via_to_z3(expression, self.natural_symbols, self.natural_environment)
+        lower_nat_via_to_z3(expression, self.natural_symbols)
     }
 
     fn shape_of<Metadata: MaybeTyped>(
@@ -819,7 +753,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn shape_from_resolved_type(&self, ty: &TypeExpr<()>) -> Result<Shape, ShapeError> {
-        compile_type_expr(ty, self.natural_symbols, self.natural_environment)
+        compile_type_expr(ty, self.natural_symbols)
     }
 
     fn constrain_shape_type<Metadata>(
@@ -843,16 +777,6 @@ impl DimensionConstraintBuilder<'_> {
                         "matrix column dimension is not linear natural arithmetic".to_owned(),
                     )
                 })?;
-                self.record_projection(
-                    expected_rows.with_default_metadata(),
-                    row_value.clone(),
-                    &[rows, &row_value],
-                );
-                self.record_projection(
-                    expected_cols.with_default_metadata(),
-                    col_value.clone(),
-                    &[cols, &col_value],
-                );
                 self.assert_dimensions_equal(rows, &row_value);
                 self.assert_dimensions_equal(cols, &col_value);
                 Ok(())
@@ -868,17 +792,11 @@ impl DimensionConstraintBuilder<'_> {
                         "nested sequence constraints are not supported".to_owned(),
                     ));
                 }
-                let expected_length_expression = expected_length.with_default_metadata();
                 let expected_length = self.lower_nat(expected_length)?.ok_or_else(|| {
                     ShapeError::Unsupported(
                         "sequence length is not linear natural arithmetic".to_owned(),
                     )
                 })?;
-                self.record_projection(
-                    expected_length_expression,
-                    expected_length.clone(),
-                    &[length, &expected_length],
-                );
                 self.assert_dimensions_equal(length, &expected_length);
                 self.constrain_shape_type(element, expected_element)
             }
@@ -957,11 +875,6 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         "standard basis index is not linear natural arithmetic".to_owned(),
                     )
                 })?;
-                self.builder.record_projection(
-                    index.with_default_metadata(),
-                    index_value.clone(),
-                    &[&dimension],
-                );
                 self.builder
                     .assert_if_relevant(index_value.ge(1), &[&dimension]);
                 self.builder
@@ -1030,8 +943,6 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             .assert_dimensions_equal(&cols, &Int::from_u64(1));
                     }
                     (TypeExpr::Matrix(rows, cols), Shape::Real) => {
-                        let rows_expression = rows.with_default_metadata();
-                        let cols_expression = cols.with_default_metadata();
                         let rows = self.builder.lower_nat(rows)?.ok_or_else(|| {
                             ShapeError::Unsupported(
                                 "cast row dimension is not linear natural arithmetic".to_owned(),
@@ -1042,10 +953,6 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                                 "cast column dimension is not linear natural arithmetic".to_owned(),
                             )
                         })?;
-                        self.builder
-                            .record_projection(rows_expression, rows.clone(), &[&rows]);
-                        self.builder
-                            .record_projection(cols_expression, cols.clone(), &[&cols]);
                         self.builder
                             .assert_dimensions_equal(&rows, &Int::from_u64(1));
                         self.builder
@@ -1155,6 +1062,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 }
             }
             RawExpr::Hole
+            | RawExpr::ImplicitDimension(_)
             | RawExpr::IdentityMatrix { .. }
             | RawExpr::ZeroMatrix { .. }
             | RawExpr::Type(_)
@@ -1254,8 +1162,6 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
             return;
         };
         let result = (|| {
-            let from_key = range.from.with_default_metadata();
-            let to_key = range.to.with_default_metadata();
             let from = self.builder.lower_nat(&range.from)?.ok_or_else(|| {
                 ShapeError::Unsupported(
                     "sequence lower bound is not linear natural arithmetic".to_owned(),
@@ -1278,10 +1184,6 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
             for length in lengths {
                 self.builder
                     .assert_if_relevant(to.le(&length), &[&to, &length]);
-            }
-            if matches!(self.builder.mode, ConstraintMode::Permanent) {
-                self.builder.projections.insert(from_key, from);
-                self.builder.projections.insert(to_key, to);
             }
             if matches!(op, SeqOp::Prod)
                 && let Shape::Matrix(rows, cols) = self.builder.shape_of(body)?
@@ -1348,8 +1250,7 @@ fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
 
 fn compile_type_expr(
     ty: &TypeExpr<()>,
-    natural_symbols: &BTreeMap<Variable, Int>,
-    natural_environment: &Environment,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
 ) -> Result<Shape, ShapeError> {
     Ok(match ty {
         TypeExpr::Bool => Shape::Bool,
@@ -1357,13 +1258,13 @@ fn compile_type_expr(
         TypeExpr::Int => Shape::Int,
         TypeExpr::Real => Shape::Real,
         TypeExpr::Matrix(rows, cols) => Shape::Matrix(
-            lower_nat_via_to_z3(rows, natural_symbols, natural_environment)?.ok_or_else(|| {
+            lower_nat_via_to_z3(rows, natural_symbols)?.ok_or_else(|| {
                 ShapeError::Unsupported(format!(
                     "matrix row dimension is not linear natural arithmetic: {}",
                     rows.as_latex()
                 ))
             })?,
-            lower_nat_via_to_z3(cols, natural_symbols, natural_environment)?.ok_or_else(|| {
+            lower_nat_via_to_z3(cols, natural_symbols)?.ok_or_else(|| {
                 ShapeError::Unsupported(format!(
                     "matrix column dimension is not linear natural arithmetic: {}",
                     cols.as_latex()
@@ -1377,18 +1278,12 @@ fn compile_type_expr(
                 ));
             };
             Shape::Seq(
-                Box::new(compile_type_expr(
-                    element,
-                    natural_symbols,
-                    natural_environment,
-                )?),
-                lower_nat_via_to_z3(length, natural_symbols, natural_environment)?.ok_or_else(
-                    || {
-                        ShapeError::Unsupported(
-                            "sequence length is not linear natural arithmetic".to_owned(),
-                        )
-                    },
-                )?,
+                Box::new(compile_type_expr(element, natural_symbols)?),
+                lower_nat_via_to_z3(length, natural_symbols)?.ok_or_else(|| {
+                    ShapeError::Unsupported(
+                        "sequence length is not linear natural arithmetic".to_owned(),
+                    )
+                })?,
             )
         }
     })
@@ -1396,8 +1291,7 @@ fn compile_type_expr(
 
 fn lower_nat_via_to_z3<Metadata>(
     expression: &Expr<Metadata>,
-    natural_symbols: &BTreeMap<Variable, Int>,
-    natural_environment: &Environment,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
 ) -> Result<Option<Int>, ShapeError> {
     match classify_presburger(expression, natural_symbols) {
         PresburgerClassification::NotNatural => Ok(None),
@@ -1405,9 +1299,14 @@ fn lower_nat_via_to_z3<Metadata>(
             Err(ShapeError::Unsupported(message.to_owned()))
         }
         PresburgerClassification::Valid => {
-            crate::to_z3::lower_core_integer(natural_environment, expression)
-                .map(Some)
-                .map_err(|error| ShapeError::Unsupported(error.to_string()))
+            crate::z3_utils::lower_natural_with(expression, &mut |parameter| {
+                natural_symbols
+                    .get(parameter)
+                    .cloned()
+                    .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
+            })
+            .map(Some)
+            .map_err(|error| ShapeError::Unsupported(error.to_string()))
         }
     }
 }
@@ -1422,20 +1321,6 @@ fn shape_dimensions(shape: &Shape) -> Vec<Int> {
         }
         _ => Vec::new(),
     }
-}
-
-fn concrete_type(model: &z3::Model, shape: &Shape) -> Result<Type, ShapeError> {
-    Ok(match shape {
-        Shape::Bool => Type::Bool,
-        Shape::Nat => Type::Nat,
-        Shape::Int => Type::Int,
-        Shape::Real => Type::Real,
-        Shape::Matrix(rows, cols) => Type::Matrix(model_u64(model, rows)?, model_u64(model, cols)?),
-        Shape::Seq(element, length) => Type::Seq(Box::new(SeqType {
-            t: concrete_type(model, element)?,
-            n: model_u64(model, length)?,
-        })),
-    })
 }
 
 fn indexed_sequence_lengths<Metadata>(
@@ -1582,12 +1467,39 @@ fn collect_type_dimension_variables(ty: &TypeExpr<()>, variables: &mut BTreeSet<
     }
 }
 
-fn collect_range_bound_variables<Metadata>(
+fn collect_natural_position_variables<Metadata>(
     expression: &Expr<Metadata>,
     variables: &mut BTreeSet<Variable>,
 ) {
     struct Collector<'a>(&'a mut BTreeSet<Variable>);
     impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_type(&mut self, ty: &TypeExpr<Metadata>) {
+            collect_type_dimension_variables(&ty.with_default_metadata(), self.0);
+        }
+
+        fn visit_raw_expr_standard_basis(
+            &mut self,
+            index: &Expr<Metadata>,
+            _dimension: &ImplicitDimension,
+        ) {
+            collect_variables(index, self.0).expect("basis indices cannot bind sequence indices");
+        }
+
+        fn visit_raw_expr_binop(
+            &mut self,
+            op: &Binop,
+            left: &Expr<Metadata>,
+            right: &Expr<Metadata>,
+        ) {
+            self.visit_expr(left);
+            if matches!(op, Binop::Power | Binop::SingleSubscript) {
+                collect_variables(right, self.0)
+                    .expect("natural operator operands cannot bind sequence indices");
+            } else {
+                self.visit_expr(right);
+            }
+        }
+
         fn visit_raw_expr_seqop(
             &mut self,
             _op: &SeqOp,
@@ -1650,8 +1562,9 @@ mod tests {
         infer_symbolic_type_environment,
     };
     use crate::{
-        Annotation, Expr, Finop, Matrix, Range, RawExpr, SeqOp, SeqType, Type, Variable, from_tex,
-        preprocessing::prepare_expression, visit_mut::VisitContext,
+        Annotation, Environment, Expr, Finop, Matrix, NaturalParameter, Range, RawExpr, SeqOp,
+        SeqType, Type, Variable, from_tex, preprocessing::prepare_expression,
+        type_resolver::SymbolicTypeEnvironment, visit_mut::VisitContext,
     };
 
     fn expression(tex: &str) -> Expr<()> {
@@ -1660,6 +1573,27 @@ mod tests {
 
     fn environments(tex: &[&str]) -> super::EnvironmentIterator {
         extract_environment_iterator(tex.iter().map(|tex| expression(tex)), 10).unwrap()
+    }
+
+    fn natural(environment: &Environment, name: &str) -> u64 {
+        environment.natural_assignment[&NaturalParameter::Variable(Variable::new(name))]
+    }
+
+    fn implicit(environment: &Environment, dimension: crate::ImplicitDimension) -> u64 {
+        environment.natural_assignment[&NaturalParameter::ImplicitDimension(dimension)]
+    }
+
+    fn concrete_type(
+        environment: &Environment,
+        types: &SymbolicTypeEnvironment,
+        variable: &Variable,
+    ) -> Type {
+        types.types[variable].concretize(environment).unwrap()
+    }
+
+    fn inferred_types(tex: &[&str]) -> SymbolicTypeEnvironment {
+        infer_symbolic_type_environment(&tex.iter().map(|tex| expression(tex)).collect::<Vec<_>>())
+            .unwrap()
     }
 
     fn sequence(index: &str, body: Expr<()>) -> Expr<()> {
@@ -1703,13 +1637,23 @@ mod tests {
 
     #[test]
     fn guesses_types_and_respects_explicit_type_assertions() {
+        let types = inferred_types(&[r"a = a", r"n = n", r"x \in \mathbb{R}"]);
         let environment = environments(&[r"a = a", r"n = n", r"x \in \mathbb{R}"])
             .next()
             .unwrap()
             .unwrap();
-        assert_eq!(environment.types[&Variable::new("a")], Type::Real);
-        assert_eq!(environment.types[&Variable::new("n")], Type::Nat);
-        assert_eq!(environment.types[&Variable::new("x")], Type::Real);
+        assert_eq!(
+            concrete_type(&environment, &types, &Variable::new("a")),
+            Type::Real
+        );
+        assert_eq!(
+            concrete_type(&environment, &types, &Variable::new("n")),
+            Type::Nat
+        );
+        assert_eq!(
+            concrete_type(&environment, &types, &Variable::new("x")),
+            Type::Real
+        );
     }
 
     #[test]
@@ -1735,7 +1679,7 @@ mod tests {
             .unwrap();
         assert_eq!(environments.len(), 2);
         assert!(environments.iter().all(|environment| {
-            matches!(environment.types[&Variable::new("A")], Type::Matrix(rows, cols) if rows == cols)
+            matches!(concrete_type(environment, &types, &Variable::new("A")), Type::Matrix(rows, cols) if rows == cols)
         }));
     }
 
@@ -1766,7 +1710,10 @@ mod tests {
                 .unwrap();
             assert_eq!(environments.len(), 2);
             assert!(environments.iter().all(|environment| {
-                matches!(environment.types[&Variable::new("A")], Type::Matrix(_, 1))
+                matches!(
+                    concrete_type(environment, &types, &Variable::new("A")),
+                    Type::Matrix(_, 1)
+                )
             }));
         }
     }
@@ -1780,9 +1727,8 @@ mod tests {
         .next()
         .unwrap()
         .unwrap();
-        assert_eq!(environment.types[&Variable::new("A")], Type::Matrix(1, 1));
-        assert_eq!(environment.equalities[&expression("m")], 1);
-        assert_eq!(environment.equalities[&expression("n")], 1);
+        assert_eq!(natural(&environment, "m"), 1);
+        assert_eq!(natural(&environment, "n"), 1);
     }
 
     #[test]
@@ -1795,10 +1741,8 @@ mod tests {
         .next()
         .unwrap()
         .unwrap();
-        assert_eq!(environment.types[&Variable::new("A")], Type::Matrix(1, 1));
-        assert_eq!(environment.types[&Variable::new("x")], Type::Real);
-        assert_eq!(environment.equalities[&expression("m")], 1);
-        assert_eq!(environment.equalities[&expression("n")], 1);
+        assert_eq!(natural(&environment, "m"), 1);
+        assert_eq!(natural(&environment, "n"), 1);
     }
 
     #[test]
@@ -1818,23 +1762,32 @@ mod tests {
 
     #[test]
     fn enumerates_by_increasing_total_dimension() {
+        let types = inferred_types(&[r"A \in \mathbb{R}^{n \times d + p}"]);
         let mut environments = environments(&[r"A \in \mathbb{R}^{n \times d + p}"]);
         let first = environments.next().unwrap().unwrap();
-        assert_eq!(first.types[&Variable::new("A")], Type::Matrix(1, 1));
+        assert_eq!(
+            concrete_type(&first, &types, &Variable::new("A")),
+            Type::Matrix(1, 1)
+        );
 
-        let next_limit: Vec<_> = environments
+        let next_assignments: Vec<_> = environments
             .take(3)
             .map(|result| {
                 let environment = result.unwrap();
-                environment.types[&Variable::new("A")].clone()
+                (
+                    natural(&environment, "n"),
+                    natural(&environment, "d"),
+                    natural(&environment, "p"),
+                    concrete_type(&environment, &types, &Variable::new("A")),
+                )
             })
             .collect();
-        assert_eq!(next_limit.len(), 3);
-        assert!(
-            next_limit
-                .iter()
-                .all(|ty| matches!(ty, Type::Matrix(rows, cols) if (*rows).max(*cols) == 2))
-        );
+        assert_eq!(next_assignments.len(), 3);
+        let sums = next_assignments
+            .iter()
+            .map(|(n, d, p, _)| n + d + p)
+            .collect::<Vec<_>>();
+        assert!(sums.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]
@@ -1843,7 +1796,10 @@ mod tests {
             .unwrap()
             .map(|environment| {
                 let environment = environment.unwrap();
-                let Type::Matrix(rows, cols) = environment.types[&Variable::new("U")] else {
+                let types = inferred_types(&["U = U"]);
+                let Type::Matrix(rows, cols) =
+                    concrete_type(&environment, &types, &Variable::new("U"))
+                else {
                     panic!("expected a matrix")
                 };
                 (rows, cols)
@@ -1885,9 +1841,10 @@ mod tests {
         .unwrap()
         .map(Result::unwrap)
         .collect();
+        let inferred = inferred_types(&[r"\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R}^{d})"]);
         let types: Vec<_> = environments
             .iter()
-            .map(|environment| environment.types[&z].clone())
+            .map(|environment| concrete_type(environment, &inferred, &z))
             .collect();
         assert_eq!(types.len(), 4);
         assert!(types.contains(&Type::Seq(Box::new(SeqType {
@@ -1919,9 +1876,16 @@ mod tests {
             .iter()
             .map(|environment| {
                 (
-                    environment.equalities[&expression("a")],
-                    environment.equalities[&expression("b")],
-                    match &environment.types[&z] {
+                    natural(environment, "a"),
+                    natural(environment, "b"),
+                    match concrete_type(
+                        environment,
+                        &inferred_types(&[
+                            r"\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R})",
+                            r"\sum_{i=a}^{b} \vec{z}_i = 0",
+                        ]),
+                        &z,
+                    ) {
                         Type::Seq(sequence) => sequence.n,
                         _ => panic!("expected a sequence"),
                     },
@@ -1944,7 +1908,7 @@ mod tests {
                 .collect();
         assert_eq!(environments.len(), 4);
         assert!(environments.iter().all(|environment| {
-            matches!(environment.types[&Variable::new("A")], Type::Matrix(rows, cols) if rows <= 2 && cols <= 2)
+            natural(environment, "A_{rows}") <= 2 && natural(environment, "A_{cols}") <= 2
         }));
     }
 
@@ -1991,14 +1955,19 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_naturals_do_not_duplicate_environments() {
-        let types: Vec<_> = environments(&[r"A \in \mathbb{R}^{n}", r"p = p"])
-            .take(3)
-            .map(|result| result.unwrap().types[&Variable::new("A")].clone())
-            .collect();
+    fn complete_assignments_include_auxiliary_naturals() {
+        let assignments: Vec<_> =
+            environments(&[r"A \in \mathbb{R}^{n}", r"p \in \mathbb{N}", r"p = p"])
+                .take(3)
+                .map(|result| {
+                    let environment = result.unwrap();
+                    (natural(&environment, "n"), natural(&environment, "p"))
+                })
+                .collect();
+        assert_eq!(assignments[0], (1, 0));
         assert_eq!(
-            types,
-            vec![Type::Matrix(1, 1), Type::Matrix(2, 1), Type::Matrix(3, 1)]
+            assignments[1..].iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([(1, 1), (2, 0)])
         );
     }
 
@@ -2009,12 +1978,10 @@ mod tests {
                 .next()
                 .unwrap()
                 .unwrap();
-        let Type::Matrix(a_rows, a_cols) = environment.types[&Variable::new("A")] else {
-            panic!()
-        };
-        let Type::Matrix(b_rows, b_cols) = environment.types[&Variable::new("B")] else {
-            panic!()
-        };
+        let a_rows = natural(&environment, "A_{rows}");
+        let a_cols = natural(&environment, "A_{cols}");
+        let b_rows = natural(&environment, "B_{rows}");
+        let b_cols = natural(&environment, "B_{cols}");
         assert_eq!(a_rows, 2);
         assert_eq!(b_cols, 3);
         assert_eq!(a_cols, b_rows);
@@ -2050,7 +2017,7 @@ mod tests {
                 collect_implicit_dimensions(expression, &mut dimensions);
                 dimensions
                     .into_iter()
-                    .map(|dimension| environment.implicit_dimensions[&dimension])
+                    .map(|dimension| implicit(&environment, dimension))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -2105,7 +2072,7 @@ mod tests {
             let environment = environment.unwrap();
             dimensions
                 .iter()
-                .map(|dimension| environment.implicit_dimensions[dimension])
+                .map(|dimension| implicit(&environment, *dimension))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -2121,13 +2088,7 @@ mod tests {
         )
         .unwrap();
         assert!(environments.map(Result::unwrap).any(|environment| {
-            let Type::Matrix(_, a_cols) = environment.types[&Variable::new("A")] else {
-                panic!("expected matrix A")
-            };
-            let Type::Matrix(b_rows, _) = environment.types[&Variable::new("B")] else {
-                panic!("expected matrix B")
-            };
-            a_cols != b_rows
+            natural(&environment, "A_{cols}") != natural(&environment, "B_{rows}")
         }));
     }
 
@@ -2147,7 +2108,7 @@ mod tests {
         .next()
         .unwrap()
         .unwrap();
-        assert_eq!(valid.equalities[&expression("i")], 2);
+        assert_eq!(natural(&valid, "i"), 2);
 
         let symbolic_index = expression("e_{i+1}");
         let symbolic = extract_environment_iterator_with_context(
@@ -2171,7 +2132,7 @@ mod tests {
         let RawExpr::StandardBasis { index, .. } = &symbolic_index.raw else {
             panic!("expected standard basis vector")
         };
-        assert_eq!(symbolic.equalities[&index.with_default_metadata()], 2);
+        assert_eq!(symbolic.evaluate_natural(index).unwrap(), 2);
 
         assert!(matches!(
             extract_environment_iterator_with_context(
@@ -2189,13 +2150,13 @@ mod tests {
             .next()
             .unwrap()
             .unwrap();
-        assert_eq!(environment.types[&Variable::new("A")], Type::Matrix(3, 1));
+        assert_eq!(natural(&environment, "n"), 3);
     }
 
     #[test]
     fn preserves_known_natural_equalities_in_environments() {
         let environment = environments(&[r"k = 2"]).next().unwrap().unwrap();
-        assert_eq!(environment.equalities[&expression("k")], 2);
+        assert_eq!(natural(&environment, "k"), 2);
     }
 
     #[test]
@@ -2239,8 +2200,9 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(environments.len(), 1);
+        let types = inferred_types(&valid);
         assert_eq!(
-            environments[0].types[&Variable::new("M")],
+            concrete_type(&environments[0], &types, &Variable::new("M")),
             Type::Matrix(3, 3)
         );
 
@@ -2276,9 +2238,11 @@ mod tests {
         assert_eq!(environments.len(), 1);
         assert!(
             environments[0]
-                .implicit_dimensions
-                .values()
-                .all(|dimension| *dimension == 1)
+                .natural_assignment
+                .iter()
+                .all(|(parameter, value)| {
+                    !matches!(parameter, NaturalParameter::ImplicitDimension(_)) || *value == 1
+                })
         );
     }
 
@@ -2295,13 +2259,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(environments.len(), 1);
-        assert_eq!(environments[0].implicit_dimensions.len(), 3);
-        assert!(
-            environments[0]
-                .implicit_dimensions
-                .values()
-                .all(|dimension| *dimension == 2)
-        );
+        let implicit_values = environments[0]
+            .natural_assignment
+            .iter()
+            .filter_map(|(parameter, value)| {
+                matches!(parameter, NaturalParameter::ImplicitDimension(_)).then_some(*value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(implicit_values.len(), 3);
+        assert!(implicit_values.iter().all(|dimension| *dimension == 2));
     }
 
     #[test]
@@ -2356,12 +2322,14 @@ mod tests {
     #[test]
     fn trace_and_determinant_require_square_matrices() {
         for assertion in [r"\operatorname{tr}(A) = 0", r"\det(A) = 0"] {
+            let types = inferred_types(&[assertion]);
             let environment = extract_environment_iterator([expression(assertion)].into_iter(), 2)
                 .unwrap()
                 .next()
                 .unwrap()
                 .unwrap();
-            let Type::Matrix(rows, cols) = environment.types[&Variable::new("A")] else {
+            let Type::Matrix(rows, cols) = concrete_type(&environment, &types, &Variable::new("A"))
+            else {
                 panic!("expected a matrix")
             };
             assert_eq!(rows, cols);

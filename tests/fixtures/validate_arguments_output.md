@@ -164,7 +164,7 @@
 
    The negation of $U U^\top = I$ is satisfied by:
 
-   - $U = \begin{bmatrix}-\left(\frac{7}{16}\right)^{\frac{1}{2}} \\ \frac{-3}{4}\end{bmatrix}$
+   - $U = \begin{bmatrix}\frac{1}{4} \\ \left(\frac{15}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
    </details>
 
 # Logic-chain preprocessing

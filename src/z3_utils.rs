@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use z3::ast::{Bool, Int};
+use z3::ast::{Ast, Bool, Int};
 
-use crate::{Binop, Cmp, Expr, Finop, Monop, RawExpr, Variable, visit::Visit};
+use crate::{
+    Binop, Cmp, Expr, Finop, Monop, NaturalEvaluationError, NaturalParameter, RawExpr, visit::Visit,
+};
 
 pub(crate) fn compare_int(left: &Int, comparison: Cmp, right: &Int) -> Bool {
     match comparison {
@@ -15,6 +17,59 @@ pub(crate) fn compare_int(left: &Int, comparison: Cmp, right: &Int) -> Bool {
     }
 }
 
+pub(crate) fn lower_natural_with<Metadata>(
+    expression: &Expr<Metadata>,
+    resolve: &mut impl FnMut(&NaturalParameter) -> Result<Int, NaturalEvaluationError>,
+) -> Result<Int, NaturalEvaluationError> {
+    match &expression.raw {
+        RawExpr::NatLiteral(value) => Ok(Int::from_u64(*value)),
+        RawExpr::Variable(variable) => resolve(&NaturalParameter::Variable(variable.clone())),
+        RawExpr::ImplicitDimension(dimension) => {
+            resolve(&NaturalParameter::ImplicitDimension(*dimension))
+        }
+        RawExpr::Finop(Finop::Plus, terms) => {
+            let mut terms = terms.iter();
+            let first = terms
+                .next()
+                .ok_or(NaturalEvaluationError::EmptyOperation("addition"))?;
+            terms.try_fold(lower_natural_with(first, resolve)?, |sum, term| {
+                Ok(sum + lower_natural_with(term, resolve)?)
+            })
+        }
+        RawExpr::Finop(Finop::Times, factors) => {
+            let mut factors = factors.iter();
+            let first = factors
+                .next()
+                .ok_or(NaturalEvaluationError::EmptyOperation("multiplication"))?;
+            factors.try_fold(lower_natural_with(first, resolve)?, |product, factor| {
+                Ok(product * lower_natural_with(factor, resolve)?)
+            })
+        }
+        RawExpr::Monop(Monop::Neg, _) => Err(NaturalEvaluationError::UnsupportedSyntax(
+            "natural expressions do not support negation",
+        )),
+        _ => Err(NaturalEvaluationError::UnsupportedSyntax(
+            "unsupported natural expression",
+        )),
+    }
+}
+
+pub(crate) fn evaluate_natural<Metadata>(
+    expression: &Expr<Metadata>,
+    assignment: &std::collections::HashMap<NaturalParameter, u64>,
+) -> Result<u64, NaturalEvaluationError> {
+    lower_natural_with(expression, &mut |parameter| {
+        assignment
+            .get(parameter)
+            .copied()
+            .map(Int::from_u64)
+            .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
+    })?
+    .simplify()
+    .as_u64()
+    .ok_or(NaturalEvaluationError::Overflow)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresburgerClassification {
     Valid,
@@ -24,7 +79,7 @@ pub(crate) enum PresburgerClassification {
 
 pub(crate) fn classify_presburger<Metadata>(
     expression: &Expr<Metadata>,
-    natural_symbols: &BTreeMap<Variable, Int>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
 ) -> PresburgerClassification {
     let mut validator = PresburgerValidator {
         natural_symbols,
@@ -35,7 +90,7 @@ pub(crate) fn classify_presburger<Metadata>(
 }
 
 struct PresburgerValidator<'a> {
-    natural_symbols: &'a BTreeMap<Variable, Int>,
+    natural_symbols: &'a BTreeMap<NaturalParameter, Int>,
     classification: PresburgerClassification,
 }
 
@@ -47,11 +102,19 @@ impl<Metadata> Visit<Metadata> for PresburgerValidator<'_> {
 
 fn classify_node<Metadata>(
     expression: &Expr<Metadata>,
-    natural_symbols: &BTreeMap<Variable, Int>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
 ) -> PresburgerClassification {
     match &expression.raw {
         RawExpr::NatLiteral(_) => PresburgerClassification::Valid,
-        RawExpr::Variable(variable) if natural_symbols.contains_key(variable) => {
+        RawExpr::ImplicitDimension(dimension)
+            if natural_symbols.contains_key(&NaturalParameter::ImplicitDimension(*dimension)) =>
+        {
+            PresburgerClassification::Valid
+        }
+        RawExpr::ImplicitDimension(_) => PresburgerClassification::NotNatural,
+        RawExpr::Variable(variable)
+            if natural_symbols.contains_key(&NaturalParameter::Variable(variable.clone())) =>
+        {
             PresburgerClassification::Valid
         }
         RawExpr::Variable(_) => PresburgerClassification::NotNatural,
@@ -106,7 +169,7 @@ fn classify_node<Metadata>(
 
 fn classify_terms<Metadata>(
     terms: &[Expr<Metadata>],
-    natural_symbols: &BTreeMap<Variable, Int>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
     empty_message: &'static str,
 ) -> PresburgerClassification {
     if terms.is_empty() {
@@ -135,7 +198,7 @@ mod tests {
     use z3::ast::Int;
 
     use super::{PresburgerClassification, classify_presburger};
-    use crate::{Binop, Expr, Finop, Monop, RawExpr, Variable};
+    use crate::{Binop, Expr, Finop, Monop, NaturalParameter, RawExpr, Variable};
 
     fn variable(name: &str) -> Expr<()> {
         Expr::new(RawExpr::Variable(Variable::new(name)))
@@ -144,7 +207,10 @@ mod tests {
     #[test]
     fn classifies_the_supported_presburger_subset() {
         let n = Variable::new("n");
-        let symbols = BTreeMap::from([(n.clone(), Int::new_const(n.z3_name()))]);
+        let symbols = BTreeMap::from([(
+            NaturalParameter::Variable(n.clone()),
+            Int::new_const(n.z3_name()),
+        )]);
         let linear = Expr::new(RawExpr::Finop(
             Finop::Plus,
             vec![

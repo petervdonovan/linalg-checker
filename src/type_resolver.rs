@@ -1,10 +1,12 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
-    Binop, Environment, Expr, Finop, LogicChain, Matrix, Monop, RawExpr, SeqOp, Triop, Type,
-    TypeExpr, Variable,
+    Binop, Expr, Finop, LogicChain, Matrix, Monop, RawExpr, SeqOp, Triop, TypeExpr, Variable,
     visit_mut::{VisitContext, VisitMut},
 };
+
+#[cfg(test)]
+use crate::Type;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
@@ -48,6 +50,12 @@ impl MaybeTyped for TypedMetadata {
         } else {
             self.0 = Some(ty);
         }
+    }
+}
+
+impl TypedMetadata {
+    pub(crate) fn resolved(ty: TypeExpr<()>) -> Self {
+        Self(Some(ty))
     }
 }
 
@@ -229,20 +237,6 @@ impl TypeLookup for SymbolicTypeEnvironment {
     }
 }
 
-impl TypeLookup for Environment {
-    fn type_of(&self, variable: &Variable) -> Option<TypeExpr<()>> {
-        self.types
-            .get(variable)
-            .cloned()
-            .map(type_expr)
-            .or_else(|| {
-                self.equalities
-                    .contains_key(&Expr::new(RawExpr::Variable(variable.clone())))
-                    .then_some(TypeExpr::Nat)
-            })
-    }
-}
-
 pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
     rules: &'a OperatorTypeRules,
@@ -277,6 +271,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
     ) -> Result<Option<TypeExpr<()>>, TypeError> {
         let ty = match &expression.raw {
             RawExpr::Hole | RawExpr::Type(_) => return Ok(None),
+            RawExpr::ImplicitDimension(_) => TypeExpr::Nat,
             RawExpr::IdentityMatrix { dimension } => {
                 let dimension = implicit_dimension(*dimension);
                 TypeExpr::Matrix(dimension.clone(), dimension)
@@ -359,6 +354,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 .raw;
             match raw {
                 RawExpr::Hole
+                | RawExpr::ImplicitDimension(_)
                 | RawExpr::IdentityMatrix { .. }
                 | RawExpr::ZeroMatrix { .. }
                 | RawExpr::Variable(_)
@@ -372,9 +368,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 }
                 RawExpr::Monop(_, inner) => self.visit_expr_mut(context, inner),
                 RawExpr::Binop(Binop::ElementOf, left, right) => {
-                    if !matches!(left.raw, RawExpr::Variable(_)) {
-                        self.visit_expr_mut(context, left);
-                    }
+                    self.visit_expr_mut(context, left);
                     self.visit_expr_mut(context, right);
                 }
                 RawExpr::Binop(Binop::Cast, target, value) => {
@@ -596,6 +590,7 @@ fn scalar_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeEr
     fold_operand_types(operands, scalar_lub)
 }
 
+#[cfg(test)]
 pub(crate) fn type_expr(ty: Type) -> TypeExpr<()> {
     match ty {
         Type::Bool => TypeExpr::Bool,
@@ -614,7 +609,7 @@ fn natural(value: u64) -> Expr<()> {
     Expr::new(RawExpr::NatLiteral(value))
 }
 fn implicit_dimension(value: crate::ImplicitDimension) -> Expr<()> {
-    Expr::new(RawExpr::Variable(Variable::new(value.z3_name())))
+    Expr::new(RawExpr::ImplicitDimension(value))
 }
 
 fn infer_matrix_type<Metadata: MaybeTyped>(

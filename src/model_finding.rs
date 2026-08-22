@@ -13,13 +13,14 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, RawExpr, Type, TypeExpr,
+    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, NaturalParameter, RawExpr, Type,
     Variable,
-    enumerable_envspec::ShapeError,
+    enumerable_envspec::{ShapeError, infer_symbolic_type_environment},
     preprocessing::{PreparedExpression, prepare_expression},
     to_z3::{
         LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, lower_sequence_element, to_z3,
     },
+    type_resolver::SymbolicTypeEnvironment,
     visit_mut::VisitContext,
 };
 
@@ -65,7 +66,7 @@ impl From<ShapeError> for ModelFindingError {
 pub struct TestCase<Conclusion> {
     pub name: String,
     pub sentences: Vec<Expr<()>>,
-    pub environment: Environment,
+    pub environment: Vec<Expr<()>>,
     pub conclusion: Conclusion,
 }
 
@@ -148,7 +149,12 @@ impl<Conclusion: ToFromMd> ToFromMd for TestCase<Conclusion> {
             "test case sections are out of order"
         );
 
-        let environment = parse_environment(&children[environment_start + 1..sentences_start]);
+        let mut environment = parse_expression_section(
+            &children[environment_start + 1..sentences_start],
+            "environment",
+        );
+        validate_environment_entries(&environment);
+        environment.sort();
         let sentences = parse_expression_section(
             &children[sentences_start + 1..conclusion_start],
             "sentences",
@@ -168,8 +174,9 @@ impl<Conclusion: ToFromMd> ToFromMd for TestCase<Conclusion> {
 
     fn to_md(&self) -> Node {
         let mut children = vec![heading(1, &self.name), heading(2, "Environment")];
-        let environment = environment_expressions(&self.environment);
-        if !environment.is_empty() {
+        if !self.environment.is_empty() {
+            let mut environment = self.environment.clone();
+            environment.sort();
             children.push(expression_list(&environment));
         }
         children.push(heading(2, "Sentences"));
@@ -237,7 +244,7 @@ impl TestCases<NotSolvedYet> {
                         environment,
                         conclusion: NotSolvedYet,
                     } = test_case;
-                    let conclusion = solve_environment(&environment, &sentences)?;
+                    let conclusion = solve_given_environment(&environment, &sentences)?;
                     Ok(TestCase {
                         name,
                         sentences,
@@ -250,65 +257,32 @@ impl TestCases<NotSolvedYet> {
     }
 }
 
-pub(crate) fn solve_environment<'a>(
-    environment: &Environment,
-    assertions: impl IntoIterator<Item = &'a Expr<()>>,
+pub(crate) fn solve_given_environment(
+    declarations: &[Expr<()>],
+    assertions: &[Expr<()>],
 ) -> Result<ModelOrUnsat, ModelFindingError> {
-    let solver = Solver::new();
-    let mut lowered_assertions = Vec::new();
-    for (variable, ty) in &environment.types {
-        if !matches!(ty, Type::Nat) {
-            continue;
-        }
-        let type_assertion = Expr::new(RawExpr::Binop(
-            Binop::ElementOf,
-            Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
-        ));
-        let lowered = lower_boolean(
-            environment,
-            &type_assertion,
-            VisitContext {
-                logical_polarity: true,
-            },
-        )?;
-        assert_definitions(&solver, &lowered.side_conditions)?;
-        solver.assert(lowered.expression.clone());
-        lowered_assertions.push(lowered);
-    }
-    assert_environment_equalities(&solver, environment)?;
-    for assertion in assertions {
-        let lowered = lower_boolean(
-            environment,
-            assertion,
-            VisitContext {
-                logical_polarity: true,
-            },
-        )?;
-        assert_definitions(&solver, &lowered.side_conditions)?;
-        solver.assert(lowered.expression.clone());
-        lowered_assertions.push(lowered);
-    }
-    match solver.check() {
-        SatResult::Unsat => Ok(ModelOrUnsat::Unsat),
-        SatResult::Unknown => Ok(ModelOrUnsat::Unknown),
-        SatResult::Sat => Ok(ModelOrUnsat::Model(
-            extract_model(
-                environment,
-                &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
-            )?,
-            existence_warnings(environment, &lowered_assertions)?,
-        )),
-    }
+    let symbolic_types = infer_symbolic_type_environment(declarations)?;
+    let context = VisitContext {
+        logical_polarity: true,
+    };
+    let prepared = declarations
+        .iter()
+        .chain(assertions)
+        .map(|expression| prepare_expression(&symbolic_types, expression, context))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ToZ3Error::from)?;
+    let environment = assignment_from_declarations(declarations)?;
+    solve_prepared_environment(&environment, &symbolic_types, &prepared)
 }
 
 pub(crate) fn solve_prepared_environment(
     environment: &Environment,
+    variable_types: &SymbolicTypeEnvironment,
     assertions: &[PreparedExpression],
 ) -> Result<ModelOrUnsat, ModelFindingError> {
     let solver = Solver::new();
     let mut lowered_assertions = Vec::new();
-    assert_environment_equalities(&solver, environment)?;
+    assert_natural_assignment(&solver, environment);
     for assertion in assertions {
         let lowered = lower_prepared_boolean(environment, assertion)?;
         assert_definitions(&solver, &lowered.side_conditions)?;
@@ -321,11 +295,39 @@ pub(crate) fn solve_prepared_environment(
         SatResult::Sat => Ok(ModelOrUnsat::Model(
             extract_model(
                 environment,
+                variable_types,
                 &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
             )?,
-            existence_warnings(environment, &lowered_assertions)?,
+            existence_warnings(environment, variable_types, &lowered_assertions)?,
         )),
     }
+}
+
+fn assignment_from_declarations(
+    declarations: &[Expr<()>],
+) -> Result<Environment, ModelFindingError> {
+    let mut environment = Environment::default();
+    for declaration in declarations {
+        let RawExpr::CmpChain(CmpChain { start, assertions }) = &declaration.raw else {
+            continue;
+        };
+        let [(Cmp::Eq, right)] = assertions.as_slice() else {
+            continue;
+        };
+        let (RawExpr::Variable(variable), RawExpr::NatLiteral(value)) = (&start.raw, &right.raw)
+        else {
+            continue;
+        };
+        let previous = environment
+            .natural_assignment
+            .insert(NaturalParameter::Variable(variable.clone()), *value);
+        if previous.is_some_and(|previous| previous != *value) {
+            return Err(ModelFindingError::Shape(ShapeError::Unsat(
+                "given environment contains conflicting natural assignments".to_owned(),
+            )));
+        }
+    }
+    Ok(environment)
 }
 
 #[derive(Clone)]
@@ -336,6 +338,7 @@ pub(crate) struct LoweredBoolean {
 
 pub(crate) fn existence_warnings(
     environment: &Environment,
+    variable_types: &SymbolicTypeEnvironment,
     assertions: &[LoweredBoolean],
 ) -> Result<Vec<ExistenceWarning>, ModelFindingError> {
     let mut conditions = std::collections::BTreeMap::new();
@@ -355,7 +358,7 @@ pub(crate) fn existence_warnings(
             }),
             LoweredExistence::Checkable(warning_assertions) => {
                 let solver = Solver::new();
-                assert_environment_equalities(&solver, environment)?;
+                assert_natural_assignment(&solver, environment);
                 for assertion in assertions {
                     solver.assert(assertion.expression.clone());
                     for other in &assertion.side_conditions {
@@ -376,6 +379,7 @@ pub(crate) fn existence_warnings(
                         introduced_variable: Variable::new(condition.display_name.clone()),
                         witness: extract_model(
                             environment,
+                            variable_types,
                             &solver.get_model().ok_or(ModelFindingError::MissingModel)?,
                         )?,
                     }),
@@ -384,25 +388,6 @@ pub(crate) fn existence_warnings(
         }
     }
     Ok(warnings)
-}
-
-pub(crate) fn lower_boolean(
-    environment: &Environment,
-    assertion: &Expr<()>,
-    context: VisitContext,
-) -> Result<LoweredBoolean, ModelFindingError> {
-    let prepared = prepare_expression(environment, assertion, context).map_err(ToZ3Error::from)?;
-    let lowered = to_z3(environment, &prepared)?;
-    let Z3Object::Z3(assertion) = lowered.expression else {
-        return Err(ModelFindingError::NonBooleanAssertion);
-    };
-    let assertion = assertion
-        .as_bool()
-        .ok_or(ModelFindingError::NonBooleanAssertion)?;
-    Ok(LoweredBoolean {
-        expression: assertion,
-        side_conditions: lowered.side_conditions,
-    })
 }
 
 pub(crate) fn lower_prepared_boolean(
@@ -442,50 +427,34 @@ pub(crate) fn z3_boolean(value: &Z3Object) -> Result<z3::ast::Bool, ModelFinding
         .ok_or(ModelFindingError::NonBooleanAssertion)
 }
 
-pub(crate) fn assert_environment_equalities(
-    solver: &Solver,
-    environment: &Environment,
-) -> Result<(), ModelFindingError> {
-    for (expression, value) in &environment.equalities {
-        let equality = Expr::new(RawExpr::CmpChain(CmpChain {
-            start: expression.clone(),
-            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
-        }));
-        match lower_boolean(
-            environment,
-            &equality,
-            VisitContext {
-                logical_polarity: true,
-            },
-        ) {
-            Ok(equality) => {
-                assert_definitions(solver, &equality.side_conditions)?;
-                solver.assert(equality.expression);
-            }
-            Err(ModelFindingError::Lowering(ToZ3Error::MissingVariableType(_))) => {
-                // Some equalities are compile-time facts used only to concretize syntax.
-            }
-            Err(error) => return Err(error),
-        }
+pub(crate) fn assert_natural_assignment(solver: &Solver, environment: &Environment) {
+    for (parameter, value) in &environment.natural_assignment {
+        solver.assert(
+            z3::ast::Int::new_const(parameter.z3_name()).eq(z3::ast::Int::from_u64(*value)),
+        );
     }
-    Ok(())
 }
 
 pub(crate) fn extract_model(
     environment: &Environment,
+    variable_types: &SymbolicTypeEnvironment,
     model: &Z3Model,
 ) -> Result<Model, ModelFindingError> {
-    let mut variables: Vec<_> = environment.types.iter().collect();
+    let mut variables: Vec<_> = variable_types.types.iter().collect();
     variables.sort_by_key(|(variable, _)| *variable);
     variables
         .into_iter()
-        .map(|(variable, ty)| extract_variable(environment, model, variable, ty))
+        .map(|(variable, ty)| {
+            let ty = ty.concretize(environment).map_err(ToZ3Error::from)?;
+            extract_variable(environment, variable_types, model, variable, &ty)
+        })
         .collect::<Result<Vec<_>, _>>()
         .map(|assignments| assignments.into_iter().flatten().collect())
 }
 
 fn extract_variable(
     environment: &Environment,
+    variable_types: &SymbolicTypeEnvironment,
     model: &Z3Model,
     variable: &crate::Variable,
     ty: &Type,
@@ -506,7 +475,7 @@ fn extract_variable(
                     ));
                     let right = z3_object_model_value(
                         model,
-                        lower_sequence_element(environment, variable, index)?,
+                        lower_sequence_element(variable, index, sequence)?,
                     )?;
                     Ok(model_equality(left, right))
                 })
@@ -522,7 +491,7 @@ fn extract_variable(
                 to_z3(
                     environment,
                     &prepare_expression(
-                        environment,
+                        variable_types,
                         &left,
                         VisitContext {
                             logical_polarity: true,
@@ -808,82 +777,35 @@ fn parse_existence_warnings(nodes: &[Node]) -> Vec<ExistenceWarning> {
     warnings
 }
 
-fn environment_expressions(environment: &Environment) -> Vec<Expr<()>> {
-    let mut expressions =
-        Vec::with_capacity(environment.types.len() + environment.equalities.len());
-    expressions.extend(environment.types.iter().map(|(variable, ty)| {
-        Expr::new(RawExpr::Binop(
-            Binop::ElementOf,
-            Expr::new(RawExpr::Variable(variable.clone())),
-            Expr::new(RawExpr::Type(TypeExpr::from(ty.clone()))),
-        ))
-    }));
-    expressions.extend(environment.equalities.iter().map(|(expression, value)| {
-        Expr::new(RawExpr::CmpChain(CmpChain {
-            start: expression.clone(),
-            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
-        }))
-    }));
-    expressions.sort();
-    expressions
-}
-
-fn parse_environment(nodes: &[Node]) -> Environment {
-    if nodes.is_empty() {
-        return Environment::default();
-    }
-    assert_eq!(
-        nodes.len(),
-        1,
-        "environment must contain one expression list"
-    );
-    let mut environment = Environment::default();
-    for expression in parse_expression_list(&nodes[0]) {
-        match &expression.raw {
-            RawExpr::Binop(Binop::ElementOf, left, right) => {
-                let RawExpr::Variable(variable) = &left.raw else {
-                    panic!("environment membership must have a variable on the left")
-                };
-                let RawExpr::Type(ref ty) = right.raw else {
-                    panic!("environment membership must have a type on the right")
-                };
-                let ty = ty
-                    .concrete()
-                    .unwrap_or_else(|| panic!("environment type dimensions must be concrete"));
-                assert!(
-                    environment.types.insert(variable.clone(), ty).is_none(),
-                    "environment contains a duplicate type declaration"
-                );
-            }
-            RawExpr::CmpChain(CmpChain { start, assertions })
-                if matches!(
-                    assertions.as_slice(),
-                    [(Cmp::Eq, right)] if matches!(right.raw, RawExpr::NatLiteral(_))
-                ) =>
-            {
-                let RawExpr::NatLiteral(value) = assertions[0].1.raw else {
-                    unreachable!()
-                };
-                assert!(
-                    environment
-                        .equalities
-                        .insert(start.clone(), value)
-                        .is_none(),
-                    "environment contains a duplicate equality"
-                );
-            }
-            _ => panic!("expression does not have a valid environment-entry format"),
-        }
-    }
-    environment
-}
-
 pub(crate) fn parse_expression_section(nodes: &[Node], name: &str) -> Vec<Expr<()>> {
     if nodes.is_empty() {
         Vec::new()
     } else {
         assert_eq!(nodes.len(), 1, "{name} must contain one expression list");
         parse_expression_list(&nodes[0])
+    }
+}
+
+fn validate_environment_entries(expressions: &[Expr<()>]) {
+    for expression in expressions {
+        match &expression.raw {
+            RawExpr::Binop(Binop::ElementOf, left, right) => {
+                assert!(
+                    matches!(left.raw, RawExpr::Variable(_)),
+                    "environment membership must have a variable on the left"
+                );
+                assert!(
+                    matches!(right.raw, RawExpr::Type(_)),
+                    "environment membership must have a type on the right"
+                );
+            }
+            RawExpr::CmpChain(CmpChain { assertions, .. })
+                if matches!(
+                    assertions.as_slice(),
+                    [(Cmp::Eq, right)] if matches!(right.raw, RawExpr::NatLiteral(_))
+                ) => {}
+            _ => panic!("expression does not have a valid environment-entry format"),
+        }
     }
 }
 
@@ -1104,10 +1026,7 @@ pub(crate) fn render_md(node: &Node) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        fmt::{Debug, Display},
-    };
+    use std::fmt::{Debug, Display};
 
     use expect_test::expect;
     use ratex_parser::parse;
@@ -1118,9 +1037,12 @@ mod tests {
 
     use super::{
         ModelFindingError, ModelOrUnsat, NotSolvedYet, TestCase, TestCases, ToFromMd,
-        extract_model, solve_environment,
+        extract_model, solve_given_environment,
     };
-    use crate::{Binop, Cmp, CmpChain, Environment, Expr, RawExpr, SeqType, Type, Variable};
+    use crate::{
+        Binop, Cmp, CmpChain, Environment, Expr, RawExpr, SeqType, Type, TypeExpr, Variable,
+        type_resolver::SymbolicTypeEnvironment,
+    };
 
     fn variable(name: &str) -> Expr<()> {
         Expr::new(RawExpr::Variable(Variable::new(name)))
@@ -1131,6 +1053,25 @@ mod tests {
             start: variable(name),
             assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(value)))],
         }))
+    }
+
+    fn symbolic_types(
+        entries: impl IntoIterator<Item = (Variable, Type)>,
+    ) -> SymbolicTypeEnvironment {
+        SymbolicTypeEnvironment {
+            types: entries
+                .into_iter()
+                .map(|(variable, ty)| (variable, TypeExpr::from(ty)))
+                .collect(),
+        }
+    }
+
+    fn declaration(variable: Variable, ty: Type) -> Expr<()> {
+        Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            Expr::new(RawExpr::Variable(variable)),
+            Expr::new(RawExpr::Type(TypeExpr::from(ty))),
+        ))
     }
 
     fn assert_stable<T>(input: &str) -> String
@@ -1290,15 +1231,12 @@ Model
 
     #[test]
     fn programmatic_environment_rendering_is_deterministic() {
-        let environment = Environment {
-            types: HashMap::from([
-                (Variable::new("x"), Type::Real),
-                (Variable::new("A"), Type::Matrix(2, 3)),
-                (Variable::new("b"), Type::Bool),
-            ]),
-            implicit_dimensions: HashMap::new(),
-            equalities: HashMap::from([(variable("k"), 3)]),
-        };
+        let environment = vec![
+            declaration(Variable::new("x"), Type::Real),
+            declaration(Variable::new("A"), Type::Matrix(2, 3)),
+            declaration(Variable::new("b"), Type::Bool),
+            equality("k", 3),
+        ];
         let case = TestCase {
             name: "Order".to_owned(),
             sentences: vec![equality("x", 1)],
@@ -1355,15 +1293,14 @@ Model
         let case = TestCase {
             name: "Canonical".to_owned(),
             sentences: Vec::new(),
-            environment: Environment {
-                types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 1))]),
-                implicit_dimensions: HashMap::new(),
-                equalities: HashMap::new(),
-            },
+            environment: vec![declaration(Variable::new("A"), Type::Matrix(1, 1))],
             conclusion: NotSolvedYet,
         };
         let parsed = TestCase::<NotSolvedYet>::parse_str(&case.to_string());
-        assert_eq!(parsed.environment.types[&Variable::new("A")], Type::Real);
+        assert_eq!(
+            parsed.environment,
+            vec![declaration(Variable::new("A"), Type::Real)]
+        );
     }
 
     #[test]
@@ -1372,11 +1309,7 @@ Model
         let error = TestCases(vec![TestCase {
             name: "Boolean".to_owned(),
             sentences: vec![Expr::new(RawExpr::Variable(boolean.clone()))],
-            environment: Environment {
-                types: HashMap::from([(boolean, Type::Bool)]),
-                implicit_dimensions: HashMap::new(),
-                equalities: HashMap::new(),
-            },
+            environment: vec![declaration(boolean, Type::Bool)],
             conclusion: NotSolvedYet,
         }])
         .find_models()
@@ -1389,11 +1322,7 @@ Model
 
     #[test]
     fn solver_rejects_non_boolean_assertions() {
-        let error = solve_environment(
-            &Environment::default(),
-            &[Expr::new(RawExpr::NatLiteral(1))],
-        )
-        .unwrap_err();
+        let error = solve_given_environment(&[], &[Expr::new(RawExpr::NatLiteral(1))]).unwrap_err();
         assert_eq!(error, ModelFindingError::NonBooleanAssertion);
     }
 
@@ -1401,12 +1330,9 @@ Model
     fn unconstrained_scalar_is_extracted_as_a_hole() {
         let solver = Solver::new();
         assert_eq!(solver.check(), SatResult::Sat);
-        let environment = Environment {
-            types: HashMap::from([(Variable::new("x"), Type::Real)]),
-            implicit_dimensions: HashMap::new(),
-            equalities: HashMap::new(),
-        };
-        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+        let environment = Environment::default();
+        let types = symbolic_types([(Variable::new("x"), Type::Real)]);
+        let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
         };
@@ -1434,11 +1360,10 @@ Model
             }
             assert_eq!(solver.check(), SatResult::Sat);
 
-            let environment = Environment {
-                types: HashMap::from([(Variable::new("x"), Type::Real)]),
-                ..Environment::default()
-            };
-            let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+            let environment = Environment::default();
+            let types = symbolic_types([(Variable::new("x"), Type::Real)]);
+            let extracted =
+                extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
             let RawExpr::CmpChain(equality) = &extracted[0].raw else {
                 panic!("expected an equality")
             };
@@ -1459,12 +1384,10 @@ Model
         solver.assert(x.gt(Real::from_int(&Int::from_i64(0))));
         assert_eq!(solver.check(), SatResult::Sat);
 
-        let environment = Environment {
-            types: HashMap::from([(Variable::new("x"), Type::Real)]),
-            ..Environment::default()
-        };
+        let environment = Environment::default();
+        let types = symbolic_types([(Variable::new("x"), Type::Real)]);
         assert_eq!(
-            extract_model(&environment, &solver.get_model().unwrap()).unwrap_err(),
+            extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap_err(),
             ModelFindingError::UnsupportedModel(
                 "algebraic model value is not a square root of a supported rational"
             )
@@ -1476,12 +1399,9 @@ Model
         let solver = Solver::new();
         solver.assert(Real::new_const("A_{1,1}").eq(Real::from_int(&Int::from_u64(1))));
         assert_eq!(solver.check(), SatResult::Sat);
-        let environment = Environment {
-            types: HashMap::from([(Variable::new("A"), Type::Matrix(1, 2))]),
-            implicit_dimensions: HashMap::new(),
-            equalities: HashMap::new(),
-        };
-        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+        let environment = Environment::default();
+        let types = symbolic_types([(Variable::new("A"), Type::Matrix(1, 2))]);
+        let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
         };
@@ -1497,18 +1417,15 @@ Model
         let solver = Solver::new();
         solver.assert(Real::new_const("z_{1}").eq(Real::from_int(&Int::from_u64(2))));
         assert_eq!(solver.check(), SatResult::Sat);
-        let environment = Environment {
-            types: HashMap::from([(
-                Variable::new("z"),
-                Type::Seq(Box::new(SeqType {
-                    t: Type::Real,
-                    n: 2,
-                })),
-            )]),
-            implicit_dimensions: HashMap::new(),
-            equalities: HashMap::new(),
-        };
-        let extracted = extract_model(&environment, &solver.get_model().unwrap()).unwrap();
+        let environment = Environment::default();
+        let types = symbolic_types([(
+            Variable::new("z"),
+            Type::Seq(Box::new(SeqType {
+                t: Type::Real,
+                n: 2,
+            })),
+        )]);
+        let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         assert_eq!(extracted.len(), 2);
         for (index, equality) in extracted.iter().enumerate() {
             let RawExpr::CmpChain(equality) = &equality.raw else {
