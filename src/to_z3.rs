@@ -9,7 +9,7 @@ use z3::ast::{Bool, Int, Real};
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
     Monop, Range, RawExpr, SeqOp, Type, TypeExpr, Variable, preprocessing::PreparedExpression,
-    type_resolver::TypeError, visit_mut::Existence,
+    type_resolver::TypeError, visit_mut::Existence, z3_utils::compare_int,
 };
 
 #[derive(Clone)]
@@ -379,7 +379,7 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ
                     "boolean scalars cannot be compared",
                 ))
             } else if let (Some(left), Some(right)) = (left.as_int(), right.as_int()) {
-                Ok(compare_int(left, comparison, right))
+                Ok(compare_int(&left, comparison, &right))
             } else if let (Some(left), Some(right)) = (left.as_real(), right.as_real()) {
                 Ok(compare_real(left, comparison, right))
             } else if let (Some(left), Some(right)) = (left.as_int(), right.as_real()) {
@@ -426,17 +426,6 @@ fn comparison_scalar(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
     match value {
         Z3Object::Matrix(matrix) if matrix.rows == 1 && matrix.cols == 1 => single_cell(matrix),
         value => Ok(value),
-    }
-}
-
-fn compare_int(left: Int, comparison: Cmp, right: Int) -> Bool {
-    match comparison {
-        Cmp::Eq => left.eq(right),
-        Cmp::Ne => left.eq(right).not(),
-        Cmp::Lt => left.lt(right),
-        Cmp::Gt => left.gt(right),
-        Cmp::Le => left.le(right),
-        Cmp::Ge => left.ge(right),
     }
 }
 
@@ -601,6 +590,22 @@ fn lower<Metadata>(γ: &Environment, e: &Expr<Metadata>) -> Result<Z3Object, ToZ
             "expression is not supported by to_z3",
         )),
     }
+}
+
+/// Lowers a validated core natural-number expression without rerunning the
+/// symbolic preprocessing pipeline.
+pub(crate) fn lower_core_integer<Metadata>(
+    environment: &Environment,
+    expression: &Expr<Metadata>,
+) -> Result<Int, ToZ3Error> {
+    let Z3Object::Z3(expression) = lower(environment, expression)? else {
+        return Err(ToZ3Error::InvalidOperands(
+            "natural expression must lower to an integer",
+        ));
+    };
+    expression.as_int().ok_or(ToZ3Error::InvalidOperands(
+        "natural expression must lower to an integer",
+    ))
 }
 
 fn lower_block_matrix<Metadata>(

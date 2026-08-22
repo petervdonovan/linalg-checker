@@ -17,6 +17,7 @@ use crate::{
     type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata},
     visit::{self, Visit},
     visit_mut::VisitContext,
+    z3_utils::{PresburgerClassification, classify_presburger, compare_int},
 };
 
 pub fn infer_symbolic_type_environment(
@@ -255,6 +256,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     let CompiledSymbolicTypes {
         variable_types,
         natural_symbols,
+        natural_environment,
     } = compile_symbolic_types(
         &mut solver,
         symbolic_types,
@@ -268,6 +270,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
             solver: &mut solver,
             variable_types: &variable_types,
             natural_symbols: &natural_symbols,
+            natural_environment: &natural_environment,
             implicit_dimensions: &implicit_dimensions,
             projections: &mut projections,
             mode: ConstraintMode::Permanent,
@@ -388,6 +391,7 @@ fn collect_environment_specification(
 struct CompiledSymbolicTypes {
     variable_types: BTreeMap<Variable, Shape>,
     natural_symbols: BTreeMap<Variable, Int>,
+    natural_environment: Environment,
 }
 
 fn compile_symbolic_types(
@@ -437,13 +441,35 @@ fn compile_symbolic_types(
         }
     }
 
+    let natural_environment = Environment {
+        types: natural_symbols
+            .keys()
+            .cloned()
+            .map(|variable| (variable, Type::Nat))
+            .collect(),
+        ..Environment::default()
+    };
+    for (variable, symbol) in &natural_symbols {
+        assert_eq!(
+            symbol,
+            &Int::new_const(variable.z3_name()),
+            "natural lowering must reuse the environment-query symbol names"
+        );
+    }
+
     let variable_types = all_types
         .into_iter()
-        .map(|(variable, ty)| Ok((variable, compile_type_expr(&ty, &natural_symbols)?)))
+        .map(|(variable, ty)| {
+            Ok((
+                variable,
+                compile_type_expr(&ty, &natural_symbols, &natural_environment)?,
+            ))
+        })
         .collect::<Result<_, ShapeError>>()?;
     Ok(CompiledSymbolicTypes {
         variable_types,
         natural_symbols,
+        natural_environment,
     })
 }
 
@@ -655,6 +681,7 @@ struct DimensionConstraintBuilder<'a> {
     solver: &'a mut Solver,
     variable_types: &'a BTreeMap<Variable, Shape>,
     natural_symbols: &'a BTreeMap<Variable, Int>,
+    natural_environment: &'a Environment,
     implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     projections: &'a mut BTreeMap<Expr<()>, Int>,
     mode: ConstraintMode,
@@ -777,7 +804,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn lower_nat<Metadata>(&self, expression: &Expr<Metadata>) -> Result<Option<Int>, ShapeError> {
-        lower_nat_with_symbols(expression, self.natural_symbols)
+        lower_nat_via_to_z3(expression, self.natural_symbols, self.natural_environment)
     }
 
     fn shape_of<Metadata: MaybeTyped>(
@@ -792,7 +819,7 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn shape_from_resolved_type(&self, ty: &TypeExpr<()>) -> Result<Shape, ShapeError> {
-        compile_type_expr(ty, self.natural_symbols)
+        compile_type_expr(ty, self.natural_symbols, self.natural_environment)
     }
 
     fn constrain_shape_type<Metadata>(
@@ -1322,6 +1349,7 @@ fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
 fn compile_type_expr(
     ty: &TypeExpr<()>,
     natural_symbols: &BTreeMap<Variable, Int>,
+    natural_environment: &Environment,
 ) -> Result<Shape, ShapeError> {
     Ok(match ty {
         TypeExpr::Bool => Shape::Bool,
@@ -1329,13 +1357,13 @@ fn compile_type_expr(
         TypeExpr::Int => Shape::Int,
         TypeExpr::Real => Shape::Real,
         TypeExpr::Matrix(rows, cols) => Shape::Matrix(
-            lower_nat_with_symbols(rows, natural_symbols)?.ok_or_else(|| {
+            lower_nat_via_to_z3(rows, natural_symbols, natural_environment)?.ok_or_else(|| {
                 ShapeError::Unsupported(format!(
                     "matrix row dimension is not linear natural arithmetic: {}",
                     rows.as_latex()
                 ))
             })?,
-            lower_nat_with_symbols(cols, natural_symbols)?.ok_or_else(|| {
+            lower_nat_via_to_z3(cols, natural_symbols, natural_environment)?.ok_or_else(|| {
                 ShapeError::Unsupported(format!(
                     "matrix column dimension is not linear natural arithmetic: {}",
                     cols.as_latex()
@@ -1349,66 +1377,38 @@ fn compile_type_expr(
                 ));
             };
             Shape::Seq(
-                Box::new(compile_type_expr(element, natural_symbols)?),
-                lower_nat_with_symbols(length, natural_symbols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence length is not linear natural arithmetic".to_owned(),
-                    )
-                })?,
+                Box::new(compile_type_expr(
+                    element,
+                    natural_symbols,
+                    natural_environment,
+                )?),
+                lower_nat_via_to_z3(length, natural_symbols, natural_environment)?.ok_or_else(
+                    || {
+                        ShapeError::Unsupported(
+                            "sequence length is not linear natural arithmetic".to_owned(),
+                        )
+                    },
+                )?,
             )
         }
     })
 }
 
-fn lower_nat_with_symbols<Metadata>(
+fn lower_nat_via_to_z3<Metadata>(
     expression: &Expr<Metadata>,
     natural_symbols: &BTreeMap<Variable, Int>,
+    natural_environment: &Environment,
 ) -> Result<Option<Int>, ShapeError> {
-    match &expression.raw {
-        RawExpr::NatLiteral(value) => Ok(Some(Int::from_u64(*value))),
-        RawExpr::Variable(variable) => Ok(natural_symbols.get(variable).cloned()),
-        RawExpr::Monop(Monop::Neg, inner)
-            if lower_nat_with_symbols(inner, natural_symbols)?.is_some() =>
-        {
-            Err(ShapeError::Unsupported(
-                "natural expressions do not support negation".to_owned(),
-            ))
+    match classify_presburger(expression, natural_symbols) {
+        PresburgerClassification::NotNatural => Ok(None),
+        PresburgerClassification::Unsupported(message) => {
+            Err(ShapeError::Unsupported(message.to_owned()))
         }
-        RawExpr::Finop(Finop::Plus, terms) => {
-            let mut lowered = Vec::new();
-            for term in terms {
-                let Some(term) = lower_nat_with_symbols(term, natural_symbols)? else {
-                    return Ok(None);
-                };
-                lowered.push(term);
-            }
-            Ok(Some(Int::add(&lowered)))
+        PresburgerClassification::Valid => {
+            crate::to_z3::lower_core_integer(natural_environment, expression)
+                .map(Some)
+                .map_err(|error| ShapeError::Unsupported(error.to_string()))
         }
-        RawExpr::Finop(Finop::Times, factors) => {
-            let mut coefficient = 1u64;
-            let mut symbolic = None;
-            for factor in factors {
-                if let Some(value) = natural_literal(factor) {
-                    coefficient = coefficient.checked_mul(value).ok_or_else(|| {
-                        ShapeError::Unsupported("linear coefficient overflow".to_owned())
-                    })?;
-                } else if symbolic.is_none() {
-                    symbolic = lower_nat_with_symbols(factor, natural_symbols)?;
-                    if symbolic.is_none() {
-                        return Ok(None);
-                    }
-                } else {
-                    return Err(ShapeError::Unsupported(
-                        "symbolic multiplication is not Presburger arithmetic".to_owned(),
-                    ));
-                }
-            }
-            Ok(Some(match symbolic {
-                Some(value) => value * Int::from_u64(coefficient),
-                None => Int::from_u64(coefficient),
-            }))
-        }
-        _ => Ok(None),
     }
 }
 
@@ -1602,13 +1602,6 @@ fn collect_range_bound_variables<Metadata>(
     Collector(variables).visit_expr(expression);
 }
 
-fn natural_literal<Metadata>(expression: &Expr<Metadata>) -> Option<u64> {
-    match &expression.raw {
-        RawExpr::NatLiteral(value) => Some(*value),
-        _ => None,
-    }
-}
-
 fn scalar_shape_lub(left: Shape, right: Shape) -> Result<Shape, ShapeError> {
     match (left, right) {
         (Shape::Bool, _) | (_, Shape::Bool) => Err(ShapeError::InvalidTyping(
@@ -1633,17 +1626,6 @@ fn require_scalar(shape: &Shape) -> Result<(), ShapeError> {
         ))
     } else {
         Ok(())
-    }
-}
-
-fn compare_int(left: &Int, comparison: Cmp, right: &Int) -> Bool {
-    match comparison {
-        Cmp::Eq => left.eq(right),
-        Cmp::Ne => left.eq(right).not(),
-        Cmp::Lt => left.lt(right),
-        Cmp::Gt => left.gt(right),
-        Cmp::Le => left.le(right),
-        Cmp::Ge => left.ge(right),
     }
 }
 

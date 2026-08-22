@@ -15,6 +15,7 @@ pub mod type_resolver;
 pub mod validate_argument;
 pub mod visit;
 pub mod visit_mut;
+mod z3_utils;
 
 use std::{
     collections::HashMap,
