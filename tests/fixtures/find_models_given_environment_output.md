@@ -96,8 +96,8 @@ Model
 
 Model
 
-- $A = \begin{bmatrix}-1 & 0 \\ 0 & \frac{3}{2}\end{bmatrix}$
-- $B = \begin{bmatrix}-1 & 0 \\ 0 & \frac{2}{3}\end{bmatrix}$
+- $A = \begin{bmatrix}-1 & 0 \\ 0 & -1\end{bmatrix}$
+- $B = \begin{bmatrix}-1 & 0 \\ 0 & -1\end{bmatrix}$
 
 # Nonidentity projection
 

@@ -7,9 +7,8 @@ use std::{
 use z3::ast::{Bool, Int, Real};
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
-    Monop, NaturalEvaluationError, NaturalParameter, Range, RawExpr, SeqOp, Type, TypeExpr,
-    Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, Logic, LogicChain, Matrix, Monop,
+    NaturalEvaluationError, RawExpr, Type, TypeExpr, Variable,
     elaboration::{ElaborationError, elaborate},
     preprocessing::PreparedExpression,
     type_resolver::{MaybeTyped, TypeError},
@@ -29,7 +28,6 @@ pub enum ToZ3Error {
     Type(TypeError),
     Natural(NaturalEvaluationError),
     Unsupported(&'static str),
-    MissingImplicitDimension(ImplicitDimension),
     InvalidOperands(&'static str),
     Shape(&'static str),
     Empty(&'static str),
@@ -47,9 +45,6 @@ impl Display for ToZ3Error {
             | Self::InvalidOperands(message)
             | Self::Shape(message)
             | Self::Empty(message) => f.write_str(message),
-            Self::MissingImplicitDimension(_) => {
-                f.write_str("an implicit matrix dimension is missing from the environment")
-            }
             Self::DimensionOverflow => f.write_str("matrix dimensions overflow usize"),
             Self::InvalidMatrixLiteral => {
                 f.write_str("matrix element count does not match its dimensions")
@@ -116,15 +111,9 @@ impl Neg for Z3Object {
                     ))
                 }
             }
-            Self::Matrix(matrix) => Ok(Self::Matrix(Matrix {
-                rows: matrix.rows,
-                cols: matrix.cols,
-                elements: matrix
-                    .elements
-                    .into_iter()
-                    .map(Neg::neg)
-                    .collect::<Result<_, _>>()?,
-            })),
+            Self::Matrix(_) => Err(ToZ3Error::InvalidOperands(
+                "matrix negation must be elaborated before Z3 lowering",
+            )),
         }
     }
 }
@@ -149,26 +138,9 @@ impl Add for Z3Object {
                     ))
                 }
             }
-            (Self::Matrix(left), Self::Matrix(right)) => {
-                if left.rows != right.rows || left.cols != right.cols {
-                    return Err(ToZ3Error::Shape(
-                        "matrix addition requires equal dimensions",
-                    ));
-                }
-                Ok(Self::Matrix(Matrix {
-                    rows: left.rows,
-                    cols: left.cols,
-                    elements: left
-                        .elements
-                        .into_iter()
-                        .zip(right.elements)
-                        .map(|(left, right)| left + right)
-                        .collect::<Result<_, _>>()?,
-                }))
-            }
-            (Self::Matrix(_), Self::Z3(_)) | (Self::Z3(_), Self::Matrix(_)) => Err(
-                ToZ3Error::InvalidOperands("scalar-matrix addition is not supported"),
-            ),
+            (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
+                "matrix addition must be elaborated before Z3 lowering",
+            )),
         }
     }
 }
@@ -193,25 +165,9 @@ impl Mul for Z3Object {
                     ))
                 }
             }
-            (Self::Matrix(left), Self::Matrix(right)) => multiply_matrices(left, right),
-            (Self::Matrix(matrix), scalar @ Self::Z3(_)) => Ok(Self::Matrix(Matrix {
-                rows: matrix.rows,
-                cols: matrix.cols,
-                elements: matrix
-                    .elements
-                    .into_iter()
-                    .map(|element| element * scalar.clone())
-                    .collect::<Result<_, _>>()?,
-            })),
-            (scalar @ Self::Z3(_), Self::Matrix(matrix)) => Ok(Self::Matrix(Matrix {
-                rows: matrix.rows,
-                cols: matrix.cols,
-                elements: matrix
-                    .elements
-                    .into_iter()
-                    .map(|element| scalar.clone() * element)
-                    .collect::<Result<_, _>>()?,
-            })),
+            (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
+                "matrix multiplication must be elaborated before Z3 lowering",
+            )),
         }
     }
 }
@@ -236,147 +192,14 @@ impl Div for Z3Object {
                     ))
                 }
             }
-            (Self::Matrix(left), Self::Matrix(right)) => single_cell(left)? / single_cell(right)?,
-            (Self::Matrix(left), right @ Self::Z3(_)) => single_cell(left)? / right,
-            (left @ Self::Z3(_), Self::Matrix(right)) => left / single_cell(right)?,
+            (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
+                "matrix division must be elaborated before Z3 lowering",
+            )),
         }
     }
-}
-
-fn single_cell(mut matrix: Matrix<Z3Object>) -> Result<Z3Object, ToZ3Error> {
-    if matrix.rows != 1 || matrix.cols != 1 || matrix.elements.len() != 1 {
-        return Err(ToZ3Error::Shape(
-            "matrix division is only supported for 1x1 matrices",
-        ));
-    }
-    Ok(matrix.elements.pop().unwrap())
-}
-
-fn multiply_matrices(
-    left: Matrix<Z3Object>,
-    right: Matrix<Z3Object>,
-) -> Result<Z3Object, ToZ3Error> {
-    if left.cols != right.rows {
-        return Err(ToZ3Error::Shape(
-            "matrix multiplication requires compatible dimensions",
-        ));
-    }
-    let capacity = left
-        .rows
-        .checked_mul(right.cols)
-        .ok_or(ToZ3Error::DimensionOverflow)?;
-    let mut elements = Vec::with_capacity(capacity);
-    for row in 0..left.rows {
-        for col in 0..right.cols {
-            let mut terms = (0..left.cols).map(|inner| {
-                left.elements[row * left.cols + inner].clone()
-                    * right.elements[inner * right.cols + col].clone()
-            });
-            let first = terms.next().ok_or(ToZ3Error::Empty(
-                "matrix dot product requires at least one term",
-            ))??;
-            elements.push(terms.try_fold(first, |sum, term| sum + term?)?);
-        }
-    }
-    Ok(Z3Object::Matrix(Matrix {
-        rows: left.rows,
-        cols: right.cols,
-        elements,
-    }))
-}
-
-fn numeric_square_matrix(
-    value: Z3Object,
-    nonmatrix: &'static str,
-    empty: &'static str,
-    nonsquare: &'static str,
-    nonnumeric: &'static str,
-) -> Result<Matrix<Z3Object>, ToZ3Error> {
-    let Z3Object::Matrix(matrix) = value else {
-        return Err(ToZ3Error::InvalidOperands(nonmatrix));
-    };
-    let expected_elements = matrix
-        .rows
-        .checked_mul(matrix.cols)
-        .ok_or(ToZ3Error::DimensionOverflow)?;
-    if matrix.elements.len() != expected_elements {
-        return Err(ToZ3Error::InvalidMatrixLiteral);
-    }
-    if matrix.rows == 0 {
-        return Err(ToZ3Error::Empty(empty));
-    }
-    if matrix.rows != matrix.cols {
-        return Err(ToZ3Error::Shape(nonsquare));
-    }
-    if matrix.elements.iter().any(|element| {
-        !matches!(
-            element,
-            Z3Object::Z3(expression)
-                if expression.as_int().is_some() || expression.as_real().is_some()
-        )
-    }) {
-        return Err(ToZ3Error::InvalidOperands(nonnumeric));
-    }
-    Ok(matrix)
-}
-
-fn trace(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
-    let matrix = numeric_square_matrix(
-        value,
-        "trace requires a matrix",
-        "trace requires a nonempty matrix",
-        "trace requires a square matrix",
-        "trace requires numeric scalar matrix cells",
-    )?;
-    let mut diagonal =
-        (0..matrix.rows).map(|index| matrix.elements[index * matrix.cols + index].clone());
-    let first = diagonal
-        .next()
-        .ok_or(ToZ3Error::Empty("trace requires a nonempty matrix"))?;
-    diagonal.try_fold(first, Add::add)
-}
-
-fn determinant(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
-    determinant_square(&numeric_square_matrix(
-        value,
-        "determinant requires a matrix",
-        "determinant requires a nonempty matrix",
-        "determinant requires a square matrix",
-        "determinant requires numeric scalar matrix cells",
-    )?)
-}
-
-fn determinant_square(matrix: &Matrix<Z3Object>) -> Result<Z3Object, ToZ3Error> {
-    if matrix.rows == 1 {
-        return Ok(matrix.elements[0].clone());
-    }
-
-    let mut terms = (0..matrix.cols).map(|col| {
-        let mut minor = Vec::with_capacity((matrix.rows - 1) * (matrix.cols - 1));
-        for row in 1..matrix.rows {
-            for minor_col in 0..matrix.cols {
-                if minor_col != col {
-                    minor.push(matrix.elements[row * matrix.cols + minor_col].clone());
-                }
-            }
-        }
-        let term = matrix.elements[col].clone()
-            * determinant_square(&Matrix {
-                rows: matrix.rows - 1,
-                cols: matrix.cols - 1,
-                elements: minor,
-            })?;
-        if col % 2 == 0 { term } else { -term? }
-    });
-    let first = terms
-        .next()
-        .ok_or(ToZ3Error::Empty("determinant requires a nonempty matrix"))??;
-    terms.try_fold(first, |sum, term| sum + term?)
 }
 
 fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ3Error> {
-    let left = comparison_scalar(left)?;
-    let right = comparison_scalar(right)?;
     match (left, right) {
         (Z3Object::Z3(left), Z3Object::Z3(right)) => {
             if left.as_bool().is_some() || right.as_bool().is_some() {
@@ -397,40 +220,9 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ
                 ))
             }
         }
-        (Z3Object::Matrix(left), Z3Object::Matrix(right)) => {
-            if !matches!(comparison, Cmp::Eq | Cmp::Ne) {
-                return Err(ToZ3Error::InvalidOperands(
-                    "matrix ordering comparisons are not supported",
-                ));
-            }
-            if left.rows != right.rows || left.cols != right.cols {
-                return Err(ToZ3Error::Shape(
-                    "matrix equality requires equal dimensions",
-                ));
-            }
-            let comparisons: Vec<_> = left
-                .elements
-                .into_iter()
-                .zip(right.elements)
-                .map(|(left, right)| compare(left, Cmp::Eq, right))
-                .collect::<Result<_, _>>()?;
-            let equality = Bool::and(&comparisons);
-            if matches!(comparison, Cmp::Ne) {
-                Ok(equality.not())
-            } else {
-                Ok(equality)
-            }
-        }
-        (Z3Object::Matrix(_), Z3Object::Z3(_)) | (Z3Object::Z3(_), Z3Object::Matrix(_)) => Err(
-            ToZ3Error::InvalidOperands("scalar-matrix comparisons are not supported"),
-        ),
-    }
-}
-
-fn comparison_scalar(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
-    match value {
-        Z3Object::Matrix(matrix) if matrix.rows == 1 && matrix.cols == 1 => single_cell(matrix),
-        value => Ok(value),
+        (Z3Object::Matrix(_), _) | (_, Z3Object::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
+            "matrix comparison must be elaborated before Z3 lowering",
+        )),
     }
 }
 
@@ -496,59 +288,38 @@ fn lower<Metadata: MaybeTyped + Clone>(
     e: &Expr<Metadata>,
 ) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
-        RawExpr::Hole => Err(ToZ3Error::Unsupported("holes are not supported by to_z3")),
-        RawExpr::ImplicitDimension(dimension) => Ok(Z3Object::Z3(
-            Int::from_u64(implicit_dimension(γ, *dimension)?).into(),
-        )),
-        RawExpr::IdentityMatrix { dimension } => {
-            let dimension = implicit_dimension(γ, *dimension)?;
-            matrix_constant(dimension, dimension, |row, col| u64::from(row == col))
-        }
-        RawExpr::StandardBasis { index, dimension } => {
-            let dimension = implicit_dimension(γ, *dimension)?;
-            let index = concrete_nat(γ, index)?;
-            if index == 0 || index > dimension {
-                return Err(ToZ3Error::InvalidOperands(
-                    "standard basis index is outside its one-based bounds",
-                ));
-            }
-            matrix_constant(dimension, 1, |row, _| u64::from(row + 1 == index))
-        }
-        RawExpr::ZeroMatrix { rows, cols } => matrix_constant(
-            implicit_dimension(γ, *rows)?,
-            implicit_dimension(γ, *cols)?,
-            |_, _| 0,
-        ),
-        RawExpr::Type(_) => Err(ToZ3Error::Unsupported(
-            "type expressions are not supported by to_z3",
+        RawExpr::Hole
+        | RawExpr::ImplicitDimension(_)
+        | RawExpr::IdentityMatrix { .. }
+        | RawExpr::StandardBasis { .. }
+        | RawExpr::ZeroMatrix { .. }
+        | RawExpr::Type(_)
+        | RawExpr::Seqop(_, _, _)
+        | RawExpr::Triop(_, _, _, _) => Err(ToZ3Error::Unsupported(
+            "expression was not removed by concrete elaboration",
         )),
         RawExpr::Variable(variable) => {
             let ty = e.meta.get_type()?.concretize(γ)?;
-            lower_typed_name(variable.z3_name(), &ty)
-        }
-        RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(
-            match e.meta.get_type()? {
-                TypeExpr::Real => Real::from_int(&Int::from_u64(*value)).into(),
-                TypeExpr::Nat | TypeExpr::Int => Int::from_u64(*value).into(),
-                _ => {
-                    return Err(ToZ3Error::InvalidOperands(
-                        "numeric literal has a nonnumeric scalar type",
-                    ));
+            match ty {
+                Type::Bool | Type::Nat | Type::Int | Type::Real => {
+                    lower_typed_name(variable.z3_name(), &ty)
                 }
-            },
-        )),
-        RawExpr::Monop(Monop::Trace, inner) => trace(lower(γ, inner)?),
-        RawExpr::Monop(Monop::Det, inner) => determinant(lower(γ, inner)?),
-        RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
-        RawExpr::Monop(Monop::Transpose, inner) => transpose(lower(γ, inner)?),
-        RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
-        RawExpr::Binop(Binop::Power, base, exponent) => {
-            let exponent = concrete_nat(γ, exponent)?;
-            lower_power(γ, base, exponent)
+                Type::Matrix(_, _) | Type::Seq(_) => Err(ToZ3Error::Unsupported(
+                    "nonscalar variable remains after concrete elaboration",
+                )),
+            }
         }
-        RawExpr::Binop(Binop::ElementOf, left, right) => lower_membership(γ, left, right),
-        RawExpr::Binop(Binop::Cast, target, value) => lower_cast(γ, target, value),
-        RawExpr::Binop(Binop::SingleSubscript, base, index) => lower_subscript(γ, base, index),
+        RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(match e.meta.get_type()? {
+            TypeExpr::Real => Real::from_int(&Int::from_u64(*value)).into(),
+            TypeExpr::Nat | TypeExpr::Int => Int::from_u64(*value).into(),
+            _ => {
+                return Err(ToZ3Error::InvalidOperands(
+                    "numeric literal has a nonnumeric scalar type",
+                ));
+            }
+        })),
+        RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
+        RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
         }
@@ -557,128 +328,51 @@ fn lower<Metadata: MaybeTyped + Clone>(
         }
         RawExpr::Finop(Finop::And, expressions) => lower_boolean_finite(γ, expressions, Finop::And),
         RawExpr::Finop(Finop::Or, expressions) => lower_boolean_finite(γ, expressions, Finop::Or),
-        RawExpr::Matrix(matrix) => lower_block_matrix(γ, matrix),
+        RawExpr::Matrix(matrix) => lower_flat_matrix(γ, matrix),
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
-        RawExpr::Seqop(op, range, body) => lower_sequence(γ, *op, range, body),
         RawExpr::LogicChain(chain) => lower_logic_chain(γ, chain),
-        RawExpr::Monop(_, _)
-        | RawExpr::Binop(_, _, _)
-        | RawExpr::Triop(_, _, _, _)
-        | RawExpr::Finop(_, _) => Err(ToZ3Error::Unsupported(
-            "expression is not supported by to_z3",
-        )),
+        RawExpr::Monop(_, _) | RawExpr::Binop(_, _, _) | RawExpr::Finop(_, _) => Err(
+            ToZ3Error::Unsupported("expression is not supported by to_z3"),
+        ),
     }
 }
 
-/// Lowers a validated core natural-number expression without rerunning the
-/// symbolic preprocessing pipeline.
-fn lower_block_matrix<Metadata: MaybeTyped + Clone>(
+fn lower_flat_matrix<Metadata: MaybeTyped + Clone>(
     environment: &Environment,
     matrix: &Matrix<Expr<Metadata>>,
 ) -> Result<Z3Object, ToZ3Error> {
-    let expected_elements = matrix
+    let expected = matrix
         .rows
         .checked_mul(matrix.cols)
         .ok_or(ToZ3Error::DimensionOverflow)?;
-    if matrix.elements.len() != expected_elements || (matrix.rows == 0) != (matrix.cols == 0) {
+    if matrix.elements.len() != expected || (matrix.rows == 0) != (matrix.cols == 0) {
         return Err(ToZ3Error::InvalidMatrixLiteral);
     }
-    if matrix.rows == 0 {
-        return Ok(Z3Object::Matrix(Matrix {
-            rows: 0,
-            cols: 0,
-            elements: Vec::new(),
-        }));
-    }
-
-    let blocks = matrix
+    let elements = matrix
         .elements
         .iter()
-        .map(|expression| lower(environment, expression).and_then(numeric_block))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut row_heights = Vec::with_capacity(matrix.rows);
-    for row in 0..matrix.rows {
-        let height = blocks[row * matrix.cols].rows;
-        if (1..matrix.cols).any(|column| blocks[row * matrix.cols + column].rows != height) {
-            return Err(ToZ3Error::Shape(
-                "blocks in a block-matrix row must have equal heights",
-            ));
-        }
-        row_heights.push(height);
-    }
-    let mut column_widths = Vec::with_capacity(matrix.cols);
-    for column in 0..matrix.cols {
-        let width = blocks[column].cols;
-        if (1..matrix.rows).any(|row| blocks[row * matrix.cols + column].cols != width) {
-            return Err(ToZ3Error::Shape(
-                "blocks in a block-matrix column must have equal widths",
-            ));
-        }
-        column_widths.push(width);
-    }
-    let rows = row_heights.iter().try_fold(0usize, |sum, height| {
-        sum.checked_add(*height).ok_or(ToZ3Error::DimensionOverflow)
-    })?;
-    let cols = column_widths.iter().try_fold(0usize, |sum, width| {
-        sum.checked_add(*width).ok_or(ToZ3Error::DimensionOverflow)
-    })?;
-    let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
-    let mut elements = Vec::with_capacity(capacity);
-    for block_row in 0..matrix.rows {
-        for inner_row in 0..row_heights[block_row] {
-            for block_column in 0..matrix.cols {
-                let block = &blocks[block_row * matrix.cols + block_column];
-                let start = inner_row * block.cols;
-                elements.extend(block.elements[start..start + block.cols].iter().cloned());
+        .map(|cell| {
+            let Z3Object::Z3(cell) = lower(environment, cell)? else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "flat matrix cells must be numeric scalars",
+                ));
+            };
+            if let Some(cell) = cell.as_real() {
+                Ok(Z3Object::Z3(cell.into()))
+            } else if let Some(cell) = cell.as_int() {
+                Ok(Z3Object::Z3(Real::from_int(&cell).into()))
+            } else {
+                Err(ToZ3Error::InvalidOperands(
+                    "flat matrix cells must be numeric scalars",
+                ))
             }
-        }
-    }
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Z3Object::Matrix(Matrix {
-        rows,
-        cols,
+        rows: matrix.rows,
+        cols: matrix.cols,
         elements,
     }))
-}
-
-fn numeric_block(value: Z3Object) -> Result<Matrix<Z3Object>, ToZ3Error> {
-    match value {
-        Z3Object::Z3(expression)
-            if expression.as_int().is_some() || expression.as_real().is_some() =>
-        {
-            Ok(Matrix {
-                rows: 1,
-                cols: 1,
-                elements: vec![Z3Object::Z3(expression)],
-            })
-        }
-        Z3Object::Z3(_) => Err(ToZ3Error::InvalidOperands(
-            "block matrix cells must be numeric scalars or matrices",
-        )),
-        Z3Object::Matrix(matrix) => {
-            let expected_elements = matrix
-                .rows
-                .checked_mul(matrix.cols)
-                .ok_or(ToZ3Error::DimensionOverflow)?;
-            if matrix.elements.len() != expected_elements {
-                return Err(ToZ3Error::InvalidMatrixLiteral);
-            }
-            if matrix.rows == 0 {
-                return Err(ToZ3Error::Empty("empty matrices cannot be used as blocks"));
-            }
-            if matrix.elements.iter().any(|element| {
-                !matches!(
-                    element,
-                    Z3Object::Z3(expression)
-                        if expression.as_int().is_some() || expression.as_real().is_some()
-                )
-            }) {
-                return Err(ToZ3Error::InvalidOperands(
-                    "block matrices must flatten to numeric scalar cells",
-                ));
-            }
-            Ok(matrix)
-        }
-    }
 }
 
 fn lower_boolean<Metadata: MaybeTyped + Clone>(
@@ -740,415 +434,17 @@ fn lower_logic_chain<Metadata: MaybeTyped + Clone>(
     }
 }
 
-fn lower_cast<Metadata: MaybeTyped + Clone>(
-    environment: &Environment,
-    target: &Expr<Metadata>,
-    value: &Expr<Metadata>,
-) -> Result<Z3Object, ToZ3Error> {
-    let RawExpr::Type(target) = &target.raw else {
-        return Err(ToZ3Error::InvalidOperands(
-            "cast target must be a type expression",
-        ));
-    };
-    let value = lower(environment, value)?;
-    match target {
-        TypeExpr::Real => match value {
-            Z3Object::Z3(value) if value.as_real().is_some() => Ok(Z3Object::Z3(value)),
-            Z3Object::Matrix(mut matrix)
-                if matrix.rows == 1
-                    && matrix.cols == 1
-                    && matrix.elements.len() == 1
-                    && matches!(matrix.elements[0], Z3Object::Z3(ref cell) if cell.as_real().is_some()) =>
-            {
-                Ok(matrix.elements.pop().unwrap())
-            }
-            _ => Err(ToZ3Error::InvalidOperands(
-                "a cast to real requires a real scalar or real-valued 1x1 matrix",
-            )),
-        },
-        TypeExpr::Matrix(rows, cols) => {
-            if concrete_cast_dimension(environment, rows)? != 1
-                || concrete_cast_dimension(environment, cols)? != 1
-            {
-                return Err(ToZ3Error::Shape(
-                    "a real scalar can only be cast to a 1x1 matrix",
-                ));
-            }
-            let Z3Object::Z3(value) = value else {
-                return Err(ToZ3Error::InvalidOperands(
-                    "a cast to a matrix requires a real scalar",
-                ));
-            };
-            if value.as_real().is_none() {
-                return Err(ToZ3Error::InvalidOperands(
-                    "a cast to a matrix requires a real scalar",
-                ));
-            }
-            Ok(Z3Object::Matrix(Matrix {
-                rows: 1,
-                cols: 1,
-                elements: vec![Z3Object::Z3(value)],
-            }))
-        }
-        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _) => Err(
-            ToZ3Error::Unsupported("only real and 1x1 matrix casts are supported"),
-        ),
-    }
-}
-
-fn concrete_cast_dimension<Metadata>(
-    environment: &Environment,
-    expression: &Expr<Metadata>,
-) -> Result<u64, ToZ3Error> {
-    environment.evaluate_natural(expression).map_err(Into::into)
-}
-
 fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
     Ok(match ty {
         Type::Bool => Z3Object::Z3(Bool::new_const(name).into()),
         Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(name).into()),
         Type::Real => Z3Object::Z3(Real::new_const(name).into()),
-        Type::Matrix(rows, cols) => {
-            let rows = usize::try_from(*rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
-            let cols = usize::try_from(*cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
-            let capacity = rows.checked_mul(cols).ok_or(ToZ3Error::DimensionOverflow)?;
-            let mut elements = Vec::with_capacity(capacity);
-            for row in 1..=rows {
-                for col in 1..=cols {
-                    elements.push(Z3Object::Z3(
-                        Real::new_const(format!("{name}_{{{row},{col}}}")).into(),
-                    ));
-                }
-            }
-            Z3Object::Matrix(Matrix {
-                rows,
-                cols,
-                elements,
-            })
-        }
-        Type::Seq(_) => {
+        Type::Matrix(_, _) | Type::Seq(_) => {
             return Err(ToZ3Error::Unsupported(
-                "sequence variables require an index",
+                "nonscalar variables must be elaborated before Z3 lowering",
             ));
         }
     })
-}
-
-fn implicit_dimension(
-    environment: &Environment,
-    dimension: ImplicitDimension,
-) -> Result<u64, ToZ3Error> {
-    environment
-        .natural_assignment
-        .get(&NaturalParameter::ImplicitDimension(dimension))
-        .copied()
-        .ok_or(ToZ3Error::MissingImplicitDimension(dimension))
-}
-
-fn matrix_constant(
-    rows: u64,
-    cols: u64,
-    value: impl Fn(u64, u64) -> u64,
-) -> Result<Z3Object, ToZ3Error> {
-    let row_count = usize::try_from(rows).map_err(|_| ToZ3Error::DimensionOverflow)?;
-    let col_count = usize::try_from(cols).map_err(|_| ToZ3Error::DimensionOverflow)?;
-    let capacity = row_count
-        .checked_mul(col_count)
-        .ok_or(ToZ3Error::DimensionOverflow)?;
-    let mut elements = Vec::with_capacity(capacity);
-    for row in 0..rows {
-        for col in 0..cols {
-            elements.push(Z3Object::Z3(
-                Real::from_int(&Int::from_u64(value(row, col))).into(),
-            ));
-        }
-    }
-    Ok(Z3Object::Matrix(Matrix {
-        rows: row_count,
-        cols: col_count,
-        elements,
-    }))
-}
-
-fn lower_subscript<Metadata: MaybeTyped + Clone>(
-    environment: &Environment,
-    base: &Expr<Metadata>,
-    index: &Expr<Metadata>,
-) -> Result<Z3Object, ToZ3Error> {
-    let RawExpr::Variable(variable) = &base.raw else {
-        return Err(ToZ3Error::Unsupported(
-            "sequence subscript base must be a variable",
-        ));
-    };
-    let Type::Seq(sequence) = base.meta.get_type()?.concretize(environment)? else {
-        return Err(ToZ3Error::InvalidOperands(
-            "subscripted variable is not a sequence",
-        ));
-    };
-    let index = concrete_nat(environment, index)?;
-    if index == 0 || index > sequence.n {
-        return Err(ToZ3Error::InvalidOperands(
-            "sequence index is outside its one-based bounds",
-        ));
-    }
-    lower_typed_name(format!("{}_{{{index}}}", variable.z3_name()), &sequence.t)
-}
-
-pub(crate) fn lower_sequence_element(
-    variable: &Variable,
-    index: u64,
-    sequence: &crate::SeqType,
-) -> Result<Z3Object, ToZ3Error> {
-    if index == 0 || index > sequence.n {
-        return Err(ToZ3Error::InvalidOperands(
-            "sequence index is outside its one-based bounds",
-        ));
-    }
-    lower_typed_name(format!("{}_{{{index}}}", variable.z3_name()), &sequence.t)
-}
-
-fn concrete_nat<Metadata>(
-    environment: &Environment,
-    expression: &Expr<Metadata>,
-) -> Result<u64, ToZ3Error> {
-    environment.evaluate_natural(expression).map_err(Into::into)
-}
-
-fn transpose(value: Z3Object) -> Result<Z3Object, ToZ3Error> {
-    let Z3Object::Matrix(matrix) = value else {
-        return Err(ToZ3Error::InvalidOperands(
-            "transpose requires a matrix operand",
-        ));
-    };
-    let mut elements = Vec::with_capacity(matrix.elements.len());
-    for col in 0..matrix.cols {
-        for row in 0..matrix.rows {
-            elements.push(matrix.elements[row * matrix.cols + col].clone());
-        }
-    }
-    Ok(Z3Object::Matrix(Matrix {
-        rows: matrix.cols,
-        cols: matrix.rows,
-        elements,
-    }))
-}
-
-fn lower_sequence<Metadata: MaybeTyped + Clone>(
-    environment: &Environment,
-    op: SeqOp,
-    range: &Range<Metadata>,
-    body: &Expr<Metadata>,
-) -> Result<Z3Object, ToZ3Error> {
-    let from = concrete_nat(environment, &range.from)?;
-    let to = concrete_nat(environment, &range.to)?;
-    if from == 0 || from > to {
-        return Err(ToZ3Error::InvalidOperands(
-            "sequence range must be nonempty and one-based",
-        ));
-    }
-    let mut terms = (from..=to).map(|index| {
-        let term = substitute_index(body, &range.index_variable, index);
-        lower(environment, &term)
-    });
-    let first = terms.next().ok_or(ToZ3Error::Empty(
-        "sequence operation requires at least one term",
-    ))??;
-    match op {
-        SeqOp::Sum => terms.try_fold(first, |sum, term| sum + term?),
-        SeqOp::Prod => terms.try_fold(first, |product, term| product * term?),
-    }
-}
-
-fn substitute_index<Metadata: Clone>(
-    expression: &Expr<Metadata>,
-    variable: &Variable,
-    value: u64,
-) -> Expr<Metadata> {
-    let recurse = |expression: &Expr<Metadata>| substitute_index(expression, variable, value);
-    let raw = match &expression.raw {
-        RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
-        RawExpr::Hole => RawExpr::Hole,
-        RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
-        RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
-            dimension: *dimension,
-        },
-        RawExpr::StandardBasis { index, dimension } => RawExpr::StandardBasis {
-            index: recurse(index),
-            dimension: *dimension,
-        },
-        RawExpr::ZeroMatrix { rows, cols } => RawExpr::ZeroMatrix {
-            rows: *rows,
-            cols: *cols,
-        },
-        RawExpr::Type(ty) => RawExpr::Type(substitute_type(ty, variable, value)),
-        RawExpr::Variable(found) => RawExpr::Variable(found.clone()),
-        RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
-        RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
-            rows: matrix.rows,
-            cols: matrix.cols,
-            elements: matrix.elements.iter().map(recurse).collect(),
-        }),
-        RawExpr::Monop(op, inner) => RawExpr::Monop(*op, recurse(inner)),
-        RawExpr::Binop(op, left, right) => RawExpr::Binop(*op, recurse(left), recurse(right)),
-        RawExpr::Triop(op, first, second, third) => {
-            RawExpr::Triop(*op, recurse(first), recurse(second), recurse(third))
-        }
-        RawExpr::Finop(op, expressions) => {
-            RawExpr::Finop(*op, expressions.iter().map(recurse).collect())
-        }
-        RawExpr::CmpChain(chain) => RawExpr::CmpChain(CmpChain {
-            start: recurse(&chain.start),
-            assertions: chain
-                .assertions
-                .iter()
-                .map(|(op, expression)| (*op, recurse(expression)))
-                .collect(),
-        }),
-        RawExpr::LogicChain(chain) => RawExpr::LogicChain(LogicChain {
-            start: recurse(&chain.start),
-            assertions: chain
-                .assertions
-                .iter()
-                .map(|(op, expression)| (*op, recurse(expression)))
-                .collect(),
-        }),
-        RawExpr::Seqop(op, range, body) => RawExpr::Seqop(
-            *op,
-            Range {
-                index_variable: range.index_variable.clone(),
-                from: recurse(&range.from),
-                to: recurse(&range.to),
-            },
-            if range.index_variable == *variable {
-                crate::deep_clone::deep_clone(body)
-            } else {
-                recurse(body)
-            },
-        ),
-    };
-    Expr::with_metadata(expression.meta.clone(), raw)
-}
-
-fn substitute_type<Metadata: Clone>(
-    ty: &TypeExpr<Metadata>,
-    variable: &Variable,
-    value: u64,
-) -> TypeExpr<Metadata> {
-    match ty {
-        TypeExpr::Bool => TypeExpr::Bool,
-        TypeExpr::Nat => TypeExpr::Nat,
-        TypeExpr::Int => TypeExpr::Int,
-        TypeExpr::Real => TypeExpr::Real,
-        TypeExpr::Matrix(rows, cols) => TypeExpr::Matrix(
-            substitute_index(rows, variable, value),
-            substitute_index(cols, variable, value),
-        ),
-        TypeExpr::Seq(element, size) => TypeExpr::Seq(
-            substitute_index(element, variable, value),
-            substitute_index(size, variable, value),
-        ),
-    }
-}
-
-fn lower_membership<Metadata: MaybeTyped + Clone>(
-    environment: &Environment,
-    left: &Expr<Metadata>,
-    right: &Expr<Metadata>,
-) -> Result<Z3Object, ToZ3Error> {
-    let (RawExpr::Variable(variable), RawExpr::Type(expected)) = (&left.raw, &right.raw) else {
-        return Ok(Z3Object::Z3(Bool::from_bool(false).into()));
-    };
-    let actual = left.meta.get_type()?.concretize(environment)?;
-    let result = match (&actual, expected) {
-        (Type::Bool, TypeExpr::Bool)
-        | (Type::Int, TypeExpr::Int)
-        | (Type::Real, TypeExpr::Real) => Bool::from_bool(true),
-        (Type::Nat, TypeExpr::Nat) => Int::new_const(variable.z3_name()).ge(0),
-        (Type::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
-            let row_symbol = Int::new_const(dimension_name(variable, "rows"));
-            let col_symbol = Int::new_const(dimension_name(variable, "cols"));
-            let expected_rows = lower_dimension(environment, expected_rows, "row")?;
-            let expected_cols = lower_dimension(environment, expected_cols, "column")?;
-            Bool::and(&[
-                row_symbol.eq(Int::from_u64(*rows)),
-                col_symbol.eq(Int::from_u64(*cols)),
-                expected_rows.eq(&row_symbol),
-                expected_cols.eq(&col_symbol),
-            ])
-        }
-        (Type::Seq(sequence), TypeExpr::Seq(expected_element, expected_length)) => {
-            let RawExpr::Type(expected_element) = &expected_element.raw else {
-                return Err(ToZ3Error::InvalidOperands(
-                    "sequence element must be a type expression",
-                ));
-            };
-            if matches!(sequence.t, Type::Seq(_)) {
-                return Err(ToZ3Error::Unsupported(
-                    "nested sequence membership is not supported",
-                ));
-            }
-            let length_symbol = Int::new_const(dimension_name(variable, "length"));
-            let expected_length = lower_dimension(environment, expected_length, "sequence")?;
-            let mut constraints = vec![
-                length_symbol.eq(Int::from_u64(sequence.n)),
-                expected_length.eq(&length_symbol),
-            ];
-            constraints.extend(type_constraints(
-                environment,
-                variable,
-                &sequence.t,
-                expected_element,
-                "element_",
-            )?);
-            Bool::and(&constraints)
-        }
-        _ => Bool::from_bool(false),
-    };
-    Ok(Z3Object::Z3(result.into()))
-}
-
-fn type_constraints<Metadata>(
-    environment: &Environment,
-    variable: &Variable,
-    actual: &Type,
-    expected: &TypeExpr<Metadata>,
-    prefix: &str,
-) -> Result<Vec<Bool>, ToZ3Error> {
-    Ok(match (actual, expected) {
-        (Type::Bool, TypeExpr::Bool)
-        | (Type::Nat, TypeExpr::Nat)
-        | (Type::Int, TypeExpr::Int)
-        | (Type::Real, TypeExpr::Real) => Vec::new(),
-        (Type::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
-            let row_symbol = Int::new_const(dimension_name(variable, &format!("{prefix}rows")));
-            let col_symbol = Int::new_const(dimension_name(variable, &format!("{prefix}cols")));
-            vec![
-                row_symbol.eq(Int::from_u64(*rows)),
-                col_symbol.eq(Int::from_u64(*cols)),
-                lower_dimension(environment, expected_rows, "row")?.eq(&row_symbol),
-                lower_dimension(environment, expected_cols, "column")?.eq(&col_symbol),
-            ]
-        }
-        (Type::Seq(_), TypeExpr::Seq(_, _)) => {
-            return Err(ToZ3Error::Unsupported(
-                "nested sequence membership is not supported",
-            ));
-        }
-        _ => vec![Bool::from_bool(false)],
-    })
-}
-
-fn lower_dimension<Metadata>(
-    environment: &Environment,
-    expression: &Expr<Metadata>,
-    axis: &str,
-) -> Result<Int, ToZ3Error> {
-    let _ = axis;
-    Ok(Int::from_u64(environment.evaluate_natural(expression)?))
-}
-
-fn dimension_name(variable: &Variable, axis: &str) -> String {
-    format!("{}_{{{axis}}}", variable.z3_name())
 }
 
 fn lower_cmp_chain<Metadata: MaybeTyped + Clone>(
@@ -1173,76 +469,6 @@ fn lower_cmp_chain<Metadata: MaybeTyped + Clone>(
         Bool::and(&comparisons)
     };
     Ok(Z3Object::Z3(result.into()))
-}
-
-fn lower_power<Metadata: MaybeTyped + Clone>(
-    γ: &Environment,
-    base: &Expr<Metadata>,
-    exponent: u64,
-) -> Result<Z3Object, ToZ3Error> {
-    let lowered_base = lower(γ, base)?;
-    if let Z3Object::Matrix(matrix) = &lowered_base
-        && matrix.rows != matrix.cols
-    {
-        return Err(ToZ3Error::Shape("matrix power requires a square matrix"));
-    }
-    if exponent == 0 {
-        return match lowered_base {
-            Z3Object::Z3(expression) if expression.as_int().is_some() => {
-                Ok(Z3Object::Z3(Int::from_u64(1).into()))
-            }
-            Z3Object::Z3(expression) if expression.as_real().is_some() => {
-                Ok(Z3Object::Z3(Real::from_int(&Int::from_u64(1)).into()))
-            }
-            Z3Object::Z3(_) => Err(ToZ3Error::InvalidOperands(
-                "zero power requires a numeric scalar base",
-            )),
-            Z3Object::Matrix(matrix) => Ok(Z3Object::Matrix(matrix_identity(&matrix)?)),
-        };
-    }
-
-    (1..exponent).try_fold(lowered_base, |power, _| power * lower(γ, base)?)
-}
-
-fn matrix_identity(matrix: &Matrix<Z3Object>) -> Result<Matrix<Z3Object>, ToZ3Error> {
-    let mut real = false;
-    for element in &matrix.elements {
-        match element {
-            Z3Object::Z3(expression) if expression.as_int().is_some() => {}
-            Z3Object::Z3(expression) if expression.as_real().is_some() => real = true,
-            Z3Object::Z3(_) => {
-                return Err(ToZ3Error::InvalidOperands(
-                    "matrix identity requires numeric scalar cells",
-                ));
-            }
-            Z3Object::Matrix(_) => {
-                return Err(ToZ3Error::InvalidOperands(
-                    "matrix identity does not support nested matrices",
-                ));
-            }
-        }
-    }
-    let mut elements = Vec::with_capacity(
-        matrix
-            .rows
-            .checked_mul(matrix.cols)
-            .ok_or(ToZ3Error::DimensionOverflow)?,
-    );
-    for row in 0..matrix.rows {
-        for col in 0..matrix.cols {
-            let value = u64::from(row == col);
-            if real {
-                elements.push(Z3Object::Z3(Real::from_int(&Int::from_u64(value)).into()));
-            } else {
-                elements.push(Z3Object::Z3(Int::from_u64(value).into()));
-            }
-        }
-    }
-    Ok(Matrix {
-        rows: matrix.rows,
-        cols: matrix.cols,
-        elements,
-    })
 }
 
 fn lower_finite<Metadata: MaybeTyped + Clone>(
@@ -1283,7 +509,9 @@ mod tests {
 
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Matrix, Monop, NaturalParameter,
-        RawExpr, SeqType, Type, TypeExpr, Variable, from_tex,
+        RawExpr, SeqType, Type, TypeExpr, Variable,
+        elaboration::ElaborationError,
+        from_tex,
         preprocessing::prepare_expression,
         to_z3::{ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
         type_resolver::{
@@ -1361,9 +589,25 @@ mod tests {
         expression: Expr<Metadata>,
         expected: ToZ3Error,
     ) {
-        assert_eq!(
-            lower_to_z3(&environment, &expression, POSITIVE).err(),
-            Some(expected)
+        let actual = match lower_to_z3(&environment, &expression, POSITIVE) {
+            Ok(_) => panic!("lowering unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let elaborated = match expected.clone() {
+            ToZ3Error::Type(error) => Some(ElaborationError::Type(error)),
+            ToZ3Error::Natural(error) => Some(ElaborationError::Natural(error)),
+            ToZ3Error::Unsupported(message) => Some(ElaborationError::Unsupported(message)),
+            ToZ3Error::InvalidOperands(message) => Some(ElaborationError::InvalidOperands(message)),
+            ToZ3Error::Shape(message) => Some(ElaborationError::Shape(message)),
+            ToZ3Error::Empty(message) => Some(ElaborationError::Empty(message)),
+            ToZ3Error::DimensionOverflow => Some(ElaborationError::DimensionOverflow),
+            ToZ3Error::InvalidMatrixLiteral => Some(ElaborationError::InvalidMatrixLiteral),
+            ToZ3Error::Elaboration(_) => None,
+        };
+        assert!(
+            actual == expected
+                || elaborated.is_some_and(|error| actual == ToZ3Error::Elaboration(error)),
+            "unexpected lowering error: {actual:?}"
         );
     }
 
@@ -1495,7 +739,11 @@ mod tests {
         assert_lowering_error(
             Environment::default(),
             identity,
-            ToZ3Error::MissingImplicitDimension(dimension),
+            ToZ3Error::Elaboration(ElaborationError::Natural(
+                crate::NaturalEvaluationError::MissingAssignment(
+                    NaturalParameter::ImplicitDimension(dimension),
+                ),
+            )),
         );
     }
 
@@ -1856,7 +1104,7 @@ mod tests {
                 membership,
             )
             .to_string(),
-            "false"
+            "(not (= 0 0))"
         );
     }
 
@@ -2358,7 +1606,7 @@ mod tests {
                 ],
             })),
         );
-        assert_eq!(matrix_strings(&literal), vec!["1", "2"]);
+        assert_eq!(matrix_strings(&literal), vec!["(to_real 1)", "(to_real 2)"]);
     }
 
     #[test]
@@ -2434,7 +1682,17 @@ mod tests {
         );
         assert_eq!(
             matrix_strings(&matrix(Environment::default(), recursive.clone())),
-            ["1", "2", "5", "3", "4", "6", "7", "8", "9"]
+            [
+                "(to_real 1)",
+                "(to_real 2)",
+                "(to_real 5)",
+                "(to_real 3)",
+                "(to_real 4)",
+                "(to_real 6)",
+                "(to_real 7)",
+                "(to_real 8)",
+                "(to_real 9)"
+            ]
         );
         assert_scalar_value(
             Environment::default(),
@@ -2625,7 +1883,10 @@ mod tests {
                 exponent,
             )),
         );
-        assert_eq!(matrix_strings(&integer_identity), vec!["1", "0", "0", "1"]);
+        assert_eq!(
+            matrix_strings(&integer_identity),
+            vec!["(to_real 1)", "(to_real 0)", "(to_real 0)", "(to_real 1)"]
+        );
     }
 
     #[test]
@@ -2825,7 +2086,7 @@ mod tests {
             equalities: HashMap::new(),
         };
 
-        expect!["(not (and (= |A_{1,1}| |B_{1,1}|) (= |A_{1,2}| |B_{1,2}|)))"]
+        expect!["(or (not (= |A_{1,1}| |B_{1,1}|)) (not (= |A_{1,2}| |B_{1,2}|)))"]
             .assert_eq(&scalar(environment, chain).to_string());
     }
 

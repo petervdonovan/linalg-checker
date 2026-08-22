@@ -17,9 +17,7 @@ use crate::{
     Variable,
     enumerable_envspec::{ShapeError, infer_symbolic_type_environment},
     preprocessing::{PreparedExpression, prepare_expression},
-    to_z3::{
-        LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, lower_sequence_element, to_z3,
-    },
+    to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, to_z3},
     type_resolver::SymbolicTypeEnvironment,
     visit_mut::VisitContext,
 };
@@ -428,7 +426,9 @@ pub(crate) fn z3_boolean(value: &Z3Object) -> Result<z3::ast::Bool, ModelFinding
 }
 
 pub(crate) fn assert_natural_assignment(solver: &Solver, environment: &Environment) {
-    for (parameter, value) in &environment.natural_assignment {
+    let mut assignment = environment.natural_assignment.iter().collect::<Vec<_>>();
+    assignment.sort_by_key(|(parameter, _)| *parameter);
+    for (parameter, value) in assignment {
         solver.assert(
             z3::ast::Int::new_const(parameter.z3_name()).eq(z3::ast::Int::from_u64(*value)),
         );
@@ -473,10 +473,16 @@ fn extract_variable(
                         Expr::new(RawExpr::Variable(variable.clone())),
                         Expr::new(RawExpr::NatLiteral(index)),
                     ));
-                    let right = z3_object_model_value(
-                        model,
-                        lower_sequence_element(variable, index, sequence)?,
-                    )?;
+                    let prepared = prepare_expression(
+                        variable_types,
+                        &left,
+                        VisitContext {
+                            logical_polarity: true,
+                        },
+                    )
+                    .map_err(ToZ3Error::from)?;
+                    let right =
+                        z3_object_model_value(model, to_z3(environment, &prepared)?.expression)?;
                     Ok(model_equality(left, right))
                 })
                 .collect()

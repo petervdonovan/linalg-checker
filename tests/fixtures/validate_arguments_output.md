@@ -52,7 +52,7 @@
 
    The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by:
 
-   - $A = \begin{bmatrix}\square & \square \\ \square & 2\end{bmatrix}$
+   - $A = \begin{bmatrix}2 & \square \\ \square & \square\end{bmatrix}$
    </details>
 
 # Sequence norm sum
