@@ -175,6 +175,7 @@ fn grouped_expr<Metadata>(
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
+    Forall,
     Logic,
     Or,
     And,
@@ -188,6 +189,7 @@ enum Precedence {
 
 fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     match &e.raw {
+        crate::RawExpr::Finop(Finop::Forall, _) => Precedence::Forall,
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
         crate::RawExpr::Finop(Finop::Or, _) => Precedence::Or,
         crate::RawExpr::Finop(Finop::And, _) => Precedence::And,
@@ -215,12 +217,6 @@ fn type_expr<Metadata>(
         TypeExpr::Nat => write!(f, r"\mathbb{{N}}"),
         TypeExpr::Int => write!(f, r"\mathbb{{Z}}"),
         TypeExpr::Real => write!(f, r"\mathbb{{R}}"),
-        TypeExpr::Matrix(rows, cols)
-            if matches!(rows.raw, crate::RawExpr::NatLiteral(1))
-                && matches!(cols.raw, crate::RawExpr::NatLiteral(1)) =>
-        {
-            write!(f, r"\mathbb{{R}}")
-        }
         TypeExpr::Matrix(rows, cols) if matches!(cols.raw, crate::RawExpr::NatLiteral(1)) => {
             write!(f, r"\mathbb{{R}}^{{")?;
             expr_with_mode(f, rows, verbose)?;
@@ -380,6 +376,17 @@ fn finop<'a, Metadata: 'a, I>(
 where
     I: IntoIterator<Item = &'a Expr<Metadata>>,
 {
+    let exprs = exprs.into_iter().collect::<Vec<_>>();
+    if matches!(op, Finop::Forall) {
+        write!(f, r"\forall ")?;
+        for (index, expression) in exprs.iter().enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            expr_with_mode(f, expression, verbose)?;
+        }
+        return Ok(());
+    }
     match op {
         Finop::Max => write!(f, r"\max(")?,
         Finop::Min => write!(f, r"\min(")?,
@@ -405,6 +412,7 @@ where
             }
             Finop::And => precedence(expression) < Precedence::And,
             Finop::Or => precedence(expression) < Precedence::Or,
+            Finop::Forall => unreachable!(),
             _ => false,
         };
         grouped_expr(f, expression, grouped, verbose)?;
@@ -412,6 +420,7 @@ where
 
     match op {
         Finop::Max | Finop::Min => write!(f, ")"),
+        Finop::Forall => unreachable!(),
         _ => Ok(()),
     }
 }
@@ -510,6 +519,7 @@ fn finop_separator(op: &Finop) -> &'static str {
         Finop::Times => " ",
         Finop::And => r" \land ",
         Finop::Or => r" \lor ",
+        Finop::Forall => ", ",
         Finop::Max | Finop::Min => ", ",
     }
 }
@@ -577,7 +587,7 @@ mod tests {
         .map(|ty| as_latex(RawExpr::Type(TypeExpr::from(ty))))
         .join("\n");
         expect![
-            "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\n\\mathbb{R}"
+            "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\n\\mathbb{R}^{1}"
         ]
         .assert_eq(&rendered_types);
 

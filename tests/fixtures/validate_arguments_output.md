@@ -477,3 +477,110 @@ This follows from the following facts:
 
    - $\left(y - x\right) \left(x + y\right) \ge 0$
    </details>
+
+# Powers of two by induction
+
+WTS $2^{n} \ge n + 1$ by induction on $n$
+
+<details>
+<summary>✅ likely</summary>
+
+The induction base and step were validated up to a maximum dimension of 2.
+</details>
+
+1. WTS $2^{0} \ge 0 + 1$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+   1. $2^{0} \ge 0 + 1$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
+2. Given:
+
+   - $2^{n} \ge n + 1$
+
+   WTS $2^{n + 1} \ge n + 1 + 1$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>
+
+   1. $2 2^{n} \ge 2 \left(n + 1\right)$
+
+      <details>
+      <summary>✅ likely</summary>
+
+      No counterexamples found up to a maximum dimension of 2.
+
+      No premises seemed necessary to show this.
+      </details>
+   2. $2 \left(n + 1\right) \ge n + 1 + 1$
+
+      <details>
+      <summary>✅ likely</summary>
+
+      No counterexamples found up to a maximum dimension of 2.
+
+      No premises seemed necessary to show this.
+      </details>
+   3. $2^{n + 1} \ge n + 1 + 1$
+
+      <details>
+      <summary>✅ likely</summary>
+
+      No counterexamples found up to a maximum dimension of 2.
+
+      No premises seemed necessary to show this.
+      </details>
+
+# Squared norm in every dimension
+
+Given:
+
+- $x \in \mathbb{R}^{n}$
+
+WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$ by induction on $n$
+
+<details>
+<summary>✅ likely</summary>
+
+The induction base and step were validated up to a maximum dimension of 2.
+</details>
+
+1. Given:
+
+   - $x \in \mathbb{R}^{1}$
+
+   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+2. Given:
+
+   - $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$
+   - $x \in \mathbb{R}^{n + 1}$
+
+   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>

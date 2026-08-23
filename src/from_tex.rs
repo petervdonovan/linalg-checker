@@ -75,6 +75,12 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_logic(&mut self) -> Result<Expr<()>, FromTexError> {
+        if matches!(
+            self.nodes.get(self.position),
+            Some(ParseNode::TextOrd { text, .. }) if text == r"\forall"
+        ) {
+            return self.parse_forall();
+        }
         let start = self.parse_or()?;
         let mut assertions = Vec::new();
 
@@ -96,6 +102,22 @@ impl<'a> Cursor<'a> {
                 assertions,
             })))
         }
+    }
+
+    fn parse_forall(&mut self) -> Result<Expr<()>, FromTexError> {
+        self.position += 1;
+        let expressions = split_top_level(&self.nodes[self.position..], ",")
+            .into_iter()
+            .map(expr)
+            .collect::<Result<Vec<_>, _>>()?;
+        if expressions.len() < 2 {
+            return Err(FromTexError::Malformed {
+                index: self.position,
+                message: "forall requires at least one premise and a body".to_owned(),
+            });
+        }
+        self.position = self.nodes.len();
+        Ok(Expr::new(RawExpr::Finop(Finop::Forall, expressions)))
     }
 
     fn parse_or(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -581,13 +603,7 @@ fn parse_type(node: &ParseNode) -> Result<Option<TypeExpr<()>>, FromTexError> {
                 [rows, cols] => {
                     let rows = expr(rows)?;
                     let cols = expr(cols)?;
-                    if matches!(rows.raw, RawExpr::NatLiteral(1))
-                        && matches!(cols.raw, RawExpr::NatLiteral(1))
-                    {
-                        Ok(Some(TypeExpr::Real))
-                    } else {
-                        Ok(Some(TypeExpr::Matrix(rows, cols)))
-                    }
+                    Ok(Some(TypeExpr::Matrix(rows, cols)))
                 }
                 _ => Err(FromTexError::Malformed {
                     index: 0,
@@ -1069,17 +1085,17 @@ mod tests {
     }
 
     #[test]
-    fn one_by_one_matrix_type_canonicalizes_to_real() {
+    fn one_by_one_matrix_type_remains_a_matrix() {
         let expression: Expr<()> = Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(1, 1))));
         let parsed = parse(&expression.as_latex().to_string()).unwrap();
         assert!(matches!(
             super::expr(&parsed).unwrap().raw,
-            RawExpr::Type(TypeExpr::Real)
+            RawExpr::Type(TypeExpr::Matrix(_, _))
         ));
     }
 
     #[test]
-    fn one_by_one_matrix_cast_target_canonicalizes_to_real() {
+    fn one_by_one_matrix_cast_target_remains_a_matrix() {
         let expression: Expr<()> = Expr::new(RawExpr::Binop(
             Binop::Cast,
             Expr::new(RawExpr::Type(TypeExpr::Matrix(
@@ -1092,7 +1108,7 @@ mod tests {
         assert!(matches!(
             &super::expr(&parsed).unwrap().raw,
             RawExpr::Binop(Binop::Cast, target, _)
-                if matches!(target.raw, RawExpr::Type(TypeExpr::Real))
+                if matches!(target.raw, RawExpr::Type(TypeExpr::Matrix(_, _)))
         ));
     }
 
@@ -1276,6 +1292,14 @@ mod tests {
                 if expressions.len() == 3
                     && matches!(expressions[1].raw, RawExpr::Finop(Finop::And, _))
         ));
+    }
+
+    #[test]
+    fn parses_universal_expressions() {
+        expect![r"\forall x \in \mathbb{R}^{n}, x = x"]
+            .assert_eq(&round_trip(r"\forall x \in \mathbb{R}^{n}, x = x").unwrap());
+        expect![r"\left(\forall x \in \mathbb{R}, x = x\right) \land y = y"]
+            .assert_eq(&round_trip(r"(\forall x \in \mathbb{R}, x=x) \land y=y").unwrap());
     }
 
     #[test]

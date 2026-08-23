@@ -1,6 +1,7 @@
 use linalg_sandbox::validate_argument::{
     ArgumentItem, Arguments, StepCheck, StepValidationData, ToFromMd,
 };
+use linalg_sandbox::{Finop, RawExpr};
 
 const MAX_DIMENSION: u64 = 2;
 const INPUT: &str = include_str!("fixtures/validate_arguments_input.md");
@@ -69,4 +70,74 @@ fn validates_nested_proof_of_monotone_squaring() {
     let details = rendered[wts..].find("   <details>").unwrap() + wts;
     let body = rendered[wts..].find("   1. $x \\le y$").unwrap() + wts;
     assert!(wts < details && details < body);
+}
+
+#[test]
+fn validates_nested_induction_obligations() {
+    let mut arguments = Arguments::parse_str(INPUT);
+    arguments.validate(MAX_DIMENSION);
+    let argument = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Powers of two by induction")
+        .expect("missing induction argument");
+
+    assert!(argument.error.is_none());
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::TacticEstablished))
+    );
+    assert!(!argument.root.validation.environments_exhaustive);
+    assert_eq!(argument.root.steps.len(), 2);
+    for item in &argument.root.steps {
+        let ArgumentItem::Goal(goal) = item else {
+            panic!("induction obligations must be direct child goals")
+        };
+        assert!(
+            goal.validation
+                .checks
+                .iter()
+                .any(|check| matches!(check, StepCheck::Unsat { .. }))
+        );
+    }
+}
+
+#[test]
+fn validates_scoped_vector_induction_from_dimension_one() {
+    let mut arguments = Arguments::parse_str(INPUT);
+    arguments.validate(MAX_DIMENSION);
+    let argument = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Squared norm in every dimension")
+        .expect("missing vector induction argument");
+
+    assert!(argument.error.is_none());
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::TacticEstablished))
+    );
+    assert!(!argument.root.validation.environments_exhaustive);
+    let [ArgumentItem::Goal(base), ArgumentItem::Goal(step)] = argument.root.steps.as_slice()
+    else {
+        panic!("expected direct base and successor goals")
+    };
+    assert!(is_verified(&base.validation));
+    assert!(is_verified(&step.validation));
+    assert_eq!(
+        base.givens[0].as_latex().to_string(),
+        r"x \in \mathbb{R}^{1}"
+    );
+    assert!(matches!(
+        &step.givens[0].raw,
+        RawExpr::Finop(Finop::Forall, expressions) if expressions.len() == 2
+    ));
 }

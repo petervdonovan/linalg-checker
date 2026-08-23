@@ -179,11 +179,32 @@ pub fn extract_prepared_environment_iterator(
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
+    extract_prepared_environment_iterator_with_required_context(
+        symbolic_types,
+        assumptions,
+        &[],
+        contextual_expressions,
+        max_dimension,
+    )
+}
+
+pub(crate) fn extract_prepared_environment_iterator_with_required_context(
+    symbolic_types: &SymbolicTypeEnvironment,
+    assumptions: &[PreparedExpression],
+    required_context: &[PreparedExpression],
+    contextual_expressions: &[PreparedExpression],
+    max_dimension: u64,
+) -> Result<EnvironmentIterator, ShapeError> {
     let mut hidden_types = BTreeMap::new();
     let mut prepared_assumptions: Vec<Expr<TypedMetadata>> = Vec::new();
+    let mut prepared_required: Vec<Expr<TypedMetadata>> = Vec::new();
     let mut prepared_context: Vec<Expr<TypedMetadata>> = Vec::new();
     for prepared in assumptions {
         prepared_assumptions.push(prepared.expression.clone());
+        append_side_condition_definitions(prepared, &mut prepared_assumptions, &mut hidden_types)?;
+    }
+    for prepared in required_context {
+        prepared_required.push(prepared.expression.clone());
         append_side_condition_definitions(prepared, &mut prepared_assumptions, &mut hidden_types)?;
     }
     for prepared in contextual_expressions {
@@ -195,6 +216,7 @@ pub fn extract_prepared_environment_iterator(
     extract_typed_environment_iterator_with_hidden(
         symbolic_types,
         prepared_assumptions,
+        prepared_required,
         prepared_context,
         max_dimension,
         hidden_types,
@@ -225,6 +247,7 @@ fn append_side_condition_definitions(
 fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     symbolic_types: &SymbolicTypeEnvironment,
     assumptions: Vec<Expr<Metadata>>,
+    required_context: Vec<Expr<Metadata>>,
     contextual_expressions: Vec<Expr<Metadata>>,
     max_dimension: u64,
     hidden_types: BTreeMap<Variable, TypeExpr<()>>,
@@ -240,8 +263,12 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         )));
     }
     let mut solver = Solver::new();
-    let implicit_dimensions =
-        collect_implicit_dimension_ids(assumptions.iter().chain(contextual_expressions.iter()));
+    let implicit_dimensions = collect_implicit_dimension_ids(
+        assumptions
+            .iter()
+            .chain(required_context.iter())
+            .chain(contextual_expressions.iter()),
+    );
     let (variable_types, natural_symbols) = collect_symbolic_types_and_natural_symbols(
         &mut solver,
         symbolic_types,
@@ -260,6 +287,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
             context.constrain_top_level_assertion(assumption)?;
         }
         run_dimension_constraint_visitors(&mut context, &assumptions)?;
+        run_dimension_constraint_visitors(&mut context, &required_context)?;
         check_base_constraints(context.solver)?;
         context.mode = ConstraintMode::Contextual;
         run_dimension_constraint_visitors(&mut context, &contextual_expressions)?;
@@ -1036,6 +1064,12 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         ));
                     }
                 }
+            }
+            RawExpr::Finop(Finop::Forall, _) => {
+                return Err(ShapeError::Unsupported(
+                    "universal expressions are retained rather than dimensionally lowered"
+                        .to_owned(),
+                ));
             }
             RawExpr::Finop(Finop::Max | Finop::Min, _) | RawExpr::Triop(_, _, _, _) => {
                 return Err(ShapeError::Unsupported(

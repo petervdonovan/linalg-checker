@@ -162,7 +162,7 @@ impl From<Type> for TypeExpr<()> {
             Type::Bool => Self::Bool,
             Type::Nat => Self::Nat,
             Type::Int => Self::Int,
-            Type::Real | Type::Matrix(1, 1) => Self::Real,
+            Type::Real => Self::Real,
             Type::Matrix(rows, cols) => Self::Matrix(
                 Expr::new(RawExpr::NatLiteral(rows)),
                 Expr::new(RawExpr::NatLiteral(cols)),
@@ -292,6 +292,7 @@ pub enum Finop {
     Times,
     And,
     Or,
+    Forall,
     Max,
     Min,
 }

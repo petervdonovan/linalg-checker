@@ -1295,7 +1295,7 @@ Model
     }
 
     #[test]
-    fn one_by_one_matrix_environment_type_canonicalizes_to_real() {
+    fn one_by_one_matrix_environment_type_remains_a_matrix() {
         let case = TestCase {
             name: "Canonical".to_owned(),
             sentences: Vec::new(),
@@ -1305,7 +1305,7 @@ Model
         let parsed = TestCase::<NotSolvedYet>::parse_str(&case.to_string());
         assert_eq!(
             parsed.environment,
-            vec![declaration(Variable::new("A"), Type::Real)]
+            vec![declaration(Variable::new("A"), Type::Matrix(1, 1))]
         );
     }
 

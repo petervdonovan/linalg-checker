@@ -42,7 +42,8 @@ The Markdown modules differ mainly in their section structure:
 - `find_model_given_environment` parses `Environment`, `Sentences`, and
   `Conclusion`;
 - `validate_argument` parses one recursive root goal using `Given:`, `WTS`, and
-  ordered sentence or subgoal items.
+  ordered sentence or subgoal items. A goal may currently use the tactic
+  `by induction on $n$`.
 
 ## 2. Symbolic Variable Types
 
@@ -311,6 +312,19 @@ exports `C`; `Given G; WTS C` exports `G => C`. Results that introduce local
 variables are retained as scoped statements for future structural matching but
 are not asserted as quantified Z3 formulas. Internal proof steps never escape
 their goal.
+
+Natural-number induction uses this structural matching directly. For
+`WTS P(n) by induction on n`, validation first finds the lowest admissible
+starting value `s` from the goal's natural and dimensional constraints. This
+query requires the conclusion to be well-typed but does not assert its truth.
+Validated direct child goals must then establish `P(s)` and
+`Given forall G(n), P(n); G(n + 1); WTS P(n + 1)`, where `G` denotes the
+parent goal's givens. The universal induction hypothesis is retained as a
+scoped structural fact and is never asserted to Z3. The step's `n` is instead
+a fresh local natural parameter, constrained by `n >= s` and enumerated through
+concrete environments. Complete obligations establish the parent goal;
+otherwise the complete missing scoped statements are reported and ordinary
+bounded validation of the parent claim continues.
 
 An unsat core supplies the assumptions and previous accepted steps shown as
 supporting facts. A discovered counterexample has priority over tentative

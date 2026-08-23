@@ -13,7 +13,9 @@ use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, Logic, LogicChain, Model, NaturalParameter,
     RawExpr, TypeExpr, Variable,
     enumerable_envspec::{
-        ShapeError, extract_prepared_environment_iterator, infer_symbolic_type_environment,
+        ShapeError, extract_prepared_environment_iterator,
+        extract_prepared_environment_iterator_with_required_context,
+        infer_symbolic_type_environment,
     },
     model_finding::{
         assert_definitions, assert_natural_assignment, expression_list, extract_model, heading,
@@ -24,8 +26,10 @@ use crate::{
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error},
     type_resolver::{SymbolicTypeEnvironment, TypeError},
     visit::Visit,
-    visit_mut::VisitContext,
+    visit_mut::{self, VisitContext, VisitMut},
 };
+
+use crate::deep_clone::deep_clone;
 
 const POSITIVE: VisitContext = VisitContext {
     logical_polarity: true,
@@ -96,6 +100,16 @@ pub enum StepCheck {
         environment: Rc<Environment>,
         declarations: Vec<Expr<()>>,
     },
+    TacticEstablished,
+    IncompleteSubgoals {
+        expected: Vec<Expr<()>>,
+    },
+    QuestionableForall {
+        premises: Vec<Expr<()>>,
+    },
+    InvalidTactic {
+        message: String,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -112,10 +126,17 @@ pub struct ArgumentStep {
     pub validation: StepValidationData,
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tactic {
+    Induction { variable: Variable },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub givens: Vec<Expr<()>>,
     pub conclusion: Expr<()>,
+    pub tactic: Option<Tactic>,
     pub steps: Vec<ArgumentItem>,
     pub validation: StepValidationData,
 }
@@ -177,6 +198,29 @@ impl Argument {
     pub fn validate(&mut self, max_dimension: u64) -> Result<(), ArgumentValidationError> {
         self.error = None;
         self.root.reset(max_dimension);
+
+        if self.root.tactic.is_some() {
+            set_exhaustive(&mut self.root, true);
+            self.root.validation.givens_feasible = true;
+            let environment = Rc::new(Environment::default());
+            let mut solver = Solver::new();
+            let mut tracked = Vec::new();
+            let mut scoped_statements = Vec::new();
+            let mut run = ValidationRun {
+                max_dimension,
+                next_tracker: 0,
+            };
+            validate_goal_contents(
+                &mut self.root,
+                &mut solver,
+                environment,
+                &SymbolicTypeEnvironment::default(),
+                &mut tracked,
+                &mut scoped_statements,
+                &mut run,
+            )?;
+            return Ok(());
+        }
 
         let symbolic_types = infer_symbolic_type_environment(&self.root.givens)?;
         let prepared_givens = self
@@ -316,6 +360,143 @@ struct ValidationRun {
     next_tracker: usize,
 }
 
+struct ParentGoalScope<'a> {
+    symbolic_types: &'a SymbolicTypeEnvironment,
+    tracked: &'a [(Bool, Expr<()>)],
+    scoped_statements: &'a [ScopedStatement],
+    forced_natural: Option<(&'a Variable, u64)>,
+}
+
+struct InductionObligations {
+    base: Expr<()>,
+    step: Expr<()>,
+}
+
+impl InductionObligations {
+    fn new(goal: &Goal, variable: &Variable, start: u64) -> Self {
+        let base_value = Expr::new(RawExpr::NatLiteral(start));
+        let variable_expression = Expr::new(RawExpr::Variable(variable.clone()));
+        let successor = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                variable_expression.clone(),
+                Expr::new(RawExpr::NatLiteral(1)),
+            ],
+        ));
+        let base_givens = goal
+            .givens
+            .iter()
+            .map(|given| substitute_free_variable(given, variable, &base_value))
+            .collect::<Vec<_>>();
+        let base_conclusion = substitute_free_variable(&goal.conclusion, variable, &base_value);
+        let hypothesis = scoped_goal_expression(&goal.givens, &goal.conclusion);
+        let mut step_givens = vec![hypothesis];
+        step_givens.extend(
+            goal.givens
+                .iter()
+                .map(|given| substitute_free_variable(given, variable, &successor)),
+        );
+        let step_conclusion = substitute_free_variable(&goal.conclusion, variable, &successor);
+        Self {
+            base: scoped_goal_expression(&base_givens, &base_conclusion),
+            step: scoped_goal_expression(&step_givens, &step_conclusion),
+        }
+    }
+
+    fn matches_base(&self, goal: &Goal) -> bool {
+        scoped_goal_expression(&goal.givens, &goal.conclusion) == self.base
+    }
+
+    fn matches_step(&self, goal: &Goal) -> bool {
+        scoped_goal_expression(&goal.givens, &goal.conclusion) == self.step
+    }
+}
+
+fn scoped_goal_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
+    if givens.is_empty() {
+        return deep_clone(conclusion);
+    }
+    let mut expressions = givens.iter().map(deep_clone).collect::<Vec<_>>();
+    expressions.push(deep_clone(conclusion));
+    Expr::new(RawExpr::Finop(Finop::Forall, expressions))
+}
+
+fn substitute_free_variable(
+    expression: &Expr<()>,
+    variable: &Variable,
+    replacement: &Expr<()>,
+) -> Expr<()> {
+    struct Substitution<'a> {
+        variable: &'a Variable,
+        replacement: &'a Expr<()>,
+    }
+
+    impl VisitMut<()> for Substitution<'_> {
+        fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<()>) {
+            if matches!(&node.raw, RawExpr::Variable(variable) if variable == self.variable) {
+                *node = deep_clone(self.replacement);
+            } else {
+                visit_mut::visit_expr_mut(self, context, node);
+            }
+        }
+
+        fn visit_raw_expr_finop_mut(
+            &mut self,
+            context: VisitContext,
+            op: &mut Finop,
+            expressions: &mut Vec<Expr<()>>,
+        ) {
+            for expression in expressions.iter_mut() {
+                self.visit_expr_mut(context, expression);
+            }
+            let mut flattened = Vec::new();
+            for expression in expressions.drain(..) {
+                if let RawExpr::Finop(nested_op, nested) = &expression.raw
+                    && nested_op == op
+                {
+                    flattened.extend(nested.iter().map(deep_clone));
+                } else {
+                    flattened.push(expression);
+                }
+            }
+            *expressions = flattened;
+        }
+
+        fn visit_raw_expr_logic_chain_mut(
+            &mut self,
+            context: VisitContext,
+            chain: &mut LogicChain<()>,
+        ) {
+            self.visit_expr_mut(context, &mut chain.start);
+            for (_, expression) in &mut chain.assertions {
+                self.visit_expr_mut(context, expression);
+            }
+        }
+
+        fn visit_raw_expr_seqop_mut(
+            &mut self,
+            context: VisitContext,
+            _op: &mut crate::SeqOp,
+            range: &mut crate::Range<()>,
+            body: &mut Expr<()>,
+        ) {
+            self.visit_expr_mut(context, &mut range.from);
+            self.visit_expr_mut(context, &mut range.to);
+            if range.index_variable != *self.variable {
+                self.visit_expr_mut(context, body);
+            }
+        }
+    }
+
+    let mut result = deep_clone(expression);
+    Substitution {
+        variable,
+        replacement,
+    }
+    .visit_expr_mut(POSITIVE, &mut result);
+    result
+}
+
 fn set_exhaustive(goal: &mut Goal, exhaustive: bool) {
     goal.validation.environments_exhaustive = exhaustive;
     for item in &mut goal.steps {
@@ -369,6 +550,56 @@ fn validate_goal_contents(
     scoped_statements: &mut Vec<ScopedStatement>,
     run: &mut ValidationRun,
 ) -> Result<ClaimResult, ArgumentValidationError> {
+    let induction = match &goal.tactic {
+        Some(Tactic::Induction { variable }) => {
+            if symbolic_types.types.contains_key(variable) {
+                goal.validation.checks.push(StepCheck::InvalidTactic {
+                    message: format!(
+                        "the induction variable {} is already active; rename it",
+                        variable.z3_name()
+                    ),
+                });
+                None
+            } else if !free_variables(goal.givens.iter().chain(std::iter::once(&goal.conclusion)))
+                .contains(variable)
+            {
+                goal.validation.checks.push(StepCheck::InvalidTactic {
+                    message: format!(
+                        "the induction variable {} does not occur freely in the goal",
+                        variable.z3_name()
+                    ),
+                });
+                None
+            } else {
+                match infer_induction_start(
+                    goal,
+                    variable,
+                    &environment,
+                    symbolic_types,
+                    run.max_dimension,
+                )? {
+                    Some(start) => Some((start, InductionObligations::new(goal, variable, start))),
+                    None => {
+                        goal.validation.checks.push(StepCheck::InvalidTactic {
+                            message: format!(
+                                "no admissible starting value for {} was found up to {}",
+                                variable.z3_name(),
+                                run.max_dimension
+                            ),
+                        });
+                        None
+                    }
+                }
+            }
+        }
+        None => None,
+    };
+    let tactic_is_invalid = goal.tactic.is_some() && induction.is_none();
+    let mut base_valid = false;
+    let mut base_exhaustive = false;
+    let mut step_valid = false;
+    let mut step_exhaustive = false;
+
     for item in &mut goal.steps {
         match item {
             ArgumentItem::Sentence(step) => {
@@ -395,15 +626,38 @@ fn validate_goal_contents(
                 }
             }
             ArgumentItem::Goal(child) => {
+                let is_base = induction
+                    .as_ref()
+                    .is_some_and(|(_, obligations)| obligations.matches_base(child));
+                let is_step = induction
+                    .as_ref()
+                    .is_some_and(|(_, obligations)| obligations.matches_step(child));
+                let forced_natural = is_step.then(|| {
+                    let Tactic::Induction { variable } = goal.tactic.as_ref().unwrap();
+                    (variable, induction.as_ref().unwrap().0)
+                });
                 let export = validate_nested_goal(
                     child,
                     solver,
                     Rc::clone(&environment),
-                    symbolic_types,
-                    tracked,
-                    scoped_statements,
+                    ParentGoalScope {
+                        symbolic_types,
+                        tracked,
+                        scoped_statements,
+                        forced_natural,
+                    },
                     run,
                 )?;
+                if export.is_some() {
+                    if is_base {
+                        base_valid = true;
+                        base_exhaustive |= child.validation.environments_exhaustive;
+                    }
+                    if is_step {
+                        step_valid = true;
+                        step_exhaustive |= child.validation.environments_exhaustive;
+                    }
+                }
                 if let Some(export) = export {
                     scoped_statements.push(export.statement);
                     if !export.assertions.is_empty() {
@@ -420,8 +674,42 @@ fn validate_goal_contents(
         }
     }
 
+    if tactic_is_invalid {
+        return Ok(ClaimResult::default());
+    }
+    if let Some((_, obligations)) = &induction {
+        if base_valid && step_valid {
+            goal.validation.environments_exhaustive &= base_exhaustive && step_exhaustive;
+            goal.validation.checks.push(StepCheck::TacticEstablished);
+            return Ok(ClaimResult {
+                assertions: Vec::new(),
+                validated: true,
+            });
+        }
+        if !goal
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::IncompleteSubgoals { .. }))
+        {
+            let mut expected = Vec::new();
+            if !base_valid {
+                expected.push(deep_clone(&obligations.base));
+            }
+            if !step_valid {
+                expected.push(deep_clone(&obligations.step));
+            }
+            goal.validation
+                .checks
+                .push(StepCheck::IncompleteSubgoals { expected });
+        }
+    }
+
     if goal.has_counterexample() {
         return Ok(ClaimResult::default());
+    }
+    if goal.tactic.is_some() {
+        return validate_tactic_fallback(goal, solver, environment, symbolic_types, tracked, run);
     }
     validate_claim(
         &goal.conclusion,
@@ -438,17 +726,69 @@ fn validate_nested_goal(
     goal: &mut Goal,
     solver: &mut Solver,
     parent_environment: Rc<Environment>,
-    parent_types: &SymbolicTypeEnvironment,
-    parent_tracked: &[(Bool, Expr<()>)],
-    parent_scoped_statements: &[ScopedStatement],
+    parent: ParentGoalScope<'_>,
     run: &mut ValidationRun,
 ) -> Result<Option<GoalExport>, ArgumentValidationError> {
     if goal.has_counterexample() {
         return Ok(None);
     }
 
-    let (symbolic_types, introduced_variables) =
-        match extend_symbolic_types(parent_types, &goal.givens) {
+    if goal.tactic.is_some() {
+        let introduced_variables =
+            free_variables(goal.givens.iter().chain(std::iter::once(&goal.conclusion)))
+                .into_iter()
+                .filter(|variable| !parent.symbolic_types.types.contains_key(variable))
+                .collect();
+        let mut tracked = parent.tracked.to_vec();
+        let mut scoped_statements = parent.scoped_statements.to_vec();
+        let result = validate_goal_contents(
+            goal,
+            solver,
+            Rc::clone(&parent_environment),
+            parent.symbolic_types,
+            &mut tracked,
+            &mut scoped_statements,
+            run,
+        )?;
+        return Ok(result.validated.then(|| GoalExport {
+            statement: ScopedStatement {
+                introduced_variables,
+                givens: goal.givens.clone(),
+                conclusion: goal.conclusion.clone(),
+            },
+            assertions: Vec::new(),
+        }));
+    }
+
+    let ordinary_givens = goal
+        .givens
+        .iter()
+        .filter(|given| !is_forall(given))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut forall_active_types = parent.symbolic_types.clone();
+    if let Some((variable, _)) = parent.forced_natural {
+        forall_active_types
+            .types
+            .insert(variable.clone(), TypeExpr::Nat);
+    }
+    let mut questionable = Vec::new();
+    for given in goal.givens.iter().filter(|given| is_forall(given)) {
+        questionable.extend(check_retained_forall(given, &forall_active_types)?);
+    }
+    if !questionable.is_empty()
+        && !goal
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::QuestionableForall { .. }))
+    {
+        goal.validation.checks.push(StepCheck::QuestionableForall {
+            premises: questionable,
+        });
+    }
+    let (mut symbolic_types, mut introduced_variables) =
+        match extend_symbolic_types(parent.symbolic_types, &ordinary_givens) {
             Ok(result) => result,
             Err(ArgumentValidationError::Shape(error)) => {
                 goal.validation.checks.push(StepCheck::Error {
@@ -459,8 +799,15 @@ fn validate_nested_goal(
             }
             Err(error) => return Err(error),
         };
-    let prepared_givens = match goal
-        .givens
+    if let Some((variable, _)) = parent.forced_natural {
+        assert!(
+            !parent.symbolic_types.types.contains_key(variable),
+            "induction-step binder collides with its parent scope"
+        );
+        symbolic_types.types.insert(variable.clone(), TypeExpr::Nat);
+        introduced_variables.insert(variable.clone());
+    }
+    let prepared_givens = match ordinary_givens
         .iter()
         .map(|given| prepare_expression(&symbolic_types, given, POSITIVE))
         .collect::<Result<Vec<_>, _>>()
@@ -477,10 +824,25 @@ fn validate_nested_goal(
         }
     };
 
+    let forced_lower_bound = parent
+        .forced_natural
+        .map(|(variable, start)| natural_lower_bound(variable, start))
+        .map(|bound| {
+            prepare_expression(&symbolic_types, &bound, POSITIVE)
+                .map(|prepared| (bound, prepared))
+                .map_err(ToZ3Error::from)
+                .map_err(ModelFindingError::from)
+        })
+        .transpose()?;
+    let mut environment_givens = prepared_givens.clone();
+    if let Some((_, prepared)) = &forced_lower_bound {
+        environment_givens.push(prepared.clone());
+    }
+
     let extensions = goal_environment_extensions(
         &parent_environment,
         &symbolic_types,
-        &prepared_givens,
+        &environment_givens,
         run.max_dimension,
     )?;
     and_exhaustive(goal, extensions.exhaustive);
@@ -489,8 +851,7 @@ fn validate_nested_goal(
         return Ok(None);
     }
 
-    let implication = introduced_variables
-        .is_empty()
+    let implication = (introduced_variables.is_empty() && !goal.givens.iter().any(is_forall))
         .then(|| scoped_statement_expression(&goal.givens, &goal.conclusion));
     let prepared_implication = implication
         .as_ref()
@@ -506,14 +867,19 @@ fn validate_nested_goal(
         let extension = Rc::new(extension);
         solver.push();
         assert_natural_assignment(solver, &extension);
-        let mut tracked = parent_tracked.to_vec();
-        let mut scoped_statements = parent_scoped_statements.to_vec();
-        for (given, prepared) in goal.givens.iter().zip(&prepared_givens) {
+        let mut tracked = parent.tracked.to_vec();
+        let mut scoped_statements = parent.scoped_statements.to_vec();
+        for (given, prepared) in ordinary_givens.iter().zip(&prepared_givens) {
             let assertion = lower_prepared_boolean(&extension, prepared)?;
             assert_definitions(solver, &assertion.side_conditions)?;
             let tracker = fresh_tracker(&mut run.next_tracker);
             solver.assert_and_track(assertion.expression, &tracker);
             tracked.push((tracker, given.clone()));
+        }
+        if let Some((_, prepared)) = &forced_lower_bound {
+            let assertion = lower_prepared_boolean(&extension, prepared)?;
+            assert_definitions(solver, &assertion.side_conditions)?;
+            solver.assert(assertion.expression);
         }
         match solver.check() {
             SatResult::Sat => {
@@ -716,6 +1082,191 @@ fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Ex
     }))
 }
 
+fn is_forall(expression: &Expr<()>) -> bool {
+    matches!(expression.raw, RawExpr::Finop(Finop::Forall, _))
+}
+
+fn check_retained_forall(
+    expression: &Expr<()>,
+    active_types: &SymbolicTypeEnvironment,
+) -> Result<Vec<Expr<()>>, ArgumentValidationError> {
+    let RawExpr::Finop(Finop::Forall, expressions) = &expression.raw else {
+        return Ok(Vec::new());
+    };
+    if expressions.len() < 2 {
+        return Err(ModelFindingError::from(ToZ3Error::from(TypeError::Invalid(
+            "forall requires at least one premise and a body",
+        )))
+        .into());
+    }
+    let premises = &expressions[..expressions.len() - 1];
+    let premise_variables = premises
+        .iter()
+        .map(|premise| free_variables(std::iter::once(premise)))
+        .collect::<Vec<_>>();
+    let introduced = premise_variables
+        .iter()
+        .flatten()
+        .filter(|variable| !active_types.types.contains_key(*variable))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let questionable = premises
+        .iter()
+        .zip(&premise_variables)
+        .filter(|(_, variables)| variables.is_disjoint(&introduced))
+        .map(|(premise, _)| premise.clone())
+        .collect::<Vec<_>>();
+
+    let inferred = infer_symbolic_type_environment(premises)?;
+    let mut scoped_types = active_types.clone();
+    for variable in &introduced {
+        let ty = inferred.types.get(variable).cloned().ok_or_else(|| {
+            ShapeError::InvalidTyping(format!(
+                "missing inferred type for quantified variable {}",
+                variable.z3_name()
+            ))
+        })?;
+        scoped_types.types.insert(variable.clone(), ty);
+    }
+    for child in expressions {
+        prepare_expression(&scoped_types, child, POSITIVE)
+            .map_err(ToZ3Error::from)
+            .map_err(ModelFindingError::from)?;
+    }
+    Ok(questionable)
+}
+
+fn natural_lower_bound(variable: &Variable, start: u64) -> Expr<()> {
+    Expr::new(RawExpr::CmpChain(CmpChain {
+        start: Expr::new(RawExpr::Variable(variable.clone())),
+        assertions: vec![(Cmp::Ge, Expr::new(RawExpr::NatLiteral(start)))],
+    }))
+}
+
+fn infer_induction_start(
+    goal: &Goal,
+    variable: &Variable,
+    base: &Environment,
+    parent_types: &SymbolicTypeEnvironment,
+    max_dimension: u64,
+) -> Result<Option<u64>, ArgumentValidationError> {
+    for value in 0..=max_dimension {
+        let replacement = Expr::new(RawExpr::NatLiteral(value));
+        let givens = goal
+            .givens
+            .iter()
+            .filter(|given| !is_forall(given))
+            .map(|given| substitute_free_variable(given, variable, &replacement))
+            .collect::<Vec<_>>();
+        let conclusion = substitute_free_variable(&goal.conclusion, variable, &replacement);
+        let (types, _) = match extend_symbolic_types(parent_types, &givens) {
+            Ok(types) => types,
+            Err(ArgumentValidationError::Shape(ShapeError::InvalidTyping(_))) => continue,
+            Err(error) => return Err(error),
+        };
+        let prepared_givens = match givens
+            .iter()
+            .map(|given| prepare_expression(&types, given, POSITIVE))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(prepared) => prepared,
+            Err(TypeError::Invalid(_)) => continue,
+            Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
+        };
+        let prepared_conclusion = match prepare_expression(&types, &conclusion, POSITIVE) {
+            Ok(prepared) => prepared,
+            Err(TypeError::Invalid(_)) => continue,
+            Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
+        };
+        let mut assumptions = fixed_assignment_declarations(base, &types)?;
+        assumptions.extend(prepared_givens);
+        let iterator = match extract_prepared_environment_iterator_with_required_context(
+            &types,
+            &assumptions,
+            std::slice::from_ref(&prepared_conclusion),
+            &[],
+            max_dimension,
+        ) {
+            Ok(iterator) => iterator,
+            Err(ShapeError::Unsat(_) | ShapeError::InvalidTyping(_)) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if iterator.into_iter().next().transpose()?.is_some() {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_tactic_fallback(
+    goal: &mut Goal,
+    solver: &mut Solver,
+    base: Rc<Environment>,
+    parent_types: &SymbolicTypeEnvironment,
+    tracked: &[(Bool, Expr<()>)],
+    run: &mut ValidationRun,
+) -> Result<ClaimResult, ArgumentValidationError> {
+    let ordinary_givens = goal
+        .givens
+        .iter()
+        .filter(|given| !is_forall(given))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (mut types, _) = extend_symbolic_types(parent_types, &ordinary_givens)?;
+    let Tactic::Induction { variable } = goal.tactic.as_ref().unwrap();
+    types.types.insert(variable.clone(), TypeExpr::Nat);
+    let prepared_givens = ordinary_givens
+        .iter()
+        .map(|given| prepare_expression(&types, given, POSITIVE))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ToZ3Error::from)
+        .map_err(ModelFindingError::from)?;
+    let extensions =
+        goal_environment_extensions(&base, &types, &prepared_givens, run.max_dimension)?;
+    goal.validation.environments_exhaustive &= extensions.exhaustive;
+    if extensions.environments.is_empty() {
+        goal.validation
+            .checks
+            .push(StepCheck::DimensionallyInvalid {
+                environment: base,
+                declarations: Vec::new(),
+            });
+        return Ok(ClaimResult::default());
+    }
+
+    let mut all_validated = true;
+    for extension in extensions.environments {
+        let extension = Rc::new(extension);
+        solver.push();
+        assert_natural_assignment(solver, &extension);
+        let mut local_tracked = tracked.to_vec();
+        for (given, prepared) in ordinary_givens.iter().zip(&prepared_givens) {
+            let assertion = lower_prepared_boolean(&extension, prepared)?;
+            assert_definitions(solver, &assertion.side_conditions)?;
+            let tracker = fresh_tracker(&mut run.next_tracker);
+            solver.assert_and_track(assertion.expression, &tracker);
+            local_tracked.push((tracker, given.clone()));
+        }
+        if matches!(solver.check(), SatResult::Sat) {
+            let result = validate_claim(
+                &goal.conclusion,
+                &mut goal.validation,
+                solver,
+                Rc::clone(&extension),
+                &types,
+                &local_tracked,
+                run.max_dimension,
+            )?;
+            all_validated &= result.validated;
+        }
+        solver.pop(1);
+    }
+    Ok(ClaimResult {
+        assertions: Vec::new(),
+        validated: all_validated,
+    })
+}
+
 fn extend_symbolic_types(
     parent: &SymbolicTypeEnvironment,
     givens: &[Expr<()>],
@@ -781,6 +1332,30 @@ impl Visit<()> for FreeVariableCollector {
         );
         self.visit_expr(body);
         self.bound.remove(&range.index_variable);
+    }
+
+    fn visit_raw_expr_finop(&mut self, op: &Finop, expressions: &[Expr<()>]) {
+        if !matches!(op, Finop::Forall) {
+            crate::visit::visit_raw_expr_finop(self, op, expressions);
+            return;
+        }
+        let Some((body, premises)) = expressions.split_last() else {
+            return;
+        };
+        let mut introduced = BTreeSet::new();
+        for premise in premises {
+            for variable in free_variables(std::iter::once(premise)) {
+                if !self.variables.contains(&variable) && !self.bound.contains(&variable) {
+                    introduced.insert(variable);
+                }
+            }
+            self.bound.extend(introduced.iter().cloned());
+            self.visit_expr(premise);
+        }
+        self.visit_expr(body);
+        for variable in introduced {
+            self.bound.remove(&variable);
+        }
     }
 }
 
@@ -1090,7 +1665,7 @@ fn parse_goal(nodes: &[Node]) -> Goal {
     } else {
         Vec::new()
     };
-    let conclusion = parse_wts(
+    let (conclusion, tactic) = parse_wts(
         nodes
             .get(index)
             .unwrap_or_else(|| panic!("goal must contain WTS")),
@@ -1106,6 +1681,7 @@ fn parse_goal(nodes: &[Node]) -> Goal {
     Goal {
         givens,
         conclusion,
+        tactic,
         steps,
         validation: StepValidationData::default(),
     }
@@ -1119,16 +1695,45 @@ fn paragraph_is_label(node: Option<&Node>, expected: &str) -> bool {
     )
 }
 
-fn parse_wts(node: &Node) -> Expr<()> {
+fn parse_wts(node: &Node) -> (Expr<()>, Option<Tactic>) {
     let Node::Paragraph(Paragraph { children, .. }) = node else {
         panic!("WTS must be a paragraph")
     };
-    let [Node::Text(label), Node::InlineMath(math)] = children.as_slice() else {
-        panic!("WTS must contain exactly one inline TeX expression")
+    let (label, math, tactic) = match children.as_slice() {
+        [Node::Text(label), Node::InlineMath(math)] => (label, math, None),
+        [
+            Node::Text(label),
+            Node::InlineMath(math),
+            Node::Text(tactic_label),
+            Node::InlineMath(variable),
+        ] => {
+            assert_eq!(
+                tactic_label.value, " by induction on ",
+                "unsupported goal tactic"
+            );
+            let parsed =
+                ratex_parser::parse(&variable.value).expect("invalid TeX in induction variable");
+            let variable =
+                crate::from_tex::expr(&parsed).expect("unsupported TeX in induction variable");
+            let RawExpr::Variable(variable) = &variable.raw else {
+                panic!("induction target must be a variable")
+            };
+            (
+                label,
+                math,
+                Some(Tactic::Induction {
+                    variable: variable.clone(),
+                }),
+            )
+        }
+        _ => panic!("WTS must contain one expression and an optional supported tactic"),
     };
     assert_eq!(label.value, "WTS ", "goal paragraph must start with WTS");
     let parsed = ratex_parser::parse(&math.value).expect("invalid TeX in WTS expression");
-    crate::from_tex::expr(&parsed).expect("unsupported TeX in WTS expression")
+    (
+        crate::from_tex::expr(&parsed).expect("unsupported TeX in WTS expression"),
+        tactic,
+    )
 }
 
 fn parse_argument_items(node: &Node) -> Vec<ArgumentItem> {
@@ -1163,17 +1768,29 @@ fn goal_nodes(goal: &Goal, expressions: &[Expr<()>]) -> Vec<Node> {
         nodes.push(text_paragraph("Given:"));
         nodes.push(expression_list(&goal.givens));
     }
+    let mut wts_children = vec![
+        Node::Text(markdown::mdast::Text {
+            value: "WTS ".to_owned(),
+            position: None,
+        }),
+        Node::InlineMath(InlineMath {
+            value: goal.conclusion.as_latex().to_string(),
+            position: None,
+        }),
+    ];
+    if let Some(Tactic::Induction { variable }) = &goal.tactic {
+        wts_children.push(Node::Text(markdown::mdast::Text {
+            value: " by induction on ".to_owned(),
+            position: None,
+        }));
+        let variable_expression: Expr<()> = Expr::new(RawExpr::Variable(variable.clone()));
+        wts_children.push(Node::InlineMath(InlineMath {
+            value: variable_expression.as_latex().to_string(),
+            position: None,
+        }));
+    }
     nodes.push(Node::Paragraph(Paragraph {
-        children: vec![
-            Node::Text(markdown::mdast::Text {
-                value: "WTS ".to_owned(),
-                position: None,
-            }),
-            Node::InlineMath(InlineMath {
-                value: goal.conclusion.as_latex().to_string(),
-                position: None,
-            }),
-        ],
+        children: wts_children,
         position: None,
     }));
     if let Some(details) = validation_details(&goal.conclusion, &goal.validation, expressions) {
@@ -1274,6 +1891,15 @@ fn validation_details(
             "<details>\n<summary>Unsupported step</summary>\n\n{error}\n</details>"
         ));
     }
+    if let Some(StepCheck::InvalidTactic { message }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::InvalidTactic { .. }))
+    {
+        return Some(format!(
+            "<details>\n<summary>⚠️ invalid tactic</summary>\n\n{message}\n</details>"
+        ));
+    }
     let existence_warnings: Vec<_> = validation
         .checks
         .iter()
@@ -1322,6 +1948,26 @@ fn validation_details(
                 .to_owned(),
         );
     }
+    if let Some(StepCheck::QuestionableForall { premises }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::QuestionableForall { .. }))
+    {
+        return Some(format!(
+            "<details>\n<summary>⚠️ questionable quantifier</summary>\n\nThe following universal premises do not reference a variable introduced by their quantifier:\n\n{}\n</details>",
+            expression_bullets(premises)
+        ));
+    }
+    if let Some(StepCheck::IncompleteSubgoals { expected }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::IncompleteSubgoals { .. }))
+    {
+        return Some(format!(
+            "<details>\n<summary>⚠️ valid claim, incomplete subgoals</summary>\n\nNo counterexample was found, but the following subgoals were not established:\n\n{}\n</details>",
+            expression_bullets(expected)
+        ));
+    }
     if let Some(StepCheck::InconsistentGivens { max_dimension }) = validation
         .checks
         .iter()
@@ -1339,6 +1985,25 @@ fn validation_details(
     }
     if validation.checks.is_empty() {
         return None;
+    }
+
+    if validation
+        .checks
+        .iter()
+        .any(|check| matches!(check, StepCheck::TacticEstablished))
+    {
+        if validation.environments_exhaustive {
+            return Some(
+                "<details>\n<summary>✅ verified</summary>\n\nThe induction base and step were validated.\n</details>"
+                    .to_owned(),
+            );
+        }
+        let max_dimension = validation
+            .max_dimension
+            .unwrap_or_else(|| panic!("validated goal is missing its maximum dimension"));
+        return Some(format!(
+            "<details>\n<summary>✅ likely</summary>\n\nThe induction base and step were validated up to a maximum dimension of {max_dimension}.\n</details>"
+        ));
     }
 
     let present: BTreeSet<_> = validation
@@ -1413,7 +2078,11 @@ fn expression_bullets(expressions: &[Expr<()>]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Argument, ArgumentItem, Arguments, StepCheck, ToFromMd};
+    use super::{
+        Argument, ArgumentItem, Arguments, StepCheck, Tactic, ToFromMd, free_variables,
+        infer_induction_start,
+    };
+    use crate::{Environment, RawExpr, type_resolver::SymbolicTypeEnvironment};
 
     const ARGUMENT: &str = r#"# Scalar argument
 
@@ -1442,6 +2111,234 @@ WTS $x = x$
             ArgumentItem::Sentence(step) => step.validation.checks.is_empty(),
             ArgumentItem::Goal(goal) => goal.validation.checks.is_empty(),
         }));
+    }
+
+    #[test]
+    fn induction_tactic_round_trips_and_establishes_a_goal() {
+        let input = r#"# Reflexivity by induction
+
+WTS $n = n$ by induction on $n$
+
+1. WTS $0 = 0$
+2. Given:
+
+   - $n = n$
+
+   WTS $n + 1 = n + 1$"#;
+        let mut argument = Argument::parse_str(input);
+        assert_eq!(argument.to_string(), input);
+        assert!(matches!(
+            argument.root.tactic,
+            Some(Tactic::Induction { ref variable }) if variable.name == "n"
+        ));
+
+        argument.validate(2).unwrap();
+        assert!(
+            argument
+                .root
+                .validation
+                .checks
+                .iter()
+                .any(|check| matches!(check, StepCheck::TacticEstablished))
+        );
+        assert!(!argument.root.validation.environments_exhaustive);
+    }
+
+    #[test]
+    fn incomplete_induction_falls_back_to_bounded_validation() {
+        let mut argument = Argument::parse_str(
+            r#"# Incomplete induction
+
+WTS $n = n$ by induction on $n$"#,
+        );
+        argument.validate(2).unwrap();
+        let StepCheck::IncompleteSubgoals { expected } = argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .find(|check| matches!(check, StepCheck::IncompleteSubgoals { .. }))
+            .expect("missing incomplete-subgoals result")
+        else {
+            unreachable!()
+        };
+        assert_eq!(expected[0].as_latex().to_string(), "0 = 0");
+        assert!(matches!(
+            expected[1].raw,
+            RawExpr::Finop(crate::Finop::Forall, _)
+        ));
+        assert_eq!(
+            expected[1].as_latex().to_string(),
+            r"\forall n = n, n + 1 = n + 1"
+        );
+        assert!(
+            argument
+                .root
+                .validation
+                .checks
+                .iter()
+                .any(|check| matches!(check, StepCheck::Unsat { .. }))
+        );
+        assert!(
+            argument
+                .to_string()
+                .contains("valid claim, incomplete subgoals")
+        );
+    }
+
+    #[test]
+    fn tactic_bound_natural_appears_in_counterexamples() {
+        let mut argument = Argument::parse_str(
+            r#"# False induction claim
+
+WTS $n = 0$ by induction on $n$"#,
+        );
+        argument.validate(2).unwrap();
+        let StepCheck::Counterexample { model, .. } = argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .find(|check| matches!(check, StepCheck::Counterexample { .. }))
+            .expect("missing counterexample")
+        else {
+            unreachable!()
+        };
+        assert!(model.iter().any(|assignment| {
+            assignment.as_latex().to_string() == "n = 1"
+                || assignment.as_latex().to_string() == "n = 2"
+        }));
+    }
+
+    #[test]
+    fn induction_binder_is_local_and_may_use_an_arbitrary_name() {
+        let mut argument = Argument::parse_str(
+            r#"# Local induction binder
+
+WTS $q = q$ by induction on $q$
+
+1. $q = q$
+2. WTS $0 = 0$
+3. Given:
+
+   - $q = q$
+
+   WTS $q + 1 = q + 1$"#,
+        );
+        argument.validate(2).unwrap();
+        assert!(matches!(
+            sentence(&argument, 0).validation.checks[0],
+            StepCheck::Error { .. }
+        ));
+        assert!(
+            argument
+                .root
+                .validation
+                .checks
+                .iter()
+                .any(|check| matches!(check, StepCheck::TacticEstablished))
+        );
+    }
+
+    #[test]
+    fn invalid_induction_binders_are_local_goal_errors() {
+        let mut collision = Argument::parse_str(
+            r#"# Collision
+
+Given:
+
+- $n \in \mathbb{N}$
+
+WTS $n = n$
+
+1. WTS $n = n$ by induction on $n$"#,
+        );
+        collision.validate(2).unwrap();
+        let ArgumentItem::Goal(nested) = &collision.root.steps[0] else {
+            panic!("expected nested induction goal")
+        };
+        assert!(matches!(
+            nested.validation.checks[0],
+            StepCheck::InvalidTactic { .. }
+        ));
+
+        let mut absent = Argument::parse_str(
+            r#"# Absent binder
+
+WTS $0 = 0$ by induction on $n$"#,
+        );
+        absent.validate(2).unwrap();
+        assert!(matches!(
+            absent.root.validation.checks[0],
+            StepCheck::InvalidTactic { .. }
+        ));
+    }
+
+    #[test]
+    fn induction_start_uses_structural_and_given_constraints_not_truth() {
+        fn start(markdown: &str, max_dimension: u64) -> Option<u64> {
+            let argument = Argument::parse_str(markdown);
+            let Some(Tactic::Induction { variable }) = &argument.root.tactic else {
+                panic!("expected induction tactic")
+            };
+            infer_induction_start(
+                &argument.root,
+                variable,
+                &Environment::default(),
+                &SymbolicTypeEnvironment::default(),
+                max_dimension,
+            )
+            .unwrap()
+        }
+
+        assert_eq!(
+            start("# Zero\n\nWTS $n = n$ by induction on $n$", 3),
+            Some(0)
+        );
+        assert_eq!(
+            start(
+                "# Vector\n\nGiven:\n\n- $x \\in \\mathbb{R}^{n}$\n\nWTS $0 = 1$ by induction on $n$",
+                3,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            start(
+                "# Later\n\nGiven:\n\n- $n \\ge 2$\n\nWTS $n = n$ by induction on $n$",
+                4,
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn forall_binds_first_premise_variables_and_warns_about_irrelevant_premises() {
+        let quantified = crate::from_tex::expr(
+            &ratex_parser::parse(r"\forall x \in \mathbb{R}^{n}, 0 = 0, x = x").unwrap(),
+        )
+        .unwrap();
+        assert!(free_variables(std::iter::once(&quantified)).is_empty());
+
+        let mut argument = Argument::parse_str(
+            r#"# Questionable universal
+
+WTS $0 = 0$
+
+1. Given:
+
+   - $\forall x \in \mathbb{R}, 0 = 0, x = x$
+
+   WTS $0 = 0$"#,
+        );
+        argument.validate(1).unwrap();
+        let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
+            panic!("expected nested goal")
+        };
+        assert!(goal.validation.checks.iter().any(|check| matches!(
+            check,
+            StepCheck::QuestionableForall { premises }
+                if premises.iter().any(|premise| premise.as_latex().to_string() == "0 = 0")
+        )));
     }
 
     #[test]

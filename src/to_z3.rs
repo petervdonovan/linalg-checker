@@ -1003,6 +1003,21 @@ mod tests {
     }
 
     #[test]
+    fn test_forall_is_retained_but_not_lowered_to_z3() {
+        let environment = Environment {
+            types: [(Variable::new("p"), Type::Bool)].into_iter().collect(),
+            ..Environment::default()
+        };
+        assert_lowering_error(
+            environment,
+            expression(r"\forall p, p"),
+            ToZ3Error::Elaboration(ElaborationError::Unsupported(
+                "finite operator remains after concrete elaboration",
+            )),
+        );
+    }
+
+    #[test]
     fn test_public_lowering_preprocesses_logic_chains() {
         let environment = Environment {
             types: ["p", "q", "r"]

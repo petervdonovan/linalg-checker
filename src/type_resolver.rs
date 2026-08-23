@@ -162,6 +162,7 @@ impl OperatorTypeRules {
         rules.register_finop(Finop::Times, multiplication_rule);
         rules.register_finop(Finop::And, bool_result_rule);
         rules.register_finop(Finop::Or, bool_result_rule);
+        rules.register_finop(Finop::Forall, bool_result_rule);
         rules.register_finop(Finop::Max, scalar_fold_rule);
         rules.register_finop(Finop::Min, scalar_fold_rule);
         rules.register_seqop(SeqOp::Sum, first_value_rule);

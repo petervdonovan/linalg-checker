@@ -189,3 +189,40 @@ WTS $x x \le y y$
 3. $0 \le x + y$
 4. $\left(y - x\right) \left(x + y\right) \ge 0$
 5. $x x \le y y$
+
+# Powers of two by induction
+
+WTS $2^{n} \ge n + 1$ by induction on $n$
+
+1. WTS $2^{0} \ge 0 + 1$
+
+   1. $2^{0} \ge 0 + 1$
+2. Given:
+
+   - $2^{n} \ge n + 1$
+
+   WTS $2^{n + 1} \ge n + 1 + 1$
+
+   1. $2 2^{n} \ge 2 \left(n + 1\right)$
+   2. $2 \left(n + 1\right) \ge n + 1 + 1$
+   3. $2^{n + 1} \ge n + 1 + 1$
+
+# Squared norm in every dimension
+
+Given:
+
+- $x \in \mathbb{R}^{n}$
+
+WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$ by induction on $n$
+
+1. Given:
+
+   - $x \in \mathbb{R}^{1}$
+
+   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+2. Given:
+
+   - $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$
+   - $x \in \mathbb{R}^{n + 1}$
+
+   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
