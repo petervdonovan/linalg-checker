@@ -75,11 +75,13 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_logic(&mut self) -> Result<Expr<()>, FromTexError> {
-        if matches!(
-            self.nodes.get(self.position),
-            Some(ParseNode::TextOrd { text, .. }) if text == r"\forall"
-        ) {
-            return self.parse_forall();
+        if let Some(ParseNode::TextOrd { text, .. }) = self.nodes.get(self.position) {
+            if text == r"\forall" {
+                return self.parse_quantifier(Finop::Forall, "forall");
+            }
+            if text == r"\exists" {
+                return self.parse_quantifier(Finop::Exists, "exists");
+            }
         }
         let start = self.parse_or()?;
         let mut assertions = Vec::new();
@@ -104,7 +106,11 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn parse_forall(&mut self) -> Result<Expr<()>, FromTexError> {
+    fn parse_quantifier(
+        &mut self,
+        operator: Finop,
+        name: &'static str,
+    ) -> Result<Expr<()>, FromTexError> {
         self.position += 1;
         let expressions = split_top_level(&self.nodes[self.position..], ",")
             .into_iter()
@@ -113,11 +119,11 @@ impl<'a> Cursor<'a> {
         if expressions.len() < 2 {
             return Err(FromTexError::Malformed {
                 index: self.position,
-                message: "forall requires at least one premise and a body".to_owned(),
+                message: format!("{name} requires at least one premise and a body"),
             });
         }
         self.position = self.nodes.len();
-        Ok(Expr::new(RawExpr::Finop(Finop::Forall, expressions)))
+        Ok(Expr::new(RawExpr::Finop(operator, expressions)))
     }
 
     fn parse_or(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -1300,6 +1306,23 @@ mod tests {
             .assert_eq(&round_trip(r"\forall x \in \mathbb{R}^{n}, x = x").unwrap());
         expect![r"\left(\forall x \in \mathbb{R}, x = x\right) \land y = y"]
             .assert_eq(&round_trip(r"(\forall x \in \mathbb{R}, x=x) \land y=y").unwrap());
+    }
+
+    #[test]
+    fn parses_existential_expressions() {
+        expect![r"\exists x \in \mathbb{R}, x > 0"]
+            .assert_eq(&round_trip(r"\exists x \in \mathbb{R}, x > 0").unwrap());
+        expect![r"\left(\exists x \in \mathbb{R}, x > 0\right) \lor y > 0"]
+            .assert_eq(&round_trip(r"(\exists x \in \mathbb{R}, x>0) \lor y>0").unwrap());
+        expect![r"\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, x = y\right)"]
+            .assert_eq(
+                &round_trip(r"\forall x \in \mathbb{R}, (\exists y \in \mathbb{R}, x = y)")
+                    .unwrap(),
+            );
+        assert!(matches!(
+            round_trip(r"\exists x"),
+            Err(FromTexError::Malformed { .. })
+        ));
     }
 
     #[test]

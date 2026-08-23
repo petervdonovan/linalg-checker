@@ -1009,8 +1009,15 @@ mod tests {
             ..Environment::default()
         };
         assert_lowering_error(
-            environment,
+            environment.clone(),
             expression(r"\forall p, p"),
+            ToZ3Error::Elaboration(ElaborationError::Unsupported(
+                "finite operator remains after concrete elaboration",
+            )),
+        );
+        assert_lowering_error(
+            environment,
+            expression(r"\exists p, p"),
             ToZ3Error::Elaboration(ElaborationError::Unsupported(
                 "finite operator remains after concrete elaboration",
             )),

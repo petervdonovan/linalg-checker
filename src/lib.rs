@@ -293,6 +293,7 @@ pub enum Finop {
     And,
     Or,
     Forall,
+    Exists,
     Max,
     Min,
 }

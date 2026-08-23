@@ -226,3 +226,28 @@ WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$ by induction on $n$
    - $x \in \mathbb{R}^{n + 1}$
 
    WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+
+# Quantified claims as ordinary steps
+
+Given:
+
+- $y \in \mathbb{R}$
+- $1 > 0$
+- $1 < y$
+
+WTS $\forall x \in \mathbb{R}, x x \ge 0$
+
+1. $\exists z > 0, z < y$
+2. $\forall x \in \mathbb{R}, x x \ge 0$
+
+# Existential evidence from direct subgoals
+
+Given:
+
+- $y \in \mathbb{R}$
+- $1 < y$
+
+WTS $\exists x > 0, x < y$
+
+1. WTS $1 > 0$
+2. WTS $1 < y$

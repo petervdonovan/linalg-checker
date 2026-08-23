@@ -584,3 +584,82 @@ The induction base and step were validated up to a maximum dimension of 2.
 
    No premises seemed necessary to show this.
    </details>
+
+# Quantified claims as ordinary steps
+
+Given:
+
+- $y \in \mathbb{R}$
+- $1 > 0$
+- $1 < y$
+
+WTS $\forall x \in \mathbb{R}, x x \ge 0$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $\forall x \in \mathbb{R}, x x \ge 0$
+</details>
+
+1. $\exists z > 0, z < y$
+
+   <details>
+   <summary>✅ witness found</summary>
+
+   Witness:
+
+   - $z = 1$
+
+   Matched facts:
+
+   - $1 > 0$
+   - $1 < y$
+   </details>
+2. $\forall x \in \mathbb{R}, x x \ge 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Existential evidence from direct subgoals
+
+Given:
+
+- $y \in \mathbb{R}$
+- $1 < y$
+
+WTS $\exists x > 0, x < y$
+
+<details>
+<summary>✅ witness found</summary>
+
+Witness:
+
+- $x = 1$
+
+Matched facts:
+
+- $1 > 0$
+- $1 < y$
+</details>
+
+1. WTS $1 > 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+2. WTS $1 < y$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $1 < y$
+   </details>

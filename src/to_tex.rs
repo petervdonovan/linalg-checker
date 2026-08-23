@@ -189,7 +189,7 @@ enum Precedence {
 
 fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
     match &e.raw {
-        crate::RawExpr::Finop(Finop::Forall, _) => Precedence::Forall,
+        crate::RawExpr::Finop(Finop::Forall | Finop::Exists, _) => Precedence::Forall,
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
         crate::RawExpr::Finop(Finop::Or, _) => Precedence::Or,
         crate::RawExpr::Finop(Finop::And, _) => Precedence::And,
@@ -377,13 +377,21 @@ where
     I: IntoIterator<Item = &'a Expr<Metadata>>,
 {
     let exprs = exprs.into_iter().collect::<Vec<_>>();
-    if matches!(op, Finop::Forall) {
-        write!(f, r"\forall ")?;
+    if matches!(op, Finop::Forall | Finop::Exists) {
+        write!(
+            f,
+            "{}",
+            match op {
+                Finop::Forall => r"\forall ",
+                Finop::Exists => r"\exists ",
+                _ => unreachable!(),
+            }
+        )?;
         for (index, expression) in exprs.iter().enumerate() {
             if index > 0 {
                 write!(f, ", ")?;
             }
-            expr_with_mode(f, expression, verbose)?;
+            grouped_expr(f, expression, is_quantifier_expression(expression), verbose)?;
         }
         return Ok(());
     }
@@ -412,7 +420,7 @@ where
             }
             Finop::And => precedence(expression) < Precedence::And,
             Finop::Or => precedence(expression) < Precedence::Or,
-            Finop::Forall => unreachable!(),
+            Finop::Forall | Finop::Exists => unreachable!(),
             _ => false,
         };
         grouped_expr(f, expression, grouped, verbose)?;
@@ -420,9 +428,16 @@ where
 
     match op {
         Finop::Max | Finop::Min => write!(f, ")"),
-        Finop::Forall => unreachable!(),
+        Finop::Forall | Finop::Exists => unreachable!(),
         _ => Ok(()),
     }
+}
+
+fn is_quantifier_expression<Metadata>(expression: &Expr<Metadata>) -> bool {
+    matches!(
+        expression.raw,
+        crate::RawExpr::Finop(Finop::Forall | Finop::Exists, _)
+    )
 }
 
 fn cmp_chain<Metadata>(
@@ -519,7 +534,7 @@ fn finop_separator(op: &Finop) -> &'static str {
         Finop::Times => " ",
         Finop::And => r" \land ",
         Finop::Or => r" \lor ",
-        Finop::Forall => ", ",
+        Finop::Forall | Finop::Exists => ", ",
         Finop::Max | Finop::Min => ", ",
     }
 }

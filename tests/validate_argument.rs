@@ -141,3 +141,46 @@ fn validates_scoped_vector_induction_from_dimension_one() {
         RawExpr::Finop(Finop::Forall, expressions) if expressions.len() == 2
     ));
 }
+
+#[test]
+fn validates_quantified_steps_and_goal_evidence() {
+    let mut arguments = Arguments::parse_str(INPUT);
+    arguments.validate(MAX_DIMENSION);
+
+    let quantified = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Quantified claims as ordinary steps")
+        .expect("missing quantified-step argument");
+    let ArgumentItem::Sentence(existential) = &quantified.root.steps[0] else {
+        panic!("expected existential sentence")
+    };
+    assert!(existential.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::ExistentialWitness { assignments, .. }
+            if assignments.iter().any(|(variable, value)|
+                variable.name == "z" && value.as_latex().to_string() == "1")
+    )));
+    assert!(
+        quantified
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::EstablishedByFact { .. }))
+    );
+
+    let direct = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Existential evidence from direct subgoals")
+        .expect("missing direct-evidence argument");
+    assert!(
+        direct
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
+    );
+}

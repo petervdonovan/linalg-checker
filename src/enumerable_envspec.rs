@@ -1065,9 +1065,9 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     }
                 }
             }
-            RawExpr::Finop(Finop::Forall, _) => {
+            RawExpr::Finop(Finop::Forall | Finop::Exists, _) => {
                 return Err(ShapeError::Unsupported(
-                    "universal expressions are retained rather than dimensionally lowered"
+                    "quantified expressions are retained rather than dimensionally lowered"
                         .to_owned(),
                 ));
             }
