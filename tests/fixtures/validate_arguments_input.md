@@ -169,3 +169,23 @@ WTS $0 = 0$
    - $y \in \mathbb{R}$
 
    WTS $y = y$
+
+# Squaring nonnegative reals
+
+Given:
+
+- $x \in \mathbb{R}$
+- $y \in \mathbb{R}$
+- $0 \le x$
+- $x \le y$
+
+WTS $x x \le y y$
+
+1. WTS $0 \le y$
+
+   1. $x \le y$
+   2. $0 \le y$
+2. $0 \le y - x$
+3. $0 \le x + y$
+4. $\left(y - x\right) \left(x + y\right) \ge 0$
+5. $x x \le y y$

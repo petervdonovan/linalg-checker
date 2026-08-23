@@ -6,6 +6,12 @@ Given:
 
 WTS $x = x$
 
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
 1. $x = x$
 
    <details>
@@ -23,12 +29,6 @@ WTS $x = x$
    - $x = 2$
    </details>
 
-<details>
-<summary>✅ verified</summary>
-
-No premises seemed necessary to show this.
-</details>
-
 # Matrix argument
 
 Given:
@@ -36,14 +36,6 @@ Given:
 - $A \in \mathbb{R}^{2 \times 2}$
 
 WTS $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-
-1. $A = A$
-
-   <details>
-   <summary>✅ verified</summary>
-
-   No premises seemed necessary to show this.
-   </details>
 
 <details>
 <summary>❌ counterexample found</summary>
@@ -53,6 +45,14 @@ The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by
 - $A = \begin{bmatrix}2 & \square \\ \square & \square\end{bmatrix}$
 </details>
 
+1. $A = A$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
 # Sequence norm sum
 
 Given:
@@ -60,16 +60,6 @@ Given:
 - $\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R}^{d})$
 
 WTS $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
-
-1. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} \ge 0$
-
-   <details>
-   <summary>✅ likely</summary>
-
-   No counterexamples found up to a maximum dimension of 2.
-
-   No premises seemed necessary to show this.
-   </details>
 
 <details>
 <summary>❌ counterexample found</summary>
@@ -81,6 +71,16 @@ The negation of $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$ is satisfied by
 - $\vec{z}_{1} = \begin{bmatrix}2\end{bmatrix}$
 </details>
 
+1. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} \ge 0$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>
+
 # Negating an inequality
 
 Given:
@@ -90,6 +90,14 @@ Given:
 - $x < y$
 
 WTS $-x > -y$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $x < y$
+</details>
 
 1. $-x < -y$
 
@@ -102,17 +110,15 @@ WTS $-x > -y$
    - $y = \frac{1}{2}$
    </details>
 
-<details>
-<summary>✅ verified</summary>
-
-This follows from the following facts:
-
-- $x < y$
-</details>
-
 # Independent implicit matrix constants
 
 WTS $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
 
 1. $I = \begin{bmatrix}1\end{bmatrix}$
 
@@ -135,12 +141,6 @@ WTS $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
    No premises seemed necessary to show this.
    </details>
-
-<details>
-<summary>✅ verified</summary>
-
-No premises seemed necessary to show this.
-</details>
 
 # One-sided orthogonality
 
@@ -258,14 +258,6 @@ Given:
 
 WTS $\left\lVert A \right\rVert_{2} \ge 0$
 
-1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
-
-   <details>
-   <summary>Unsupported step</summary>
-
-   a cast to real requires a real scalar or real-valued 1x1 matrix
-   </details>
-
 <details>
 <summary>⚠️ dimensionally invalid</summary>
 
@@ -273,6 +265,14 @@ This step is not dimensionally meaningful in the following environment:
 
 - $A \in \mathbb{R}^{1 \times 2}$
 </details>
+
+1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   a cast to real requires a real scalar or real-valued 1x1 matrix
+   </details>
 
 # Block multiplication formula
 
@@ -318,7 +318,19 @@ Given:
 
 WTS $x = x$
 
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
 1. WTS $x = x$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
 
    1. $x = 0$
 
@@ -336,12 +348,6 @@ WTS $x = x$
 
       No premises seemed necessary to show this.
       </details>
-
-   <details>
-   <summary>✅ verified</summary>
-
-   No premises seemed necessary to show this.
-   </details>
 2. $x = x$
 
    <details>
@@ -350,15 +356,15 @@ WTS $x = x$
    No premises seemed necessary to show this.
    </details>
 
+# Local givens and sibling names
+
+WTS $0 = 0$
+
 <details>
 <summary>✅ verified</summary>
 
 No premises seemed necessary to show this.
 </details>
-
-# Local givens and sibling names
-
-WTS $0 = 0$
 
 1. Given:
 
@@ -385,8 +391,89 @@ WTS $0 = 0$
    No premises seemed necessary to show this.
    </details>
 
+# Squaring nonnegative reals
+
+Given:
+
+- $x \in \mathbb{R}$
+- $y \in \mathbb{R}$
+- $0 \le x$
+- $x \le y$
+
+WTS $x x \le y y$
+
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $\left(y - x\right) \left(x + y\right) \ge 0$
 </details>
+
+1. WTS $0 \le y$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $0 \le y$
+   </details>
+
+   1. $x \le y$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      This follows from the following facts:
+
+      - $x \le y$
+      </details>
+   2. $0 \le y$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      This follows from the following facts:
+
+      - $0 \le x$
+      - $x \le y$
+      </details>
+2. $0 \le y - x$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $x \le y$
+   </details>
+3. $0 \le x + y$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $0 \le x$
+   - $0 \le y$
+   </details>
+4. $\left(y - x\right) \left(x + y\right) \ge 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $0 \le x$
+   - $x \le y$
+   </details>
+5. $x x \le y y$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $\left(y - x\right) \left(x + y\right) \ge 0$
+   </details>

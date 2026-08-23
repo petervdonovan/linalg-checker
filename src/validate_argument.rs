@@ -1176,14 +1176,14 @@ fn goal_nodes(goal: &Goal, expressions: &[Expr<()>]) -> Vec<Node> {
         ],
         position: None,
     }));
-    if !goal.steps.is_empty() {
-        nodes.push(argument_item_list(&goal.steps, expressions));
-    }
     if let Some(details) = validation_details(&goal.conclusion, &goal.validation, expressions) {
         nodes.push(Node::Html(Html {
             value: details,
             position: None,
         }));
+    }
+    if !goal.steps.is_empty() {
+        nodes.push(argument_item_list(&goal.steps, expressions));
     }
     nodes
 }
@@ -1353,9 +1353,10 @@ fn validation_details(
         .flatten()
         .cloned()
         .collect();
+    let mut seen = BTreeSet::new();
     let supporting_facts: Vec<_> = expressions
         .iter()
-        .filter(|expression| present.contains(*expression))
+        .filter(|expression| present.contains(*expression) && seen.insert((*expression).clone()))
         .cloned()
         .collect();
     let explanation = if supporting_facts.is_empty() {
@@ -1625,7 +1626,7 @@ WTS $A = A$
     }
 
     #[test]
-    #[should_panic(expected = "expression list item must contain one paragraph")]
+    #[should_panic(expected = "goal body must be an ordered list")]
     fn annotated_output_is_not_parseable_as_input() {
         let mut argument = Argument::parse_str(ARGUMENT);
         argument.validate(0).unwrap();
