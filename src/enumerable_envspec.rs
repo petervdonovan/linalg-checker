@@ -6,7 +6,7 @@ use std::{
 
 use z3::{
     SatResult, Solver,
-    ast::{Ast, Bool, Int},
+    ast::{Bool, Int},
 };
 
 use crate::{
@@ -14,7 +14,10 @@ use crate::{
     NaturalParameter, RawExpr, SeqOp, TypeExpr, Variable,
     preprocessing::PreparedExpression,
     preprocessing::prepare_expression,
-    type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata},
+    type_resolver::{
+        MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata, add_type, block_dimensions,
+        multiply_type, require_numeric_scalar, scalar_lub,
+    },
     visit::{self, Visit},
     visit_mut::VisitContext,
     z3_utils::{PresburgerClassification, classify_presburger, compare_int},
@@ -110,15 +113,8 @@ fn type_error_to_shape_error(error: TypeError) -> ShapeError {
     }
 }
 
-#[derive(Clone)]
-enum Shape {
-    Bool,
-    Nat,
-    Int,
-    Real,
-    Matrix(Int, Int),
-    Seq(Box<Shape>, Int),
-}
+type SymbolicTypes = BTreeMap<Variable, TypeExpr<()>>;
+type NaturalSymbols = BTreeMap<NaturalParameter, Int>;
 
 pub struct EnvironmentIterator {
     solver: Solver,
@@ -245,26 +241,19 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     }
     let mut solver = Solver::new();
     let implicit_dimensions =
-        collect_implicit_dimension_symbols(assumptions.iter().chain(contextual_expressions.iter()));
-    for dimension in implicit_dimensions.values() {
-        solver.assert(dimension.gt(0));
-    }
-    let CompiledSymbolicTypes {
-        variable_types,
-        natural_symbols,
-    } = compile_symbolic_types(
+        collect_implicit_dimension_ids(assumptions.iter().chain(contextual_expressions.iter()));
+    let (variable_types, natural_symbols) = collect_symbolic_types_and_natural_symbols(
         &mut solver,
         symbolic_types,
         &hidden_types,
         &implicit_dimensions,
     )?;
-    assert_positive_matrix_dimensions(&mut solver, &variable_types);
+    assert_positive_structural_dimensions(&mut solver, &variable_types, &natural_symbols)?;
     {
         let mut context = DimensionConstraintBuilder {
             solver: &mut solver,
             variable_types: &variable_types,
             natural_symbols: &natural_symbols,
-            implicit_dimensions: &implicit_dimensions,
             mode: ConstraintMode::Permanent,
         };
         for assumption in &assumptions {
@@ -277,14 +266,11 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         check_contextual_constraints(context.solver)?;
     }
 
+    let structural_dimensions = lower_structural_dimensions(&variable_types, &natural_symbols)?;
     let parameters = natural_symbols.into_iter().collect::<Vec<_>>();
     let parameter_values = parameters
         .iter()
         .map(|(_, value)| value.clone())
-        .collect::<Vec<_>>();
-    let structural_dimensions = variable_types
-        .values()
-        .flat_map(shape_dimensions)
         .collect::<Vec<_>>();
     let mut exhaustiveness_values = parameter_values.clone();
     exhaustiveness_values.extend(structural_dimensions.iter().cloned());
@@ -382,23 +368,22 @@ fn collect_environment_specification(
     Ok(specification)
 }
 
-struct CompiledSymbolicTypes {
-    variable_types: BTreeMap<Variable, Shape>,
-    natural_symbols: BTreeMap<NaturalParameter, Int>,
-}
-
-fn compile_symbolic_types(
+fn collect_symbolic_types_and_natural_symbols(
     solver: &mut Solver,
     symbolic_types: &SymbolicTypeEnvironment,
     hidden_types: &BTreeMap<Variable, TypeExpr<()>>,
-    implicit_dimensions: &BTreeMap<ImplicitDimension, Int>,
-) -> Result<CompiledSymbolicTypes, ShapeError> {
+    implicit_dimensions: &BTreeSet<ImplicitDimension>,
+) -> Result<(SymbolicTypes, NaturalSymbols), ShapeError> {
     let mut all_types = symbolic_types
         .types
         .iter()
         .map(|(variable, ty)| (variable.clone(), ty.clone()))
         .collect::<BTreeMap<_, _>>();
     all_types.extend(hidden_types.clone());
+    let mut implicit_dimensions = implicit_dimensions.clone();
+    for ty in all_types.values() {
+        collect_type_implicit_dimensions(ty, &mut implicit_dimensions);
+    }
     let mut natural_variables = BTreeSet::new();
     for (variable, ty) in &all_types {
         if matches!(ty, TypeExpr::Nat) {
@@ -409,11 +394,11 @@ fn compile_symbolic_types(
 
     let mut natural_symbols = implicit_dimensions
         .iter()
-        .map(|(dimension, symbol)| {
-            (
-                NaturalParameter::ImplicitDimension(*dimension),
-                symbol.clone(),
-            )
+        .map(|dimension| {
+            let parameter = NaturalParameter::ImplicitDimension(*dimension);
+            let symbol = Int::new_const(parameter.z3_name());
+            solver.assert(symbol.gt(0));
+            (parameter, symbol)
         })
         .collect::<BTreeMap<_, _>>();
     for variable in natural_variables {
@@ -439,25 +424,25 @@ fn compile_symbolic_types(
         );
     }
 
-    let variable_types = all_types
-        .into_iter()
-        .map(|(variable, ty)| Ok((variable, compile_type_expr(&ty, &natural_symbols)?)))
-        .collect::<Result<_, ShapeError>>()?;
-    Ok(CompiledSymbolicTypes {
-        variable_types,
-        natural_symbols,
-    })
+    Ok((all_types, natural_symbols))
 }
 
-fn assert_positive_matrix_dimensions(
+fn assert_positive_structural_dimensions(
     solver: &mut Solver,
-    variable_types: &BTreeMap<Variable, Shape>,
-) {
-    for shape in variable_types.values() {
-        for dimension in shape_dimensions(shape) {
+    variable_types: &BTreeMap<Variable, TypeExpr<()>>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
+) -> Result<(), ShapeError> {
+    for ty in variable_types.values() {
+        for dimension in structural_dimensions(ty)? {
+            let dimension = lower_required_natural(
+                dimension,
+                natural_symbols,
+                "structural dimension is not linear natural arithmetic",
+            )?;
             solver.assert(dimension.gt(0));
         }
     }
+    Ok(())
 }
 
 fn check_base_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
@@ -605,17 +590,14 @@ impl Iterator for EnvironmentIterator {
     }
 }
 
-fn collect_implicit_dimension_symbols<'a, Metadata: 'a>(
+fn collect_implicit_dimension_ids<'a, Metadata: 'a>(
     expressions: impl Iterator<Item = &'a Expr<Metadata>>,
-) -> BTreeMap<ImplicitDimension, Int> {
+) -> BTreeSet<ImplicitDimension> {
     let mut dimensions = BTreeSet::new();
     for expression in expressions {
         collect_implicit_dimensions(expression, &mut dimensions);
     }
     dimensions
-        .into_iter()
-        .map(|dimension| (dimension, Int::new_const(dimension.z3_name())))
-        .collect()
 }
 
 fn collect_implicit_dimensions<Metadata>(
@@ -650,6 +632,43 @@ fn collect_implicit_dimensions<Metadata>(
     Collector(dimensions).visit_expr(expression);
 }
 
+fn collect_type_implicit_dimensions(
+    ty: &TypeExpr<()>,
+    dimensions: &mut BTreeSet<ImplicitDimension>,
+) {
+    match ty {
+        TypeExpr::Matrix(rows, cols) => {
+            collect_implicit_dimensions(rows, dimensions);
+            collect_implicit_dimensions(cols, dimensions);
+        }
+        TypeExpr::Seq(element, length) => {
+            collect_implicit_dimensions(element, dimensions);
+            collect_implicit_dimensions(length, dimensions);
+        }
+        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
+    }
+}
+
+fn depends_on_implicit_dimension<Metadata>(expression: &Expr<Metadata>) -> bool {
+    let mut dimensions = BTreeSet::new();
+    collect_implicit_dimensions(expression, &mut dimensions);
+    !dimensions.is_empty()
+}
+
+fn type_depends_on_implicit(ty: &TypeExpr<()>) -> bool {
+    let mut dimensions = BTreeSet::new();
+    collect_type_implicit_dimensions(ty, &mut dimensions);
+    !dimensions.is_empty()
+}
+
+fn natural(value: u64) -> Expr<()> {
+    Expr::new(RawExpr::NatLiteral(value))
+}
+
+fn implicit_dimension(dimension: ImplicitDimension) -> Expr<()> {
+    Expr::new(RawExpr::ImplicitDimension(dimension))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConstraintMode {
     Permanent,
@@ -658,51 +677,63 @@ enum ConstraintMode {
 
 struct DimensionConstraintBuilder<'a> {
     solver: &'a mut Solver,
-    variable_types: &'a BTreeMap<Variable, Shape>,
+    variable_types: &'a BTreeMap<Variable, TypeExpr<()>>,
     natural_symbols: &'a BTreeMap<NaturalParameter, Int>,
-    implicit_dimensions: &'a BTreeMap<ImplicitDimension, Int>,
     mode: ConstraintMode,
 }
 
 impl DimensionConstraintBuilder<'_> {
-    fn implicit_dimension(&self, dimension: ImplicitDimension) -> Int {
-        self.implicit_dimensions[&dimension].clone()
-    }
-
-    fn is_implicit_dimension(&self, dimension: &Int) -> bool {
-        self.implicit_dimensions
-            .values()
-            .any(|implicit| ast_contains(dimension, implicit))
-    }
-
-    fn shape_depends_on_implicit(&self, shape: &Shape) -> bool {
-        match shape {
-            Shape::Matrix(rows, cols) => {
-                self.is_implicit_dimension(rows) || self.is_implicit_dimension(cols)
-            }
-            Shape::Seq(element, length) => {
-                self.is_implicit_dimension(length) || self.shape_depends_on_implicit(element)
-            }
-            _ => false,
-        }
-    }
-
-    fn assert_if_relevant(&mut self, assertion: Bool, dimensions: &[&Int]) {
-        if matches!(self.mode, ConstraintMode::Permanent)
-            || dimensions
-                .iter()
-                .any(|dimension| self.is_implicit_dimension(dimension))
-        {
+    fn assert_if_relevant(&mut self, assertion: Bool, depends_on_implicit: bool) {
+        if matches!(self.mode, ConstraintMode::Permanent) || depends_on_implicit {
             self.solver.assert(assertion);
         }
     }
 
-    fn assert_dimensions_equal(&mut self, left: &Int, right: &Int) {
-        self.assert_if_relevant(left.eq(right), &[left, right]);
+    fn assert_dimensions_equal<LeftMetadata, RightMetadata>(
+        &mut self,
+        left: &Expr<LeftMetadata>,
+        right: &Expr<RightMetadata>,
+    ) -> Result<(), ShapeError> {
+        let left_value = required_natural(
+            self.lower_nat(left)?,
+            "matrix dimension is not linear natural arithmetic",
+        )?;
+        let right_value = required_natural(
+            self.lower_nat(right)?,
+            "matrix dimension is not linear natural arithmetic",
+        )?;
+        self.assert_if_relevant(
+            left_value.eq(right_value),
+            depends_on_implicit_dimension(left) || depends_on_implicit_dimension(right),
+        );
+        Ok(())
     }
 
-    fn assert_typing_failure(&mut self, shape: &Shape) {
-        if matches!(self.mode, ConstraintMode::Permanent) || self.shape_depends_on_implicit(shape) {
+    fn assert_natural_comparison<LeftMetadata, RightMetadata>(
+        &mut self,
+        left: &Expr<LeftMetadata>,
+        comparison: crate::Cmp,
+        right: &Expr<RightMetadata>,
+    ) -> Result<(), ShapeError> {
+        let left_value = required_natural(
+            self.lower_nat(left)?,
+            "natural constraint is not linear natural arithmetic",
+        )?;
+        let right_value = required_natural(
+            self.lower_nat(right)?,
+            "natural constraint is not linear natural arithmetic",
+        )?;
+        self.assert_if_relevant(
+            compare_int(&left_value, comparison, &right_value),
+            depends_on_implicit_dimension(left) || depends_on_implicit_dimension(right),
+        );
+        Ok(())
+    }
+
+    fn assert_typing_failure(&mut self, types: &[&TypeExpr<()>]) {
+        if matches!(self.mode, ConstraintMode::Permanent)
+            || types.iter().any(|ty| type_depends_on_implicit(ty))
+        {
             self.solver.assert(Bool::from_bool(false));
         }
     }
@@ -741,47 +772,38 @@ impl DimensionConstraintBuilder<'_> {
         lower_nat_via_to_z3(expression, self.natural_symbols)
     }
 
-    fn shape_of<Metadata: MaybeTyped>(
+    fn type_of<Metadata: MaybeTyped>(
         &self,
         expression: &Expr<Metadata>,
-    ) -> Result<Shape, ShapeError> {
-        let ty = expression
+    ) -> Result<TypeExpr<()>, ShapeError> {
+        expression
             .meta
             .get_type()
-            .map_err(type_error_to_shape_error)?;
-        self.shape_from_resolved_type(&ty)
+            .map_err(type_error_to_shape_error)
     }
 
-    fn shape_from_resolved_type(&self, ty: &TypeExpr<()>) -> Result<Shape, ShapeError> {
-        compile_type_expr(ty, self.natural_symbols)
-    }
-
-    fn constrain_shape_type<Metadata>(
+    fn constrain_types<Metadata>(
         &mut self,
-        actual: &Shape,
+        actual: &TypeExpr<()>,
         expected: &TypeExpr<Metadata>,
     ) -> Result<(), ShapeError> {
-        match (actual, expected) {
-            (Shape::Bool, TypeExpr::Bool)
-            | (Shape::Nat, TypeExpr::Nat)
-            | (Shape::Int, TypeExpr::Int)
-            | (Shape::Real, TypeExpr::Real) => Ok(()),
-            (Shape::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
-                let row_value = self.lower_nat(expected_rows)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "matrix row dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                let col_value = self.lower_nat(expected_cols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "matrix column dimension is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.assert_dimensions_equal(rows, &row_value);
-                self.assert_dimensions_equal(cols, &col_value);
+        let expected = expected.with_default_metadata();
+        match (actual, &expected) {
+            (TypeExpr::Bool, TypeExpr::Bool)
+            | (TypeExpr::Nat, TypeExpr::Nat)
+            | (TypeExpr::Int, TypeExpr::Int)
+            | (TypeExpr::Real, TypeExpr::Real) => Ok(()),
+            (TypeExpr::Matrix(rows, cols), TypeExpr::Matrix(expected_rows, expected_cols)) => {
+                self.assert_dimensions_equal(rows, expected_rows)?;
+                self.assert_dimensions_equal(cols, expected_cols)?;
                 Ok(())
             }
-            (Shape::Seq(element, length), TypeExpr::Seq(expected_element, expected_length)) => {
+            (TypeExpr::Seq(element, length), TypeExpr::Seq(expected_element, expected_length)) => {
+                let RawExpr::Type(element) = &element.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence element must be a type expression".to_owned(),
+                    ));
+                };
                 let RawExpr::Type(expected_element) = &expected_element.raw else {
                     return Err(ShapeError::InvalidTyping(
                         "sequence element must be a type expression".to_owned(),
@@ -792,77 +814,71 @@ impl DimensionConstraintBuilder<'_> {
                         "nested sequence constraints are not supported".to_owned(),
                     ));
                 }
-                let expected_length = self.lower_nat(expected_length)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence length is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
-                self.assert_dimensions_equal(length, &expected_length);
-                self.constrain_shape_type(element, expected_element)
+                self.assert_dimensions_equal(length, expected_length)?;
+                self.constrain_types(element, expected_element)
             }
             _ => {
-                self.assert_typing_failure(actual);
+                self.assert_typing_failure(&[actual, &expected]);
                 Ok(())
             }
         }
     }
 
-    fn add_shapes(&mut self, left: Shape, right: Shape) -> Result<Shape, ShapeError> {
+    fn add_types(
+        &mut self,
+        left: TypeExpr<()>,
+        right: TypeExpr<()>,
+    ) -> Result<TypeExpr<()>, ShapeError> {
         match (&left, &right) {
-            (Shape::Matrix(lr, lc), Shape::Matrix(rr, rc)) => {
-                self.assert_dimensions_equal(lr, rr);
-                self.assert_dimensions_equal(lc, rc);
+            (TypeExpr::Matrix(lr, lc), TypeExpr::Matrix(rr, rc)) => {
+                self.assert_dimensions_equal(lr, rr)?;
+                self.assert_dimensions_equal(lc, rc)?;
+                add_type(left, right).map_err(type_error_to_shape_error)
+            }
+            (TypeExpr::Matrix(_, _), _) | (_, TypeExpr::Matrix(_, _)) => {
+                self.assert_typing_failure(&[&left, &right]);
                 Ok(left)
             }
-            (Shape::Matrix(_, _), _) | (_, Shape::Matrix(_, _)) => {
-                self.assert_typing_failure(&left);
-                self.assert_typing_failure(&right);
-                Ok(left)
-            }
-            _ => scalar_shape_lub(left, right),
+            _ => scalar_lub(left, right).map_err(type_error_to_shape_error),
         }
     }
 
-    fn multiply_shapes(&mut self, left: Shape, right: Shape) -> Result<Shape, ShapeError> {
-        match (left, right) {
-            (Shape::Matrix(rows, inner), Shape::Matrix(right_inner, cols)) => {
-                self.assert_dimensions_equal(&inner, &right_inner);
-                Ok(Shape::Matrix(rows, cols))
+    fn multiply_types(
+        &mut self,
+        left: TypeExpr<()>,
+        right: TypeExpr<()>,
+    ) -> Result<TypeExpr<()>, ShapeError> {
+        match (&left, &right) {
+            (TypeExpr::Matrix(_, inner), TypeExpr::Matrix(right_inner, _)) => {
+                self.assert_dimensions_equal(inner, right_inner)?;
+                multiply_type(left, right).map_err(type_error_to_shape_error)
             }
-            (matrix @ Shape::Matrix(_, _), scalar) | (scalar, matrix @ Shape::Matrix(_, _)) => {
-                require_scalar(&scalar)?;
-                Ok(matrix)
+            (TypeExpr::Matrix(_, _), scalar) | (scalar, TypeExpr::Matrix(_, _)) => {
+                require_numeric_scalar(scalar.clone()).map_err(type_error_to_shape_error)?;
+                multiply_type(left, right).map_err(type_error_to_shape_error)
             }
-            (left, right) => scalar_shape_lub(left, right),
+            _ => scalar_lub(left, right).map_err(type_error_to_shape_error),
         }
     }
 
-    fn equal_shapes(&mut self, left: &Shape, right: &Shape) {
+    fn equal_types(&mut self, left: &TypeExpr<()>, right: &TypeExpr<()>) -> Result<(), ShapeError> {
         match (left, right) {
-            (Shape::Matrix(lr, lc), Shape::Matrix(rr, rc)) => {
-                self.assert_dimensions_equal(lr, rr);
-                self.assert_dimensions_equal(lc, rc);
+            (TypeExpr::Matrix(lr, lc), TypeExpr::Matrix(rr, rc)) => {
+                self.assert_dimensions_equal(lr, rr)?;
+                self.assert_dimensions_equal(lc, rc)?;
             }
-            (Shape::Matrix(rows, cols), scalar) | (scalar, Shape::Matrix(rows, cols)) => {
-                if require_scalar(scalar).is_ok() {
-                    self.assert_dimensions_equal(rows, &Int::from_u64(1));
-                    self.assert_dimensions_equal(cols, &Int::from_u64(1));
+            (TypeExpr::Matrix(rows, cols), scalar) | (scalar, TypeExpr::Matrix(rows, cols)) => {
+                if require_numeric_scalar(scalar.clone()).is_ok() {
+                    self.assert_dimensions_equal(rows, &natural(1))?;
+                    self.assert_dimensions_equal(cols, &natural(1))?;
                 } else {
-                    self.assert_typing_failure(left);
-                    self.assert_typing_failure(right);
+                    self.assert_typing_failure(&[left, right]);
                 }
             }
             _ => {}
         }
+        Ok(())
     }
-}
-
-fn ast_contains<Root: Ast>(root: &Root, needle: &Int) -> bool {
-    root.get_z3_ast() == needle.get_z3_ast()
-        || root
-            .children()
-            .iter()
-            .any(|child| ast_contains(child, needle))
 }
 
 struct OperatorCompatibilityVisitor<'a, 'builder> {
@@ -877,25 +893,20 @@ impl OperatorCompatibilityVisitor<'_, '_> {
     ) -> Result<(), ShapeError> {
         match &expression.raw {
             RawExpr::StandardBasis { index, dimension } => {
-                let dimension = self.builder.implicit_dimension(*dimension);
-                let index_value = self.builder.lower_nat(index)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "standard basis index is not linear natural arithmetic".to_owned(),
-                    )
-                })?;
+                let dimension = implicit_dimension(*dimension);
                 self.builder
-                    .assert_if_relevant(index_value.ge(1), &[&dimension]);
+                    .assert_natural_comparison(index, crate::Cmp::Ge, &natural(1))?;
                 self.builder
-                    .assert_if_relevant(index_value.le(&dimension), &[&dimension]);
+                    .assert_natural_comparison(index, crate::Cmp::Le, &dimension)?;
             }
             RawExpr::Monop(op, inner) => {
-                let shape = self.builder.shape_of(inner)?;
-                match (op, shape) {
-                    (Monop::Inverse | Monop::Trace | Monop::Det, Shape::Matrix(rows, cols)) => {
-                        self.builder.assert_dimensions_equal(&rows, &cols);
+                let ty = self.builder.type_of(inner)?;
+                match (op, &ty) {
+                    (Monop::Inverse | Monop::Trace | Monop::Det, TypeExpr::Matrix(rows, cols)) => {
+                        self.builder.assert_dimensions_equal(rows, cols)?;
                     }
-                    (Monop::Trace | Monop::Det | Monop::Inverse, shape) => {
-                        self.builder.assert_typing_failure(&shape);
+                    (Monop::Trace | Monop::Det | Monop::Inverse, _) => {
+                        self.builder.assert_typing_failure(&[&ty]);
                     }
                     (Monop::Norm2, _) => {
                         return Err(ShapeError::Unsupported(
@@ -933,7 +944,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             "membership subject has no inferred type".to_owned(),
                         )
                     })?;
-                self.builder.constrain_shape_type(&actual, expected)?;
+                self.builder.constrain_types(&actual, expected)?;
             }
             RawExpr::Binop(Binop::Cast, target, value) => {
                 let RawExpr::Type(target) = &target.raw else {
@@ -941,43 +952,29 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         "cast target must be a type expression".to_owned(),
                     ));
                 };
-                let value = self.builder.shape_of(value)?;
-                match (target, value) {
-                    (TypeExpr::Real, Shape::Real) => {}
-                    (TypeExpr::Real, Shape::Matrix(rows, cols)) => {
-                        self.builder
-                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
-                        self.builder
-                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                let value = self.builder.type_of(value)?;
+                match (target, &value) {
+                    (TypeExpr::Real, TypeExpr::Real) => {}
+                    (TypeExpr::Real, TypeExpr::Matrix(rows, cols)) => {
+                        self.builder.assert_dimensions_equal(rows, &natural(1))?;
+                        self.builder.assert_dimensions_equal(cols, &natural(1))?;
                     }
-                    (TypeExpr::Matrix(rows, cols), Shape::Real) => {
-                        let rows = self.builder.lower_nat(rows)?.ok_or_else(|| {
-                            ShapeError::Unsupported(
-                                "cast row dimension is not linear natural arithmetic".to_owned(),
-                            )
-                        })?;
-                        let cols = self.builder.lower_nat(cols)?.ok_or_else(|| {
-                            ShapeError::Unsupported(
-                                "cast column dimension is not linear natural arithmetic".to_owned(),
-                            )
-                        })?;
-                        self.builder
-                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
-                        self.builder
-                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                    (TypeExpr::Matrix(rows, cols), TypeExpr::Real) => {
+                        self.builder.assert_dimensions_equal(rows, &natural(1))?;
+                        self.builder.assert_dimensions_equal(cols, &natural(1))?;
                     }
                     (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => {
                         return Err(ShapeError::Unsupported(
                             "only real and 1x1 matrix casts are supported".to_owned(),
                         ));
                     }
-                    (TypeExpr::Real | TypeExpr::Matrix(_, _), shape) => {
-                        self.builder.assert_typing_failure(&shape)
+                    (TypeExpr::Real | TypeExpr::Matrix(_, _), _) => {
+                        self.builder.assert_typing_failure(&[&value])
                     }
                 }
             }
             RawExpr::Binop(Binop::SingleSubscript, sequence, index) => {
-                if !matches!(self.builder.shape_of(sequence)?, Shape::Seq(_, _)) {
+                if !matches!(self.builder.type_of(sequence)?, TypeExpr::Seq(_, _)) {
                     return Err(ShapeError::InvalidTyping(
                         "subscripted expression is not a sequence".to_owned(),
                     ));
@@ -991,17 +988,15 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 }
             }
             RawExpr::Binop(Binop::Power, base, _) => {
-                if let Shape::Matrix(rows, cols) = self.builder.shape_of(base)? {
-                    self.builder.assert_dimensions_equal(&rows, &cols);
+                if let TypeExpr::Matrix(rows, cols) = self.builder.type_of(base)? {
+                    self.builder.assert_dimensions_equal(&rows, &cols)?;
                 }
             }
             RawExpr::Binop(Binop::Div, left, right) => {
                 for operand in [left, right] {
-                    if let Shape::Matrix(rows, cols) = self.builder.shape_of(operand)? {
-                        self.builder
-                            .assert_dimensions_equal(&rows, &Int::from_u64(1));
-                        self.builder
-                            .assert_dimensions_equal(&cols, &Int::from_u64(1));
+                    if let TypeExpr::Matrix(rows, cols) = self.builder.type_of(operand)? {
+                        self.builder.assert_dimensions_equal(&rows, &natural(1))?;
+                        self.builder.assert_dimensions_equal(&cols, &natural(1))?;
                     }
                 }
             }
@@ -1010,22 +1005,22 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 let (first, rest) = expressions
                     .split_first()
                     .ok_or_else(|| ShapeError::InvalidTyping("empty addition".to_owned()))?;
-                let mut shape = self.builder.shape_of(first)?;
+                let mut ty = self.builder.type_of(first)?;
                 for expression in rest {
-                    shape = self
+                    ty = self
                         .builder
-                        .add_shapes(shape, self.builder.shape_of(expression)?)?;
+                        .add_types(ty, self.builder.type_of(expression)?)?;
                 }
             }
             RawExpr::Finop(Finop::Times, expressions) => {
                 let (first, rest) = expressions
                     .split_first()
                     .ok_or_else(|| ShapeError::InvalidTyping("empty multiplication".to_owned()))?;
-                let mut shape = self.builder.shape_of(first)?;
+                let mut ty = self.builder.type_of(first)?;
                 for expression in rest {
-                    shape = self
+                    ty = self
                         .builder
-                        .multiply_shapes(shape, self.builder.shape_of(expression)?)?;
+                        .multiply_types(ty, self.builder.type_of(expression)?)?;
                 }
             }
             RawExpr::Finop(Finop::And | Finop::Or, expressions) => {
@@ -1035,7 +1030,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ));
                 }
                 for operand in expressions {
-                    if !matches!(self.builder.shape_of(operand)?, Shape::Bool) {
+                    if !matches!(self.builder.type_of(operand)?, TypeExpr::Bool) {
                         return Err(ShapeError::InvalidTyping(
                             "logical operations require Boolean operands".to_owned(),
                         ));
@@ -1048,21 +1043,21 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 ));
             }
             RawExpr::CmpChain(chain) => {
-                let mut previous = self.builder.shape_of(&chain.start)?;
+                let mut previous = self.builder.type_of(&chain.start)?;
                 for (_, current) in &chain.assertions {
-                    let current = self.builder.shape_of(current)?;
-                    self.builder.equal_shapes(&previous, &current);
+                    let current = self.builder.type_of(current)?;
+                    self.builder.equal_types(&previous, &current)?;
                     previous = current;
                 }
             }
             RawExpr::LogicChain(chain) => {
-                if !matches!(self.builder.shape_of(&chain.start)?, Shape::Bool) {
+                if !matches!(self.builder.type_of(&chain.start)?, TypeExpr::Bool) {
                     return Err(ShapeError::InvalidTyping(
                         "logical operations require Boolean operands".to_owned(),
                     ));
                 }
                 for (_, operand) in &chain.assertions {
-                    if !matches!(self.builder.shape_of(operand)?, Shape::Bool) {
+                    if !matches!(self.builder.type_of(operand)?, TypeExpr::Bool) {
                         return Err(ShapeError::InvalidTyping(
                             "logical operations require Boolean operands".to_owned(),
                         ));
@@ -1131,20 +1126,27 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for BlockMatrixCompatibilityVisitor<'
             let dimensions = matrix
                 .elements
                 .iter()
-                .map(|element| block_shape_dimensions(self.builder.shape_of(element)?))
+                .map(|element| {
+                    block_dimensions(self.builder.type_of(element)?)
+                        .map_err(type_error_to_shape_error)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             for row in 0..matrix.rows {
                 let height = &dimensions[row * matrix.cols].0;
                 for column in 1..matrix.cols {
-                    self.builder
-                        .assert_dimensions_equal(height, &dimensions[row * matrix.cols + column].0);
+                    self.builder.assert_dimensions_equal(
+                        height,
+                        &dimensions[row * matrix.cols + column].0,
+                    )?;
                 }
             }
             for column in 0..matrix.cols {
                 let width = &dimensions[column].1;
                 for row in 1..matrix.rows {
-                    self.builder
-                        .assert_dimensions_equal(width, &dimensions[row * matrix.cols + column].1);
+                    self.builder.assert_dimensions_equal(
+                        width,
+                        &dimensions[row * matrix.cols + column].1,
+                    )?;
                 }
             }
             Ok(())
@@ -1170,18 +1172,10 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
             return;
         };
         let result = (|| {
-            let from = self.builder.lower_nat(&range.from)?.ok_or_else(|| {
-                ShapeError::Unsupported(
-                    "sequence lower bound is not linear natural arithmetic".to_owned(),
-                )
-            })?;
-            let to = self.builder.lower_nat(&range.to)?.ok_or_else(|| {
-                ShapeError::Unsupported(
-                    "sequence upper bound is not linear natural arithmetic".to_owned(),
-                )
-            })?;
-            self.builder.assert_if_relevant(from.ge(1), &[&from]);
-            self.builder.assert_if_relevant(from.le(&to), &[&from, &to]);
+            self.builder
+                .assert_natural_comparison(&range.from, crate::Cmp::Ge, &natural(1))?;
+            self.builder
+                .assert_natural_comparison(&range.from, crate::Cmp::Le, &range.to)?;
             let lengths =
                 indexed_sequence_lengths(body, &range.index_variable, self.builder.variable_types)?;
             if lengths.is_empty() {
@@ -1191,12 +1185,12 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
             }
             for length in lengths {
                 self.builder
-                    .assert_if_relevant(to.le(&length), &[&to, &length]);
+                    .assert_natural_comparison(&range.to, crate::Cmp::Le, &length)?;
             }
             if matches!(op, SeqOp::Prod)
-                && let Shape::Matrix(rows, cols) = self.builder.shape_of(body)?
+                && let TypeExpr::Matrix(rows, cols) = self.builder.type_of(body)?
             {
-                self.builder.assert_dimensions_equal(&rows, &cols);
+                self.builder.assert_dimensions_equal(&rows, &cols)?;
             }
             Ok(())
         })();
@@ -1243,60 +1237,6 @@ fn run_dimension_constraint_visitors<Metadata: MaybeTyped>(
     Ok(())
 }
 
-fn block_shape_dimensions(shape: Shape) -> Result<(Int, Int), ShapeError> {
-    match shape {
-        Shape::Nat | Shape::Int | Shape::Real => Ok((Int::from_u64(1), Int::from_u64(1))),
-        Shape::Matrix(rows, cols) if rows.as_u64() == Some(0) && cols.as_u64() == Some(0) => Err(
-            ShapeError::InvalidTyping("empty matrices cannot be used as blocks".to_owned()),
-        ),
-        Shape::Matrix(rows, cols) => Ok((rows, cols)),
-        Shape::Bool | Shape::Seq(_, _) => Err(ShapeError::InvalidTyping(
-            "block matrix cells must be numeric scalars or matrices".to_owned(),
-        )),
-    }
-}
-
-fn compile_type_expr(
-    ty: &TypeExpr<()>,
-    natural_symbols: &BTreeMap<NaturalParameter, Int>,
-) -> Result<Shape, ShapeError> {
-    Ok(match ty {
-        TypeExpr::Bool => Shape::Bool,
-        TypeExpr::Nat => Shape::Nat,
-        TypeExpr::Int => Shape::Int,
-        TypeExpr::Real => Shape::Real,
-        TypeExpr::Matrix(rows, cols) => Shape::Matrix(
-            lower_nat_via_to_z3(rows, natural_symbols)?.ok_or_else(|| {
-                ShapeError::Unsupported(format!(
-                    "matrix row dimension is not linear natural arithmetic: {}",
-                    rows.as_latex()
-                ))
-            })?,
-            lower_nat_via_to_z3(cols, natural_symbols)?.ok_or_else(|| {
-                ShapeError::Unsupported(format!(
-                    "matrix column dimension is not linear natural arithmetic: {}",
-                    cols.as_latex()
-                ))
-            })?,
-        ),
-        TypeExpr::Seq(element, length) => {
-            let RawExpr::Type(element) = &element.raw else {
-                return Err(ShapeError::InvalidTyping(
-                    "sequence element must be a type expression".to_owned(),
-                ));
-            };
-            Shape::Seq(
-                Box::new(compile_type_expr(element, natural_symbols)?),
-                lower_nat_via_to_z3(length, natural_symbols)?.ok_or_else(|| {
-                    ShapeError::Unsupported(
-                        "sequence length is not linear natural arithmetic".to_owned(),
-                    )
-                })?,
-            )
-        }
-    })
-}
-
 fn lower_nat_via_to_z3<Metadata>(
     expression: &Expr<Metadata>,
     natural_symbols: &BTreeMap<NaturalParameter, Int>,
@@ -1319,27 +1259,61 @@ fn lower_nat_via_to_z3<Metadata>(
     }
 }
 
-fn shape_dimensions(shape: &Shape) -> Vec<Int> {
-    match shape {
-        Shape::Matrix(rows, cols) => vec![rows.clone(), cols.clone()],
-        Shape::Seq(element, length) => {
-            let mut dimensions = vec![length.clone()];
-            dimensions.extend(shape_dimensions(element));
-            dimensions
+fn required_natural(value: Option<Int>, message: &'static str) -> Result<Int, ShapeError> {
+    value.ok_or_else(|| ShapeError::Unsupported(message.to_owned()))
+}
+
+fn lower_required_natural<Metadata>(
+    expression: &Expr<Metadata>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
+    message: &'static str,
+) -> Result<Int, ShapeError> {
+    required_natural(lower_nat_via_to_z3(expression, natural_symbols)?, message)
+}
+
+fn structural_dimensions(ty: &TypeExpr<()>) -> Result<Vec<&Expr<()>>, ShapeError> {
+    match ty {
+        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok(Vec::new()),
+        TypeExpr::Matrix(rows, cols) => Ok(vec![rows, cols]),
+        TypeExpr::Seq(element, length) => {
+            let RawExpr::Type(element) = &element.raw else {
+                return Err(ShapeError::InvalidTyping(
+                    "sequence element must be a type expression".to_owned(),
+                ));
+            };
+            let mut dimensions = vec![length];
+            dimensions.extend(structural_dimensions(element)?);
+            Ok(dimensions)
         }
-        _ => Vec::new(),
     }
+}
+
+fn lower_structural_dimensions(
+    variable_types: &BTreeMap<Variable, TypeExpr<()>>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
+) -> Result<Vec<Int>, ShapeError> {
+    let mut lowered = Vec::new();
+    for ty in variable_types.values() {
+        for dimension in structural_dimensions(ty)? {
+            lowered.push(lower_required_natural(
+                dimension,
+                natural_symbols,
+                "structural dimension is not linear natural arithmetic",
+            )?);
+        }
+    }
+    Ok(lowered)
 }
 
 fn indexed_sequence_lengths<Metadata>(
     expression: &Expr<Metadata>,
     index: &Variable,
-    variable_types: &BTreeMap<Variable, Shape>,
-) -> Result<Vec<Int>, ShapeError> {
+    variable_types: &BTreeMap<Variable, TypeExpr<()>>,
+) -> Result<Vec<Expr<()>>, ShapeError> {
     struct Collector<'a> {
         index: &'a Variable,
-        variable_types: &'a BTreeMap<Variable, Shape>,
-        lengths: BTreeMap<Variable, Int>,
+        variable_types: &'a BTreeMap<Variable, TypeExpr<()>>,
+        lengths: BTreeMap<Variable, Expr<()>>,
         error: Option<ShapeError>,
     }
     impl<Metadata> Visit<Metadata> for Collector<'_> {
@@ -1358,7 +1332,7 @@ fn indexed_sequence_lengths<Metadata>(
                     ));
                     return;
                 };
-                let Some(Shape::Seq(_, length)) = self.variable_types.get(variable) else {
+                let Some(TypeExpr::Seq(_, length)) = self.variable_types.get(variable) else {
                     self.error = Some(ShapeError::InvalidTyping(
                         "subscripted variable is not a sequence".to_owned(),
                     ));
@@ -1522,33 +1496,6 @@ fn collect_natural_position_variables<Metadata>(
     Collector(variables).visit_expr(expression);
 }
 
-fn scalar_shape_lub(left: Shape, right: Shape) -> Result<Shape, ShapeError> {
-    match (left, right) {
-        (Shape::Bool, _) | (_, Shape::Bool) => Err(ShapeError::InvalidTyping(
-            "Boolean values are not numeric scalars".to_owned(),
-        )),
-        (Shape::Matrix(_, _), _) | (_, Shape::Matrix(_, _)) => Err(ShapeError::InvalidTyping(
-            "matrix values are not scalar operands".to_owned(),
-        )),
-        (Shape::Seq(_, _), _) | (_, Shape::Seq(_, _)) => Err(ShapeError::InvalidTyping(
-            "sequence values are not scalar operands".to_owned(),
-        )),
-        (Shape::Real, _) | (_, Shape::Real) => Ok(Shape::Real),
-        (Shape::Int, _) | (_, Shape::Int) => Ok(Shape::Int),
-        (Shape::Nat, Shape::Nat) => Ok(Shape::Nat),
-    }
-}
-
-fn require_scalar(shape: &Shape) -> Result<(), ShapeError> {
-    if matches!(shape, Shape::Bool | Shape::Matrix(_, _) | Shape::Seq(_, _)) {
-        Err(ShapeError::InvalidTyping(
-            "operation requires a numeric scalar".to_owned(),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn model_u64(model: &z3::Model, expression: &Int) -> Result<u64, ShapeError> {
     model
         .eval(expression, false)
@@ -1565,14 +1512,16 @@ mod tests {
     use ratex_parser::parse;
 
     use super::{
-        ShapeError, collect_implicit_dimensions, collect_variables, extract_environment_iterator,
-        extract_environment_iterator_with_context, extract_prepared_environment_iterator,
-        infer_symbolic_type_environment,
+        ShapeError, collect_implicit_dimensions, collect_variables, depends_on_implicit_dimension,
+        extract_environment_iterator, extract_environment_iterator_with_context,
+        extract_prepared_environment_iterator, infer_symbolic_type_environment,
+        type_depends_on_implicit,
     };
     use crate::{
-        Annotation, Environment, Expr, Finop, Matrix, NaturalParameter, Range, RawExpr, SeqOp,
-        SeqType, Type, Variable, from_tex, preprocessing::prepare_expression,
-        type_resolver::SymbolicTypeEnvironment, visit_mut::VisitContext,
+        Annotation, Environment, Expr, Finop, ImplicitDimension, Matrix, NaturalParameter, Range,
+        RawExpr, SeqOp, SeqType, Type, TypeExpr, Variable, from_tex,
+        preprocessing::prepare_expression, type_resolver::SymbolicTypeEnvironment,
+        visit_mut::VisitContext,
     };
 
     fn expression(tex: &str) -> Expr<()> {
@@ -1641,6 +1590,32 @@ mod tests {
         let mut free = BTreeSet::new();
         collect_variables(&siblings, &mut free).unwrap();
         assert!(!free.contains(&Variable::new("i")));
+    }
+
+    #[test]
+    fn implicit_dimension_provenance_is_preserved_in_symbolic_expressions() {
+        let dimension = ImplicitDimension::fresh();
+        let compound: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                Expr::new(RawExpr::ImplicitDimension(dimension)),
+                Expr::new(RawExpr::NatLiteral(1)),
+            ],
+        ));
+        let ordinary: Expr<()> = Expr::new(RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                Expr::new(RawExpr::Variable(Variable::new("n"))),
+                Expr::new(RawExpr::NatLiteral(1)),
+            ],
+        ));
+
+        assert!(depends_on_implicit_dimension(&compound));
+        assert!(type_depends_on_implicit(&TypeExpr::Matrix(
+            compound,
+            Expr::new(RawExpr::NatLiteral(1)),
+        )));
+        assert!(!depends_on_implicit_dimension(&ordinary));
     }
 
     #[test]

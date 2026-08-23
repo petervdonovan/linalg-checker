@@ -652,7 +652,7 @@ fn infer_matrix_type<Metadata: MaybeTyped>(
     )))
 }
 
-fn block_dimensions(ty: TypeExpr<()>) -> Result<(Expr<()>, Expr<()>), TypeError> {
+pub(crate) fn block_dimensions(ty: TypeExpr<()>) -> Result<(Expr<()>, Expr<()>), TypeError> {
     match ty {
         TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok((natural(1), natural(1))),
         TypeExpr::Matrix(rows, cols) if is_zero_dimension(&rows) && is_zero_dimension(&cols) => {
@@ -688,7 +688,19 @@ fn require_numeric(ty: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
     }
 }
 
-fn scalar_lub(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
+pub(crate) fn require_numeric_scalar(ty: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
+    match ty {
+        TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok(ty),
+        _ => Err(TypeError::Invalid(
+            "operation requires numeric scalar operands",
+        )),
+    }
+}
+
+pub(crate) fn scalar_lub(
+    left: TypeExpr<()>,
+    right: TypeExpr<()>,
+) -> Result<TypeExpr<()>, TypeError> {
     match (left, right) {
         (TypeExpr::Nat, TypeExpr::Nat) => Ok(TypeExpr::Nat),
         (TypeExpr::Nat | TypeExpr::Int, TypeExpr::Nat | TypeExpr::Int) => Ok(TypeExpr::Int),
@@ -702,7 +714,7 @@ fn scalar_lub(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, T
     }
 }
 
-fn add_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
+pub(crate) fn add_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
     match (left, right) {
         (matrix @ TypeExpr::Matrix(_, _), TypeExpr::Matrix(_, _)) => Ok(matrix),
         (TypeExpr::Matrix(_, _), _) | (_, TypeExpr::Matrix(_, _)) => Err(TypeError::Invalid(
@@ -712,7 +724,10 @@ fn add_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, Typ
     }
 }
 
-fn multiply_type(left: TypeExpr<()>, right: TypeExpr<()>) -> Result<TypeExpr<()>, TypeError> {
+pub(crate) fn multiply_type(
+    left: TypeExpr<()>,
+    right: TypeExpr<()>,
+) -> Result<TypeExpr<()>, TypeError> {
     match (left, right) {
         (TypeExpr::Matrix(rows, _), TypeExpr::Matrix(_, cols)) => Ok(TypeExpr::Matrix(rows, cols)),
         (matrix @ TypeExpr::Matrix(_, _), scalar) | (scalar, matrix @ TypeExpr::Matrix(_, _)) => {
