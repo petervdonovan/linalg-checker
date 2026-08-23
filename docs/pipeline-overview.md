@@ -41,7 +41,8 @@ The Markdown modules differ mainly in their section structure:
 - `find_model` parses `Assumptions`, `Sentences`, and `Conclusion`;
 - `find_model_given_environment` parses `Environment`, `Sentences`, and
   `Conclusion`;
-- `validate_argument` parses `Assumptions` followed by ordered `Steps`.
+- `validate_argument` parses one recursive root goal using `Given:`, `WTS`, and
+  ordered sentence or subgoal items.
 
 ## 2. Symbolic Variable Types
 
@@ -249,19 +250,19 @@ conditions. Existence is handled separately:
 
 ## 7. Argument Validation
 
-Argument validation is the most complete consumer of the pipeline. Assumptions
-determine base environments; each step is then challenged in every applicable
-environment using one incremental value-level solver per base environment.
+Argument validation is the most complete consumer of the pipeline. The root
+goal's givens determine base environments. Sentences and nested goals are then
+challenged recursively using incremental value-level solver scopes.
 
 ```mermaid
 flowchart TD
-    A[Parse assumptions and ordered steps] --> T[Infer symbolic variable types from assumptions]
-    T --> P[Prepare assumptions and positive/negative forms of every step]
-    P --> B[Enumerate base environments from assumptions only]
+    A[Parse the root Goal tree] --> T[Infer symbolic variable types from root givens]
+    T --> P[Prepare givens and positive/negative forms of each claim]
+    P --> B[Enumerate base environments from root givens only]
     B --> S[Create one value solver for this environment]
     S --> AS[Assert natural assignment, assumptions, and definitions]
     AS --> STEP[Next step]
-    STEP --> EXT[Enumerate step-local dimensional extensions]
+    STEP --> EXT[Enter a sentence or nested Goal extension]
     EXT --> NEG[Push definitions and NOT of negative-polarity lowering]
     NEG --> CHECK{Solver result}
     CHECK -- sat --> CEX[Extract counterexample]
@@ -274,20 +275,26 @@ flowchart TD
 
 ### Base and step-local dimensions
 
-Only assumptions constrain base environment enumeration. For a particular step,
-`step_environment_extensions` fixes the complete base natural assignment and
-enumerates any additional nonce parameters required to make that step
-dimensionally meaningful.
+Only root givens constrain base environment enumeration. A nested goal fixes the
+parent assignment, extends symbolic types with variables first introduced by
+its own givens, and enumerates its local natural parameters. A sentence fixes
+the current assignment and enumerates only contextual parameters needed to make
+that sentence dimensionally meaningful.
 
-If no extension exists, the step is recorded as dimensionally invalid for that
-base environment. It is not allowed to remove that environment from the
-counterexample search. This is especially important for operations such as a
-matrix square root introduced only by a step.
+If no sentence extension exists, that sentence is dimensionally invalid. If a
+nested goal's givens have no feasible extension, the goal is reported as
+vacuous. Neither case removes an outer environment from the counterexample
+search.
 
 ### Incremental value solving
 
-For each base environment, assumptions are asserted once and tracked for unsat
-cores. For each step-local extension, validation:
+For each base environment, root givens are asserted once and tracked for unsat
+cores. Goal bodies use pushed scopes. Validation processes body items in order,
+asserting only successful claims, then checks the goal conclusion from the facts
+that survived. A failed child remains marked locally and does not prevent an
+independently valid conclusion from succeeding.
+
+For each claim-local extension, validation:
 
 1. lowers the negative-polarity prepared form;
 2. pushes a solver scope;
@@ -296,8 +303,14 @@ cores. For each step-local extension, validation:
 5. pops the scope;
 6. if no counterexample exists, checks existence warnings and lowers the step
    positively;
-7. after all extensions succeed, tracks the accepted positive step as a premise
-   for later steps.
+7. after all extensions succeed, tracks the accepted positive sentence as a
+   premise for later siblings.
+
+A completed subgoal exports only its conceptual conclusion. A plain `WTS C`
+exports `C`; `Given G; WTS C` exports `G => C`. Results that introduce local
+variables are retained as scoped statements for future structural matching but
+are not asserted as quantified Z3 formulas. Internal proof steps never escape
+their goal.
 
 An unsat core supplies the assumptions and previous accepted steps shown as
 supporting facts. A discovered counterexample has priority over tentative

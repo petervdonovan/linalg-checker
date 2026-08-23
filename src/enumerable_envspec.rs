@@ -6,7 +6,7 @@ use std::{
 
 use z3::{
     SatResult, Solver,
-    ast::{Bool, Int},
+    ast::{Ast, Bool, Int},
 };
 
 use crate::{
@@ -672,7 +672,7 @@ impl DimensionConstraintBuilder<'_> {
     fn is_implicit_dimension(&self, dimension: &Int) -> bool {
         self.implicit_dimensions
             .values()
-            .any(|implicit| implicit == dimension)
+            .any(|implicit| ast_contains(dimension, implicit))
     }
 
     fn shape_depends_on_implicit(&self, shape: &Shape) -> bool {
@@ -855,6 +855,14 @@ impl DimensionConstraintBuilder<'_> {
             _ => {}
         }
     }
+}
+
+fn ast_contains<Root: Ast>(root: &Root, needle: &Int) -> bool {
+    root.get_z3_ast() == needle.get_z3_ast()
+        || root
+            .children()
+            .iter()
+            .any(|child| ast_contains(child, needle))
 }
 
 struct OperatorCompatibilityVisitor<'a, 'builder> {

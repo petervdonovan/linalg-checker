@@ -1,10 +1,10 @@
 # Scalar argument
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 
-## Steps
+WTS $x = x$
 
 1. $x = x$
 
@@ -22,21 +22,20 @@
 
    - $x = 2$
    </details>
-3. $x = x$
 
-   <details>
-   <summary>✅ verified</summary>
+<details>
+<summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
-   </details>
+No premises seemed necessary to show this.
+</details>
 
 # Matrix argument
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
 1. $A = A$
 
@@ -45,23 +44,22 @@
 
    No premises seemed necessary to show this.
    </details>
-2. $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
-   <details>
-   <summary>❌ counterexample found</summary>
+<details>
+<summary>❌ counterexample found</summary>
 
-   The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by:
+The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by:
 
-   - $A = \begin{bmatrix}2 & \square \\ \square & \square\end{bmatrix}$
-   </details>
+- $A = \begin{bmatrix}2 & \square \\ \square & \square\end{bmatrix}$
+</details>
 
 # Sequence norm sum
 
-## Assumptions
+Given:
 
 - $\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R}^{d})$
 
-## Steps
+WTS $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
 
 1. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} \ge 0$
 
@@ -72,27 +70,26 @@
 
    No premises seemed necessary to show this.
    </details>
-2. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
 
-   <details>
-   <summary>❌ counterexample found</summary>
+<details>
+<summary>❌ counterexample found</summary>
 
-   The negation of $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$ is satisfied by:
+The negation of $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$ is satisfied by:
 
-   - $d = 1$
-   - $n = 1$
-   - $\vec{z}_{1} = \begin{bmatrix}2\end{bmatrix}$
-   </details>
+- $d = 1$
+- $n = 1$
+- $\vec{z}_{1} = \begin{bmatrix}2\end{bmatrix}$
+</details>
 
 # Negating an inequality
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $y \in \mathbb{R}$
 - $x < y$
 
-## Steps
+WTS $-x > -y$
 
 1. $-x < -y$
 
@@ -101,24 +98,21 @@
 
    The negation of $-x < -y$ is satisfied by:
 
-   - $x = \frac{-1}{2}$
-   - $y = 0$
+   - $x = 0$
+   - $y = \frac{1}{2}$
    </details>
-2. $-x > -y$
 
-   <details>
-   <summary>✅ verified</summary>
+<details>
+<summary>✅ verified</summary>
 
-   This follows from the following facts:
+This follows from the following facts:
 
-   - $x < y$
-   </details>
+- $x < y$
+</details>
 
 # Independent implicit matrix constants
 
-## Assumptions
-
-## Steps
+WTS $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
 1. $I = \begin{bmatrix}1\end{bmatrix}$
 
@@ -141,166 +135,148 @@
 
    No premises seemed necessary to show this.
    </details>
-4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
-   <details>
-   <summary>✅ verified</summary>
+<details>
+<summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
-   </details>
+No premises seemed necessary to show this.
+</details>
 
 # One-sided orthogonality
 
-## Assumptions
+Given:
 
 - $U^\top U = I$
 
-## Steps
+WTS $U U^\top = I$
 
-1. $U U^\top = I$
+<details>
+<summary>❌ counterexample found</summary>
 
-   <details>
-   <summary>❌ counterexample found</summary>
+The negation of $U U^\top = I$ is satisfied by:
 
-   The negation of $U U^\top = I$ is satisfied by:
-
-   - $U = \begin{bmatrix}\frac{1}{4} \\ \left(\frac{15}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
-   </details>
+- $U = \begin{bmatrix}\frac{1}{4} \\ \left(\frac{15}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
+</details>
 
 # Logic-chain preprocessing
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $x = 0$
 
-## Steps
+WTS $x = 0 \iff x \le 0 \implies x = x$
 
-1. $x = 0 \iff x \le 0 \implies x = x$
+<details>
+<summary>✅ verified</summary>
 
-   <details>
-   <summary>✅ verified</summary>
+This follows from the following facts:
 
-   This follows from the following facts:
-
-   - $x = 0$
-   </details>
+- $x = 0$
+</details>
 
 # Scalar square roots
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $x \ge 0$
 
-## Steps
+WTS $x^{\frac{1}{2}} \ge 0$
 
-1. $x^{\frac{1}{2}} \ge 0$
+<details>
+<summary>✅ verified</summary>
 
-   <details>
-   <summary>✅ verified</summary>
-
-   No premises seemed necessary to show this.
-   </details>
+No premises seemed necessary to show this.
+</details>
 
 # Potentially undefined square root
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 
-## Steps
+WTS $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
 
-1. $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+<details>
+<summary>⚠️ conditional</summary>
 
-   <details>
-   <summary>⚠️ conditional</summary>
+The expression $x^{\frac{1}{2}}$ may be undefined. For example:
 
-   The expression $x^{\frac{1}{2}}$ may be undefined. For example:
-
-   - $x = -1$
-   </details>
+- $x = -1$
+</details>
 
 # Assumed matrix square root
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
-1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+<details>
+<summary>⚠️ conditional</summary>
 
-   <details>
-   <summary>⚠️ conditional</summary>
-
-   The existence of $A^{\frac{1}{2}}$ was assumed without checking.
-   </details>
+The existence of $A^{\frac{1}{2}}$ was assumed without checking.
+</details>
 
 # Dimensionally invalid matrix square root
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2}$
 
-## Steps
+WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
-1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+<details>
+<summary>⚠️ dimensionally invalid</summary>
 
-   <details>
-   <summary>⚠️ dimensionally invalid</summary>
+This step is not dimensionally meaningful in the following environment:
 
-   This step is not dimensionally meaningful in the following environment:
-
-   - $A \in \mathbb{R}^{2}$
-   </details>
+- $A \in \mathbb{R}^{2}$
+</details>
 
 # Vector two-norm
 
-## Assumptions
+Given:
 
 - $v \in \mathbb{R}^{2}$
 
-## Steps
+WTS $\left\lVert v \right\rVert_{2} \ge 0$
 
-1. $\left\lVert v \right\rVert_{2} \ge 0$
+<details>
+<summary>✅ verified</summary>
 
-   <details>
-   <summary>✅ verified</summary>
-
-   No premises seemed necessary to show this.
-   </details>
+No premises seemed necessary to show this.
+</details>
 
 # Wide matrix two-norm
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{1 \times 2}$
 
-## Steps
+WTS $\left\lVert A \right\rVert_{2} \ge 0$
 
 1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
 
    <details>
-   <summary>⚠️ dimensionally invalid</summary>
+   <summary>Unsupported step</summary>
 
-   This step is not dimensionally meaningful in the following environment:
-
-   - $A \in \mathbb{R}^{1 \times 2}$
+   a cast to real requires a real scalar or real-valued 1x1 matrix
    </details>
-2. $\left\lVert A \right\rVert_{2} \ge 0$
 
-   <details>
-   <summary>⚠️ dimensionally invalid</summary>
+<details>
+<summary>⚠️ dimensionally invalid</summary>
 
-   This step is not dimensionally meaningful in the following environment:
+This step is not dimensionally meaningful in the following environment:
 
-   - $A \in \mathbb{R}^{1 \times 2}$
-   </details>
+- $A \in \mathbb{R}^{1 \times 2}$
+</details>
 
 # Block multiplication formula
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 - $B \in \mathbb{R}^{2 \times 2}$
@@ -311,29 +287,106 @@
 - $G \in \mathbb{R}^{2 \times 2}$
 - $H \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
 
-1. $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
+<details>
+<summary>✅ verified</summary>
 
-   <details>
-   <summary>✅ verified</summary>
-
-   No premises seemed necessary to show this.
-   </details>
+No premises seemed necessary to show this.
+</details>
 
 # Block selector identity
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 - $B \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
 
-1. $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+# Nested error localization
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x = x$
+
+1. WTS $x = x$
+
+   1. $x = 0$
+
+      <details>
+      <summary>❌ counterexample found</summary>
+
+      The negation of $x = 0$ is satisfied by:
+
+      - $x = 2$
+      </details>
+   2. $x = x$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
 
    <details>
    <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
+2. $x = x$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+# Local givens and sibling names
+
+WTS $0 = 0$
+
+1. Given:
+
+   - $y \in \mathbb{R}$
+
+   WTS $y = 0$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $y = 0$ is satisfied by:
+
+   - $y = 2$
+   </details>
+2. Given:
+
+   - $y \in \mathbb{R}$
+
+   WTS $y = y$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>

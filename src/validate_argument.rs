@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     error::Error,
     fmt::{self, Display},
     rc::Rc,
@@ -10,18 +10,20 @@ use z3::{SatResult, Solver, ast::Bool};
 
 pub use crate::model_finding::{ModelFindingError, ToFromMd};
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Model, NaturalParameter, RawExpr, TypeExpr,
+    Binop, Cmp, CmpChain, Environment, Expr, Finop, Logic, LogicChain, Model, NaturalParameter,
+    RawExpr, TypeExpr, Variable,
     enumerable_envspec::{
         ShapeError, extract_prepared_environment_iterator, infer_symbolic_type_environment,
     },
     model_finding::{
         assert_definitions, assert_natural_assignment, expression_list, extract_model, heading,
-        heading_text, lower_prepared_boolean, parse_expression_item, parse_expression_section,
-        render_md, root, root_children, section_start, z3_boolean,
+        heading_text, lower_prepared_boolean, parse_expression_item, render_md, root,
+        root_children, z3_boolean,
     },
     preprocessing::{PreparedExpression, prepare_expression},
-    to_z3::{LoweredExistence, LoweredSideCondition},
-    type_resolver::SymbolicTypeEnvironment,
+    to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error},
+    type_resolver::{SymbolicTypeEnvironment, TypeError},
+    visit::Visit,
     visit_mut::VisitContext,
 };
 
@@ -87,7 +89,7 @@ pub enum StepCheck {
         environment: Rc<Environment>,
         error: ModelFindingError,
     },
-    InconsistentAssumptions {
+    InconsistentGivens {
         max_dimension: Option<u64>,
     },
     DimensionallyInvalid {
@@ -101,6 +103,7 @@ pub struct StepValidationData {
     pub checks: Vec<StepCheck>,
     pub max_dimension: Option<u64>,
     pub environments_exhaustive: bool,
+    pub(crate) givens_feasible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,11 +112,24 @@ pub struct ArgumentStep {
     pub validation: StepValidationData,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Goal {
+    pub givens: Vec<Expr<()>>,
+    pub conclusion: Expr<()>,
+    pub steps: Vec<ArgumentItem>,
+    pub validation: StepValidationData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgumentItem {
+    Sentence(ArgumentStep),
+    Goal(Goal),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Argument {
     pub name: String,
-    pub assumptions: Vec<Expr<()>>,
-    pub steps: Vec<ArgumentStep>,
+    pub root: Goal,
     pub error: Option<ArgumentValidationError>,
 }
 
@@ -129,286 +145,141 @@ impl ArgumentStep {
     }
 }
 
+impl Goal {
+    fn has_counterexample(&self) -> bool {
+        self.validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Counterexample { .. }))
+    }
+
+    fn reset(&mut self, max_dimension: u64) {
+        reset_validation(&mut self.validation, max_dimension);
+        for item in &mut self.steps {
+            match item {
+                ArgumentItem::Sentence(step) => {
+                    reset_validation(&mut step.validation, max_dimension)
+                }
+                ArgumentItem::Goal(goal) => goal.reset(max_dimension),
+            }
+        }
+    }
+}
+
+fn reset_validation(validation: &mut StepValidationData, max_dimension: u64) {
+    validation.checks.clear();
+    validation.max_dimension = Some(max_dimension);
+    validation.environments_exhaustive = false;
+    validation.givens_feasible = false;
+}
+
 impl Argument {
     pub fn validate(&mut self, max_dimension: u64) -> Result<(), ArgumentValidationError> {
         self.error = None;
-        for step in &mut self.steps {
-            step.validation.checks.clear();
-            step.validation.max_dimension = Some(max_dimension);
-            step.validation.environments_exhaustive = false;
-        }
+        self.root.reset(max_dimension);
 
-        let symbolic_types = infer_symbolic_type_environment(&self.assumptions)?;
-        let prepared_assumptions = self
-            .assumptions
+        let symbolic_types = infer_symbolic_type_environment(&self.root.givens)?;
+        let prepared_givens = self
+            .root
+            .givens
             .iter()
             .map(|expression| prepare_expression(&symbolic_types, expression, POSITIVE))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::to_z3::ToZ3Error::from)
-            .map_err(ModelFindingError::from)?;
-        let prepared_positive = self
-            .steps
-            .iter()
-            .map(|step| prepare_expression(&symbolic_types, &step.sentence, POSITIVE))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::to_z3::ToZ3Error::from)
-            .map_err(ModelFindingError::from)?;
-        let prepared_negative = self
-            .steps
-            .iter()
-            .map(|step| prepare_expression(&symbolic_types, &step.sentence, NEGATIVE))
             .collect::<Result<Vec<_>, _>>()
             .map_err(crate::to_z3::ToZ3Error::from)
             .map_err(ModelFindingError::from)?;
 
         let environments = match extract_prepared_environment_iterator(
             &symbolic_types,
-            &prepared_assumptions,
+            &prepared_givens,
             &[],
             max_dimension,
         ) {
             Ok(environments) => environments,
             Err(ShapeError::Unsat(_)) => {
-                self.record_inconsistent_assumptions(None);
+                self.root
+                    .validation
+                    .checks
+                    .push(StepCheck::InconsistentGivens {
+                        max_dimension: None,
+                    });
                 return Ok(());
             }
             Err(ShapeError::Unknown(_)) => {
-                self.record_unknown(None);
+                self.root
+                    .validation
+                    .checks
+                    .push(StepCheck::Unknown { environment: None });
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
 
         let environments_exhaustive = environments.dimension_bound_is_exhaustive();
-        for step in &mut self.steps {
-            step.validation.environments_exhaustive = environments_exhaustive;
-        }
+        set_exhaustive(&mut self.root, environments_exhaustive);
 
-        let mut satisfiable_assumption_count = 0;
-        let mut assumption_unknown = false;
+        let mut satisfiable_given_count = 0;
+        let mut given_unknown = false;
+        let mut run = ValidationRun {
+            max_dimension,
+            next_tracker: 0,
+        };
         for environment in environments {
             let environment = match environment {
                 Ok(environment) => Rc::new(environment),
                 Err(ShapeError::Unknown(_)) => {
-                    assumption_unknown = true;
-                    self.record_unknown(None);
+                    given_unknown = true;
+                    self.root
+                        .validation
+                        .checks
+                        .push(StepCheck::Unknown { environment: None });
                     continue;
                 }
                 Err(error) => return Err(error.into()),
             };
-            match self.validate_environment(
-                Rc::clone(&environment),
-                &symbolic_types,
-                &prepared_assumptions,
-                &prepared_positive,
-                &prepared_negative,
-                max_dimension,
-            )? {
-                EnvironmentResult::Sat => satisfiable_assumption_count += 1,
-                EnvironmentResult::Unsat => {}
-                EnvironmentResult::Unknown => assumption_unknown = true,
+            let mut solver = Solver::new();
+            assert_natural_assignment(&solver, &environment);
+            let mut tracked = Vec::new();
+            for (given, prepared) in self.root.givens.iter().zip(&prepared_givens) {
+                let assertion = lower_prepared_boolean(&environment, prepared)?;
+                assert_definitions(&solver, &assertion.side_conditions)?;
+                let tracker = fresh_tracker(&mut run.next_tracker);
+                solver.assert_and_track(assertion.expression, &tracker);
+                tracked.push((tracker, given.clone()));
             }
-            if self.steps.iter().all(ArgumentStep::has_counterexample) {
-                break;
+            match solver.check() {
+                SatResult::Sat => {
+                    satisfiable_given_count += 1;
+                    self.root.validation.givens_feasible = true;
+                    let mut scoped_statements = Vec::new();
+                    validate_goal_contents(
+                        &mut self.root,
+                        &mut solver,
+                        Rc::clone(&environment),
+                        &symbolic_types,
+                        &mut tracked,
+                        &mut scoped_statements,
+                        &mut run,
+                    )?;
+                }
+                SatResult::Unknown => {
+                    given_unknown = true;
+                    self.root.validation.checks.push(StepCheck::Unknown {
+                        environment: Some(environment),
+                    });
+                }
+                SatResult::Unsat => {}
             }
         }
 
-        if satisfiable_assumption_count == 0 && !assumption_unknown {
-            self.record_inconsistent_assumptions(
-                (!environments_exhaustive).then_some(max_dimension),
-            );
+        if satisfiable_given_count == 0 && !given_unknown {
+            self.root
+                .validation
+                .checks
+                .push(StepCheck::InconsistentGivens {
+                    max_dimension: (!environments_exhaustive).then_some(max_dimension),
+                });
         }
         Ok(())
-    }
-
-    fn validate_environment(
-        &mut self,
-        environment: Rc<Environment>,
-        symbolic_types: &SymbolicTypeEnvironment,
-        prepared_assumptions: &[PreparedExpression],
-        prepared_positive: &[PreparedExpression],
-        prepared_negative: &[PreparedExpression],
-        max_dimension: u64,
-    ) -> Result<EnvironmentResult, ArgumentValidationError> {
-        let mut solver = Solver::new();
-        assert_natural_assignment(&solver, &environment);
-
-        let mut tracked = Vec::new();
-        for (index, (assumption, prepared)) in self
-            .assumptions
-            .iter()
-            .zip(prepared_assumptions)
-            .enumerate()
-        {
-            let assertion = lower_prepared_boolean(&environment, prepared)?;
-            assert_definitions(&solver, &assertion.side_conditions)?;
-            let tracker = Bool::new_const(format!("argument_assumption_{index}"));
-            solver.assert_and_track(assertion.expression, &tracker);
-            tracked.push((tracker, assumption.clone()));
-        }
-
-        match solver.check() {
-            SatResult::Unsat => {
-                let supporting_facts = core_facts(&solver, &tracked);
-                for step in &mut self.steps {
-                    if !step.has_counterexample() {
-                        step.validation.checks.push(StepCheck::Unsat {
-                            environment: Rc::clone(&environment),
-                            supporting_facts: supporting_facts.clone(),
-                        });
-                    }
-                }
-                return Ok(EnvironmentResult::Unsat);
-            }
-            SatResult::Unknown => {
-                self.record_unknown(Some(environment));
-                return Ok(EnvironmentResult::Unknown);
-            }
-            SatResult::Sat => {}
-        }
-
-        for index in 0..self.steps.len() {
-            if self.steps[index].has_counterexample() {
-                continue;
-            }
-            let sentence = self.steps[index].sentence.clone();
-            let extensions = step_environment_extensions(
-                &environment,
-                symbolic_types,
-                &prepared_positive[index],
-                max_dimension,
-            )?;
-            self.steps[index].validation.environments_exhaustive &= extensions.exhaustive;
-            if extensions.environments.is_empty() {
-                self.steps[index]
-                    .validation
-                    .checks
-                    .push(StepCheck::DimensionallyInvalid {
-                        environment: Rc::clone(&environment),
-                        declarations: concrete_declarations(symbolic_types, &environment)?,
-                    });
-                continue;
-            }
-
-            let mut accepted = Vec::new();
-            let mut failed = false;
-            for extension in extensions.environments {
-                let extension = Rc::new(extension);
-                let negative_assertion =
-                    match lower_prepared_boolean(&extension, &prepared_negative[index]) {
-                        Ok(assertion) => assertion,
-                        Err(error) => {
-                            self.steps[index].validation.checks.push(StepCheck::Error {
-                                environment: Rc::clone(&environment),
-                                error,
-                            });
-                            failed = true;
-                            break;
-                        }
-                    };
-                solver.push();
-                assert_definitions(&solver, &negative_assertion.side_conditions)?;
-                solver.assert(negative_assertion.expression.not());
-                match solver.check() {
-                    SatResult::Sat => {
-                        let model = solver
-                            .get_model()
-                            .ok_or(ModelFindingError::MissingModel)
-                            .and_then(|model| extract_model(&environment, symbolic_types, &model));
-                        solver.pop(1);
-                        self.steps[index].validation.checks.push(match model {
-                            Ok(model) => StepCheck::Counterexample {
-                                environment: Rc::clone(&environment),
-                                model,
-                            },
-                            Err(error) => StepCheck::Error {
-                                environment: Rc::clone(&environment),
-                                error,
-                            },
-                        });
-                        failed = true;
-                        break;
-                    }
-                    SatResult::Unknown => {
-                        solver.pop(1);
-                        self.steps[index]
-                            .validation
-                            .checks
-                            .push(StepCheck::Unknown {
-                                environment: Some(Rc::clone(&environment)),
-                            });
-                        failed = true;
-                        break;
-                    }
-                    SatResult::Unsat => {
-                        let supporting_facts = core_facts(&solver, &tracked);
-                        solver.pop(1);
-                        let positive =
-                            match lower_prepared_boolean(&extension, &prepared_positive[index]) {
-                                Ok(assertion) => assertion,
-                                Err(error) => {
-                                    self.steps[index].validation.checks.push(StepCheck::Error {
-                                        environment: Rc::clone(&environment),
-                                        error,
-                                    });
-                                    failed = true;
-                                    break;
-                                }
-                            };
-                        let warnings = check_step_existence(
-                            &mut solver,
-                            Rc::clone(&environment),
-                            symbolic_types,
-                            &positive.side_conditions,
-                        )?;
-                        if warnings.is_empty() {
-                            self.steps[index].validation.checks.push(StepCheck::Unsat {
-                                environment: Rc::clone(&environment),
-                                supporting_facts,
-                            });
-                        } else {
-                            self.steps[index].validation.checks.extend(warnings);
-                        }
-                        accepted.push(positive);
-                    }
-                }
-            }
-            if !failed {
-                let mut expressions = Vec::new();
-                for assertion in &accepted {
-                    assert_definitions(&solver, &assertion.side_conditions)?;
-                    expressions.push(assertion.expression.clone());
-                }
-                track_step(
-                    &mut solver,
-                    index,
-                    Bool::and(&expressions),
-                    sentence,
-                    &mut tracked,
-                );
-            }
-        }
-        Ok(EnvironmentResult::Sat)
-    }
-
-    fn record_unknown(&mut self, environment: Option<Rc<Environment>>) {
-        for step in &mut self.steps {
-            if !step.has_counterexample() {
-                step.validation.checks.push(StepCheck::Unknown {
-                    environment: environment.clone(),
-                });
-            }
-        }
-    }
-
-    fn record_inconsistent_assumptions(&mut self, max_dimension: Option<u64>) {
-        for step in &mut self.steps {
-            if !step.has_counterexample() {
-                step.validation
-                    .checks
-                    .push(StepCheck::InconsistentAssumptions { max_dimension });
-            }
-        }
     }
 }
 
@@ -422,20 +293,513 @@ impl Arguments {
     }
 }
 
-enum EnvironmentResult {
-    Sat,
-    Unsat,
-    Unknown,
+#[derive(Default)]
+struct ClaimResult {
+    assertions: Vec<crate::model_finding::LoweredBoolean>,
+    validated: bool,
 }
 
-fn step_environment_extensions(
-    base: &Environment,
-    symbolic_types: &SymbolicTypeEnvironment,
-    step: &PreparedExpression,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScopedStatement {
+    introduced_variables: BTreeSet<Variable>,
+    givens: Vec<Expr<()>>,
+    conclusion: Expr<()>,
+}
+
+struct GoalExport {
+    statement: ScopedStatement,
+    assertions: Vec<crate::model_finding::LoweredBoolean>,
+}
+
+struct ValidationRun {
     max_dimension: u64,
-) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
-    let mut declarations = Vec::new();
-    let mut extension_types = symbolic_types.clone();
+    next_tracker: usize,
+}
+
+fn set_exhaustive(goal: &mut Goal, exhaustive: bool) {
+    goal.validation.environments_exhaustive = exhaustive;
+    for item in &mut goal.steps {
+        match item {
+            ArgumentItem::Sentence(step) => step.validation.environments_exhaustive = exhaustive,
+            ArgumentItem::Goal(goal) => set_exhaustive(goal, exhaustive),
+        }
+    }
+}
+
+fn and_exhaustive(goal: &mut Goal, exhaustive: bool) {
+    goal.validation.environments_exhaustive &= exhaustive;
+    for item in &mut goal.steps {
+        match item {
+            ArgumentItem::Sentence(step) => step.validation.environments_exhaustive &= exhaustive,
+            ArgumentItem::Goal(goal) => and_exhaustive(goal, exhaustive),
+        }
+    }
+}
+
+fn fresh_tracker(next_tracker: &mut usize) -> Bool {
+    let tracker = Bool::new_const(format!("argument_fact_{}", *next_tracker));
+    *next_tracker += 1;
+    tracker
+}
+
+fn track_assertions(
+    solver: &mut Solver,
+    assertions: &[crate::model_finding::LoweredBoolean],
+    sentence: Expr<()>,
+    tracked: &mut Vec<(Bool, Expr<()>)>,
+    next_tracker: &mut usize,
+) -> Result<(), ModelFindingError> {
+    let mut expressions = Vec::new();
+    for assertion in assertions {
+        assert_definitions(solver, &assertion.side_conditions)?;
+        expressions.push(assertion.expression.clone());
+    }
+    let tracker = fresh_tracker(next_tracker);
+    solver.assert_and_track(Bool::and(&expressions), &tracker);
+    tracked.push((tracker, sentence));
+    Ok(())
+}
+
+fn validate_goal_contents(
+    goal: &mut Goal,
+    solver: &mut Solver,
+    environment: Rc<Environment>,
+    symbolic_types: &SymbolicTypeEnvironment,
+    tracked: &mut Vec<(Bool, Expr<()>)>,
+    scoped_statements: &mut Vec<ScopedStatement>,
+    run: &mut ValidationRun,
+) -> Result<ClaimResult, ArgumentValidationError> {
+    for item in &mut goal.steps {
+        match item {
+            ArgumentItem::Sentence(step) => {
+                if step.has_counterexample() {
+                    continue;
+                }
+                let result = validate_claim(
+                    &step.sentence,
+                    &mut step.validation,
+                    solver,
+                    Rc::clone(&environment),
+                    symbolic_types,
+                    tracked,
+                    run.max_dimension,
+                )?;
+                if result.validated {
+                    track_assertions(
+                        solver,
+                        &result.assertions,
+                        step.sentence.clone(),
+                        tracked,
+                        &mut run.next_tracker,
+                    )?;
+                }
+            }
+            ArgumentItem::Goal(child) => {
+                let export = validate_nested_goal(
+                    child,
+                    solver,
+                    Rc::clone(&environment),
+                    symbolic_types,
+                    tracked,
+                    scoped_statements,
+                    run,
+                )?;
+                if let Some(export) = export {
+                    scoped_statements.push(export.statement);
+                    if !export.assertions.is_empty() {
+                        track_assertions(
+                            solver,
+                            &export.assertions,
+                            child.conclusion.clone(),
+                            tracked,
+                            &mut run.next_tracker,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    if goal.has_counterexample() {
+        return Ok(ClaimResult::default());
+    }
+    validate_claim(
+        &goal.conclusion,
+        &mut goal.validation,
+        solver,
+        environment,
+        symbolic_types,
+        tracked,
+        run.max_dimension,
+    )
+}
+
+fn validate_nested_goal(
+    goal: &mut Goal,
+    solver: &mut Solver,
+    parent_environment: Rc<Environment>,
+    parent_types: &SymbolicTypeEnvironment,
+    parent_tracked: &[(Bool, Expr<()>)],
+    parent_scoped_statements: &[ScopedStatement],
+    run: &mut ValidationRun,
+) -> Result<Option<GoalExport>, ArgumentValidationError> {
+    if goal.has_counterexample() {
+        return Ok(None);
+    }
+
+    let (symbolic_types, introduced_variables) =
+        match extend_symbolic_types(parent_types, &goal.givens) {
+            Ok(result) => result,
+            Err(ArgumentValidationError::Shape(error)) => {
+                goal.validation.checks.push(StepCheck::Error {
+                    environment: parent_environment,
+                    error: ModelFindingError::from(error),
+                });
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+    let prepared_givens = match goal
+        .givens
+        .iter()
+        .map(|given| prepare_expression(&symbolic_types, given, POSITIVE))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ToZ3Error::from)
+        .map_err(ModelFindingError::from)
+    {
+        Ok(givens) => givens,
+        Err(error) => {
+            goal.validation.checks.push(StepCheck::Error {
+                environment: parent_environment,
+                error,
+            });
+            return Ok(None);
+        }
+    };
+
+    let extensions = goal_environment_extensions(
+        &parent_environment,
+        &symbolic_types,
+        &prepared_givens,
+        run.max_dimension,
+    )?;
+    and_exhaustive(goal, extensions.exhaustive);
+    if extensions.environments.is_empty() {
+        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
+        return Ok(None);
+    }
+
+    let implication = introduced_variables
+        .is_empty()
+        .then(|| scoped_statement_expression(&goal.givens, &goal.conclusion));
+    let prepared_implication = implication
+        .as_ref()
+        .map(|expression| prepare_expression(&symbolic_types, expression, POSITIVE))
+        .transpose()
+        .map_err(ToZ3Error::from)
+        .map_err(ModelFindingError::from)?;
+
+    let mut feasible = 0;
+    let mut all_validated = true;
+    let mut exported = Vec::new();
+    for extension in extensions.environments {
+        let extension = Rc::new(extension);
+        solver.push();
+        assert_natural_assignment(solver, &extension);
+        let mut tracked = parent_tracked.to_vec();
+        let mut scoped_statements = parent_scoped_statements.to_vec();
+        for (given, prepared) in goal.givens.iter().zip(&prepared_givens) {
+            let assertion = lower_prepared_boolean(&extension, prepared)?;
+            assert_definitions(solver, &assertion.side_conditions)?;
+            let tracker = fresh_tracker(&mut run.next_tracker);
+            solver.assert_and_track(assertion.expression, &tracker);
+            tracked.push((tracker, given.clone()));
+        }
+        match solver.check() {
+            SatResult::Sat => {
+                feasible += 1;
+                let result = validate_goal_contents(
+                    goal,
+                    solver,
+                    Rc::clone(&extension),
+                    &symbolic_types,
+                    &mut tracked,
+                    &mut scoped_statements,
+                    run,
+                )?;
+                all_validated &= result.validated;
+                if result.validated
+                    && let Some(prepared) = &prepared_implication
+                {
+                    exported.push(lower_prepared_boolean(&extension, prepared)?);
+                }
+            }
+            SatResult::Unknown => {
+                all_validated = false;
+                goal.validation.checks.push(StepCheck::Unknown {
+                    environment: Some(Rc::clone(&extension)),
+                });
+            }
+            SatResult::Unsat => {}
+        }
+        solver.pop(1);
+    }
+
+    if feasible == 0 {
+        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
+        return Ok(None);
+    }
+    goal.validation.givens_feasible = true;
+    goal.validation
+        .checks
+        .retain(|check| !matches!(check, StepCheck::InconsistentGivens { .. }));
+    if all_validated {
+        Ok(Some(GoalExport {
+            statement: ScopedStatement {
+                introduced_variables,
+                givens: goal.givens.clone(),
+                conclusion: goal.conclusion.clone(),
+            },
+            assertions: exported,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn record_inconsistent_givens(goal: &mut Goal, exhaustive: bool, max_dimension: u64) {
+    if !goal.validation.givens_feasible
+        && !goal
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::InconsistentGivens { .. }))
+    {
+        goal.validation.checks.push(StepCheck::InconsistentGivens {
+            max_dimension: (!exhaustive).then_some(max_dimension),
+        });
+    }
+}
+
+fn validate_claim(
+    sentence: &Expr<()>,
+    validation: &mut StepValidationData,
+    solver: &mut Solver,
+    environment: Rc<Environment>,
+    symbolic_types: &SymbolicTypeEnvironment,
+    tracked: &[(Bool, Expr<()>)],
+    max_dimension: u64,
+) -> Result<ClaimResult, ArgumentValidationError> {
+    if let Err(error) = ensure_expression_bound(sentence, symbolic_types) {
+        validation
+            .checks
+            .push(StepCheck::Error { environment, error });
+        return Ok(ClaimResult::default());
+    }
+    let positive = match prepare_expression(symbolic_types, sentence, POSITIVE) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            validation.checks.push(StepCheck::Error {
+                environment,
+                error: ModelFindingError::from(ToZ3Error::from(error)),
+            });
+            return Ok(ClaimResult::default());
+        }
+    };
+    let negative = match prepare_expression(symbolic_types, sentence, NEGATIVE) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            validation.checks.push(StepCheck::Error {
+                environment,
+                error: ModelFindingError::from(ToZ3Error::from(error)),
+            });
+            return Ok(ClaimResult::default());
+        }
+    };
+    let extensions =
+        expression_environment_extensions(&environment, symbolic_types, &positive, max_dimension)?;
+    validation.environments_exhaustive &= extensions.exhaustive;
+    if extensions.environments.is_empty() {
+        validation.checks.push(StepCheck::DimensionallyInvalid {
+            environment: Rc::clone(&environment),
+            declarations: concrete_declarations(symbolic_types, &environment)?,
+        });
+        return Ok(ClaimResult::default());
+    }
+
+    let mut accepted = Vec::new();
+    for extension in extensions.environments {
+        let extension = Rc::new(extension);
+        let negative_assertion = match lower_prepared_boolean(&extension, &negative) {
+            Ok(assertion) => assertion,
+            Err(error) => {
+                validation.checks.push(StepCheck::Error {
+                    environment: Rc::clone(&extension),
+                    error,
+                });
+                return Ok(ClaimResult::default());
+            }
+        };
+        solver.push();
+        assert_natural_assignment(solver, &extension);
+        assert_definitions(solver, &negative_assertion.side_conditions)?;
+        solver.assert(negative_assertion.expression.not());
+        match solver.check() {
+            SatResult::Sat => {
+                let model = solver
+                    .get_model()
+                    .ok_or(ModelFindingError::MissingModel)
+                    .and_then(|model| extract_model(&extension, symbolic_types, &model));
+                solver.pop(1);
+                validation.checks.push(match model {
+                    Ok(model) => StepCheck::Counterexample {
+                        environment: extension,
+                        model,
+                    },
+                    Err(error) => StepCheck::Error {
+                        environment: extension,
+                        error,
+                    },
+                });
+                return Ok(ClaimResult::default());
+            }
+            SatResult::Unknown => {
+                solver.pop(1);
+                validation.checks.push(StepCheck::Unknown {
+                    environment: Some(extension),
+                });
+                return Ok(ClaimResult::default());
+            }
+            SatResult::Unsat => {
+                let supporting_facts = core_facts(solver, tracked);
+                solver.pop(1);
+                solver.push();
+                assert_natural_assignment(solver, &extension);
+                let positive = lower_prepared_boolean(&extension, &positive)?;
+                let warnings = check_step_existence(
+                    solver,
+                    Rc::clone(&extension),
+                    symbolic_types,
+                    &positive.side_conditions,
+                )?;
+                solver.pop(1);
+                if warnings.is_empty() {
+                    validation.checks.push(StepCheck::Unsat {
+                        environment: extension,
+                        supporting_facts,
+                    });
+                } else {
+                    validation.checks.extend(warnings);
+                }
+                accepted.push(positive);
+            }
+        }
+    }
+    Ok(ClaimResult {
+        assertions: accepted,
+        validated: true,
+    })
+}
+
+fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
+    if givens.is_empty() {
+        return conclusion.clone();
+    }
+    let antecedent = if let [given] = givens {
+        given.clone()
+    } else {
+        Expr::new(RawExpr::Finop(Finop::And, givens.to_vec()))
+    };
+    Expr::new(RawExpr::LogicChain(LogicChain {
+        start: antecedent,
+        assertions: vec![(Logic::Imp, conclusion.clone())],
+    }))
+}
+
+fn extend_symbolic_types(
+    parent: &SymbolicTypeEnvironment,
+    givens: &[Expr<()>],
+) -> Result<(SymbolicTypeEnvironment, BTreeSet<Variable>), ArgumentValidationError> {
+    let variables = free_variables(givens.iter());
+    let introduced = variables
+        .iter()
+        .filter(|variable| !parent.types.contains_key(*variable))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let inferred = infer_symbolic_type_environment(givens)?;
+    let mut extended = parent.clone();
+    for variable in &introduced {
+        let ty = inferred.types.get(variable).cloned().ok_or_else(|| {
+            ShapeError::InvalidTyping(format!(
+                "missing inferred type for introduced variable {}",
+                variable.z3_name()
+            ))
+        })?;
+        extended.types.insert(variable.clone(), ty);
+    }
+    Ok((extended, introduced))
+}
+
+fn ensure_expression_bound(
+    expression: &Expr<()>,
+    types: &SymbolicTypeEnvironment,
+) -> Result<(), ModelFindingError> {
+    if let Some(variable) = free_variables(std::iter::once(expression))
+        .into_iter()
+        .find(|variable| !types.types.contains_key(variable))
+    {
+        return Err(ModelFindingError::from(ToZ3Error::from(
+            TypeError::MissingType(variable),
+        )));
+    }
+    Ok(())
+}
+
+struct FreeVariableCollector {
+    variables: BTreeSet<Variable>,
+    bound: HashSet<Variable>,
+}
+
+impl Visit<()> for FreeVariableCollector {
+    fn visit_variable(&mut self, variable: &Variable) {
+        if !self.bound.contains(variable) {
+            self.variables.insert(variable.clone());
+        }
+    }
+
+    fn visit_raw_expr_seqop(
+        &mut self,
+        _op: &crate::SeqOp,
+        range: &crate::Range<()>,
+        body: &Expr<()>,
+    ) {
+        self.visit_expr(&range.from);
+        self.visit_expr(&range.to);
+        assert!(
+            self.bound.insert(range.index_variable.clone()),
+            "sequence binder shadows an active binder"
+        );
+        self.visit_expr(body);
+        self.bound.remove(&range.index_variable);
+    }
+}
+
+fn free_variables<'a>(expressions: impl Iterator<Item = &'a Expr<()>>) -> BTreeSet<Variable> {
+    let mut collector = FreeVariableCollector {
+        variables: BTreeSet::new(),
+        bound: HashSet::new(),
+    };
+    for expression in expressions {
+        collector.visit_expr(expression);
+    }
+    collector.variables
+}
+
+fn fixed_assignment_declarations(
+    base: &Environment,
+    extension_types: &SymbolicTypeEnvironment,
+) -> Result<Vec<PreparedExpression>, ArgumentValidationError> {
+    let mut extension_types = extension_types.clone();
     for parameter in base.natural_assignment.keys() {
         if let NaturalParameter::Variable(variable) = parameter {
             extension_types
@@ -444,28 +808,75 @@ fn step_environment_extensions(
                 .or_insert(TypeExpr::Nat);
         }
     }
-    for (parameter, value) in &base.natural_assignment {
-        let expression: Expr<()> = match parameter {
-            NaturalParameter::Variable(variable) => Expr::new(RawExpr::Variable(variable.clone())),
-            NaturalParameter::ImplicitDimension(dimension) => {
-                Expr::new(RawExpr::ImplicitDimension(*dimension))
-            }
-        };
-        let equality = Expr::new(RawExpr::CmpChain(CmpChain {
-            start: expression,
-            assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
-        }));
-        declarations.push(
+    base.natural_assignment
+        .iter()
+        .map(|(parameter, value)| {
+            let expression: Expr<()> = match parameter {
+                NaturalParameter::Variable(variable) => {
+                    Expr::new(RawExpr::Variable(variable.clone()))
+                }
+                NaturalParameter::ImplicitDimension(dimension) => {
+                    Expr::new(RawExpr::ImplicitDimension(*dimension))
+                }
+            };
+            let equality = Expr::new(RawExpr::CmpChain(CmpChain {
+                start: expression,
+                assertions: vec![(Cmp::Eq, Expr::new(RawExpr::NatLiteral(*value)))],
+            }));
             prepare_expression(&extension_types, &equality, POSITIVE)
-                .map_err(crate::to_z3::ToZ3Error::from)
-                .map_err(ModelFindingError::from)?,
-        );
-    }
-    declarations.push(step.clone());
+                .map_err(ToZ3Error::from)
+                .map_err(ModelFindingError::from)
+                .map_err(ArgumentValidationError::from)
+        })
+        .collect()
+}
+
+fn goal_environment_extensions(
+    base: &Environment,
+    symbolic_types: &SymbolicTypeEnvironment,
+    givens: &[PreparedExpression],
+    max_dimension: u64,
+) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
+    let declarations = fixed_assignment_declarations(base, symbolic_types)?;
+    let assumptions = declarations
+        .iter()
+        .chain(givens)
+        .cloned()
+        .collect::<Vec<_>>();
     let iterator = match extract_prepared_environment_iterator(
-        &extension_types,
-        &declarations,
+        symbolic_types,
+        &assumptions,
         &[],
+        max_dimension,
+    ) {
+        Ok(iterator) => iterator,
+        Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
+            return Ok(StepEnvironmentExtensions {
+                environments: Vec::new(),
+                exhaustive: true,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let exhaustive = iterator.dimension_bound_is_exhaustive();
+    let environments = iterator.collect::<Result<Vec<_>, _>>()?;
+    Ok(StepEnvironmentExtensions {
+        environments,
+        exhaustive,
+    })
+}
+
+fn expression_environment_extensions(
+    base: &Environment,
+    symbolic_types: &SymbolicTypeEnvironment,
+    step: &PreparedExpression,
+    max_dimension: u64,
+) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
+    let declarations = fixed_assignment_declarations(base, symbolic_types)?;
+    let iterator = match extract_prepared_environment_iterator(
+        symbolic_types,
+        &declarations,
+        std::slice::from_ref(step),
         max_dimension,
     ) {
         Ok(iterator) => iterator,
@@ -512,18 +923,6 @@ fn concrete_declarations(
         .collect::<Result<Vec<_>, ModelFindingError>>()?;
     declarations.sort();
     Ok(declarations)
-}
-
-fn track_step(
-    solver: &mut Solver,
-    index: usize,
-    assertion: Bool,
-    sentence: Expr<()>,
-    tracked: &mut Vec<(Bool, Expr<()>)>,
-) {
-    let tracker = Bool::new_const(format!("argument_step_{index}"));
-    solver.assert_and_track(assertion, &tracker);
-    tracked.push((tracker, sentence));
 }
 
 fn check_step_existence(
@@ -595,32 +994,18 @@ impl ToFromMd for Argument {
             "argument must start with a level-one heading"
         );
         let name = heading_text(&children[0]);
-        let assumptions_start = section_start(children, "Assumptions");
-        let steps_start = section_start(children, "Steps");
-        assert!(
-            assumptions_start < steps_start,
-            "argument sections are out of order"
-        );
-        let assumptions =
-            parse_expression_section(&children[assumptions_start + 1..steps_start], "assumptions");
-        let steps = parse_steps(&children[steps_start + 1..]);
+        let root = parse_goal(&children[1..]);
         Self {
             name,
-            assumptions,
-            steps,
+            root,
             error: None,
         }
     }
 
     fn to_md(&self) -> Node {
-        let mut children = vec![heading(1, &self.name), heading(2, "Assumptions")];
-        if !self.assumptions.is_empty() {
-            children.push(expression_list(&self.assumptions));
-        }
-        children.push(heading(2, "Steps"));
-        if !self.steps.is_empty() {
-            children.push(step_list(self));
-        }
+        let expressions = argument_expressions(self);
+        let mut children = vec![heading(1, &self.name)];
+        children.extend(goal_nodes(&self.root, &expressions));
         if let Some(error) = &self.error {
             children.push(heading(2, "Error"));
             children.push(Node::Paragraph(Paragraph {
@@ -685,45 +1070,160 @@ impl Display for Arguments {
     }
 }
 
-fn parse_steps(nodes: &[Node]) -> Vec<ArgumentStep> {
-    let [
-        Node::List(List {
+fn parse_goal(nodes: &[Node]) -> Goal {
+    let mut index = 0;
+    let givens = if paragraph_is_label(nodes.get(index), "Given:") {
+        index += 1;
+        let Node::List(List {
             children,
-            ordered: true,
+            ordered: false,
             ..
-        }),
-    ] = nodes
-    else {
-        panic!("expected an ordered list of argument steps")
+        }) = nodes
+            .get(index)
+            .unwrap_or_else(|| panic!("Given must be followed by an unordered expression list"))
+        else {
+            panic!("Given must be followed by an unordered expression list")
+        };
+        assert!(!children.is_empty(), "Given list must not be empty");
+        index += 1;
+        children.iter().map(parse_expression_item).collect()
+    } else {
+        Vec::new()
     };
-    children
-        .iter()
-        .map(|item| ArgumentStep {
-            sentence: parse_expression_item(item),
-            validation: StepValidationData::default(),
-        })
-        .collect()
+    let conclusion = parse_wts(
+        nodes
+            .get(index)
+            .unwrap_or_else(|| panic!("goal must contain WTS")),
+    );
+    index += 1;
+    let steps = if let Some(node) = nodes.get(index) {
+        index += 1;
+        parse_argument_items(node)
+    } else {
+        Vec::new()
+    };
+    assert_eq!(index, nodes.len(), "unexpected content after goal");
+    Goal {
+        givens,
+        conclusion,
+        steps,
+        validation: StepValidationData::default(),
+    }
 }
 
-fn step_list(argument: &Argument) -> Node {
+fn paragraph_is_label(node: Option<&Node>, expected: &str) -> bool {
+    matches!(
+        node,
+        Some(Node::Paragraph(Paragraph { children, .. }))
+            if matches!(children.as_slice(), [Node::Text(text)] if text.value == expected)
+    )
+}
+
+fn parse_wts(node: &Node) -> Expr<()> {
+    let Node::Paragraph(Paragraph { children, .. }) = node else {
+        panic!("WTS must be a paragraph")
+    };
+    let [Node::Text(label), Node::InlineMath(math)] = children.as_slice() else {
+        panic!("WTS must contain exactly one inline TeX expression")
+    };
+    assert_eq!(label.value, "WTS ", "goal paragraph must start with WTS");
+    let parsed = ratex_parser::parse(&math.value).expect("invalid TeX in WTS expression");
+    crate::from_tex::expr(&parsed).expect("unsupported TeX in WTS expression")
+}
+
+fn parse_argument_items(node: &Node) -> Vec<ArgumentItem> {
+    let Node::List(List {
+        children,
+        ordered: true,
+        ..
+    }) = node
+    else {
+        panic!("goal body must be an ordered list")
+    };
+    children.iter().map(parse_argument_item).collect()
+}
+
+fn parse_argument_item(node: &Node) -> ArgumentItem {
+    let Node::ListItem(ListItem { children, .. }) = node else {
+        panic!("argument item must be a list item")
+    };
+    if matches!(children.first(), Some(Node::Paragraph(Paragraph { children, .. })) if matches!(children.first(), Some(Node::InlineMath(_))))
+    {
+        return ArgumentItem::Sentence(ArgumentStep {
+            sentence: parse_expression_item(node),
+            validation: StepValidationData::default(),
+        });
+    }
+    ArgumentItem::Goal(parse_goal(children))
+}
+
+fn goal_nodes(goal: &Goal, expressions: &[Expr<()>]) -> Vec<Node> {
+    let mut nodes = Vec::new();
+    if !goal.givens.is_empty() {
+        nodes.push(text_paragraph("Given:"));
+        nodes.push(expression_list(&goal.givens));
+    }
+    nodes.push(Node::Paragraph(Paragraph {
+        children: vec![
+            Node::Text(markdown::mdast::Text {
+                value: "WTS ".to_owned(),
+                position: None,
+            }),
+            Node::InlineMath(InlineMath {
+                value: goal.conclusion.as_latex().to_string(),
+                position: None,
+            }),
+        ],
+        position: None,
+    }));
+    if !goal.steps.is_empty() {
+        nodes.push(argument_item_list(&goal.steps, expressions));
+    }
+    if let Some(details) = validation_details(&goal.conclusion, &goal.validation, expressions) {
+        nodes.push(Node::Html(Html {
+            value: details,
+            position: None,
+        }));
+    }
+    nodes
+}
+
+fn text_paragraph(value: &str) -> Node {
+    Node::Paragraph(Paragraph {
+        children: vec![Node::Text(markdown::mdast::Text {
+            value: value.to_owned(),
+            position: None,
+        })],
+        position: None,
+    })
+}
+
+fn argument_item_list(items: &[ArgumentItem], expressions: &[Expr<()>]) -> Node {
     Node::List(List {
-        children: argument
-            .steps
+        children: items
             .iter()
-            .map(|step| {
-                let mut children = vec![Node::Paragraph(Paragraph {
-                    children: vec![Node::InlineMath(InlineMath {
-                        value: step.sentence.as_latex().to_string(),
-                        position: None,
-                    })],
-                    position: None,
-                })];
-                if let Some(details) = step_details(argument, step) {
-                    children.push(Node::Html(Html {
-                        value: details,
-                        position: None,
-                    }));
-                }
+            .map(|item| {
+                let children = match item {
+                    ArgumentItem::Sentence(step) => {
+                        let mut children = vec![Node::Paragraph(Paragraph {
+                            children: vec![Node::InlineMath(InlineMath {
+                                value: step.sentence.as_latex().to_string(),
+                                position: None,
+                            })],
+                            position: None,
+                        })];
+                        if let Some(details) =
+                            validation_details(&step.sentence, &step.validation, expressions)
+                        {
+                            children.push(Node::Html(Html {
+                                value: details,
+                                position: None,
+                            }));
+                        }
+                        children
+                    }
+                    ArgumentItem::Goal(goal) => goal_nodes(goal, expressions),
+                };
                 Node::ListItem(ListItem {
                     children,
                     position: None,
@@ -739,9 +1239,12 @@ fn step_list(argument: &Argument) -> Node {
     })
 }
 
-fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
-    if let Some(StepCheck::Counterexample { model, .. }) = step
-        .validation
+fn validation_details(
+    sentence: &Expr<()>,
+    validation: &StepValidationData,
+    expressions: &[Expr<()>],
+) -> Option<String> {
+    if let Some(StepCheck::Counterexample { model, .. }) = validation
         .checks
         .iter()
         .find(|check| matches!(check, StepCheck::Counterexample { .. }))
@@ -749,11 +1252,10 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
         let assignments = expression_bullets(model);
         return Some(format!(
             "<details>\n<summary>❌ counterexample found</summary>\n\nThe negation of ${}$ is satisfied by:\n\n{assignments}\n</details>",
-            step.sentence.as_latex()
+            sentence.as_latex()
         ));
     }
-    if let Some(StepCheck::DimensionallyInvalid { declarations, .. }) = step
-        .validation
+    if let Some(StepCheck::DimensionallyInvalid { declarations, .. }) = validation
         .checks
         .iter()
         .find(|check| matches!(check, StepCheck::DimensionallyInvalid { .. }))
@@ -763,8 +1265,7 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
             expression_bullets(declarations)
         ));
     }
-    if let Some(StepCheck::Error { error, .. }) = step
-        .validation
+    if let Some(StepCheck::Error { error, .. }) = validation
         .checks
         .iter()
         .find(|check| matches!(check, StepCheck::Error { .. }))
@@ -773,8 +1274,7 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
             "<details>\n<summary>Unsupported step</summary>\n\n{error}\n</details>"
         ));
     }
-    let existence_warnings: Vec<_> = step
-        .validation
+    let existence_warnings: Vec<_> = validation
         .checks
         .iter()
         .filter(|check| {
@@ -812,8 +1312,7 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
             messages.join("\n\n")
         ));
     }
-    if step
-        .validation
+    if validation
         .checks
         .iter()
         .any(|check| matches!(check, StepCheck::Unknown { .. }))
@@ -823,28 +1322,26 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
                 .to_owned(),
         );
     }
-    if let Some(StepCheck::InconsistentAssumptions { max_dimension }) = step
-        .validation
+    if let Some(StepCheck::InconsistentGivens { max_dimension }) = validation
         .checks
         .iter()
-        .find(|check| matches!(check, StepCheck::InconsistentAssumptions { .. }))
+        .find(|check| matches!(check, StepCheck::InconsistentGivens { .. }))
     {
         let message = match max_dimension {
             Some(max_dimension) => {
-                format!("The assumptions are inconsistent up to dimension {max_dimension}.")
+                format!("The givens are inconsistent up to dimension {max_dimension}.")
             }
-            None => "The assumptions are inconsistent.".to_owned(),
+            None => "The givens are inconsistent.".to_owned(),
         };
         return Some(format!(
-            "<details>\n<summary>Inconsistent assumptions</summary>\n\n{message}\n</details>"
+            "<details>\n<summary>Inconsistent givens</summary>\n\n{message}\n</details>"
         ));
     }
-    if step.validation.checks.is_empty() {
+    if validation.checks.is_empty() {
         return None;
     }
 
-    let present: BTreeSet<_> = step
-        .validation
+    let present: BTreeSet<_> = validation
         .checks
         .iter()
         .filter_map(|check| match check {
@@ -856,16 +1353,14 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
         .flatten()
         .cloned()
         .collect();
-    let supporting_facts: Vec<_> = argument
-        .assumptions
+    let supporting_facts: Vec<_> = expressions
         .iter()
-        .chain(argument.steps.iter().map(|step| &step.sentence))
         .filter(|expression| present.contains(*expression))
         .cloned()
         .collect();
     let explanation = if supporting_facts.is_empty() {
         "No premises seemed necessary to show this.".to_owned()
-    } else if step.validation.environments_exhaustive {
+    } else if validation.environments_exhaustive {
         format!(
             "This follows from the following facts:\n\n{}",
             expression_bullets(&supporting_facts)
@@ -876,19 +1371,35 @@ fn step_details(argument: &Argument, step: &ArgumentStep) -> Option<String> {
             expression_bullets(&supporting_facts)
         )
     };
-    if step.validation.environments_exhaustive {
+    if validation.environments_exhaustive {
         Some(format!(
             "<details>\n<summary>✅ verified</summary>\n\n{explanation}\n</details>"
         ))
     } else {
-        let max_dimension = step
-            .validation
+        let max_dimension = validation
             .max_dimension
             .unwrap_or_else(|| panic!("validated step is missing its maximum dimension"));
         Some(format!(
             "<details>\n<summary>✅ likely</summary>\n\nNo counterexamples found up to a maximum dimension of {max_dimension}.\n\n{explanation}\n</details>"
         ))
     }
+}
+
+fn argument_expressions(argument: &Argument) -> Vec<Expr<()>> {
+    fn collect(goal: &Goal, expressions: &mut Vec<Expr<()>>) {
+        expressions.extend(goal.givens.iter().cloned());
+        for item in &goal.steps {
+            match item {
+                ArgumentItem::Sentence(step) => expressions.push(step.sentence.clone()),
+                ArgumentItem::Goal(goal) => collect(goal, expressions),
+            }
+        }
+        expressions.push(goal.conclusion.clone());
+    }
+
+    let mut expressions = Vec::new();
+    collect(&argument.root, &mut expressions);
+    expressions
 }
 
 fn expression_bullets(expressions: &[Expr<()>]) -> String {
@@ -901,268 +1412,216 @@ fn expression_bullets(expressions: &[Expr<()>]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
-    use super::{Argument, Arguments, StepCheck, ToFromMd};
+    use super::{Argument, ArgumentItem, Arguments, StepCheck, ToFromMd};
 
     const ARGUMENT: &str = r#"# Scalar argument
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 
-## Steps
+WTS $x = x$
 
 1. $x = x$
-2. $x = 0$
-3. $x = x$"#;
+2. $x = 0$"#;
+
+    fn sentence(argument: &Argument, index: usize) -> &super::ArgumentStep {
+        let ArgumentItem::Sentence(step) = &argument.root.steps[index] else {
+            panic!("expected a sentence")
+        };
+        step
+    }
 
     #[test]
     fn pending_argument_round_trips() {
         let argument = Argument::parse_str(ARGUMENT);
         assert_eq!(argument.to_string(), ARGUMENT);
-        assert!(
-            argument
-                .steps
-                .iter()
-                .all(|step| step.validation.checks.is_empty())
-        );
+        assert!(argument.root.validation.checks.is_empty());
+        assert!(argument.root.steps.iter().all(|item| match item {
+            ArgumentItem::Sentence(step) => step.validation.checks.is_empty(),
+            ArgumentItem::Goal(goal) => goal.validation.checks.is_empty(),
+        }));
     }
 
     #[test]
-    fn validates_all_steps_incrementally_for_one_environment() {
+    fn failed_children_do_not_invalidate_the_goal() {
         let mut argument = Argument::parse_str(ARGUMENT);
         argument.validate(0).unwrap();
 
-        let StepCheck::Unsat {
-            environment: first_environment,
-            ..
-        } = &argument.steps[0].validation.checks[0]
-        else {
-            panic!("first step should be likely")
-        };
-        let StepCheck::Counterexample {
-            environment: second_environment,
-            ..
-        } = &argument.steps[1].validation.checks[0]
-        else {
-            panic!("second step should have a counterexample")
-        };
-        let StepCheck::Unsat {
-            environment: third_environment,
-            ..
-        } = &argument.steps[2].validation.checks[0]
-        else {
-            panic!("third step should be likely")
-        };
-        assert!(Rc::ptr_eq(first_environment, second_environment));
-        assert!(Rc::ptr_eq(second_environment, third_environment));
-
-        let rendered = argument.to_string();
-        assert!(rendered.contains("✅ verified"));
-        assert!(rendered.contains("❌ counterexample found"));
-        assert!(!rendered.contains("maximum dimension of 0"));
+        assert!(matches!(
+            sentence(&argument, 0).validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
+        assert!(matches!(
+            sentence(&argument, 1).validation.checks[0],
+            StepCheck::Counterexample { .. }
+        ));
+        assert!(matches!(
+            argument.root.validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
     }
 
     #[test]
-    fn lowers_a_logic_chain_negatively_then_tracks_it_positively() {
-        let mut argument = Argument::parse_str(
-            r#"# Logic chain
+    fn nested_goals_round_trip_and_validate_locally() {
+        let input = r#"# Nested
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
-- $y \in \mathbb{R}$
-- $z \in \mathbb{R}$
-- $x = 0$
-- $y = 0$
-- $z = 0$
 
-## Steps
+WTS $x = x$
 
-1. $x = 0 \iff y = 0 \implies z = 0$
-2. $z = 0$"#,
-        );
+1. WTS $x = x$
 
+   1. $x = 0$
+   2. $x = x$
+2. Given:
+
+   - $y \in \mathbb{R}$
+
+   WTS $y = y$"#;
+        let mut argument = Argument::parse_str(input);
+        assert_eq!(argument.to_string(), input);
         argument.validate(0).unwrap();
 
+        let ArgumentItem::Goal(first) = &argument.root.steps[0] else {
+            panic!("expected nested goal")
+        };
         assert!(matches!(
-            argument.steps[0].validation.checks[0],
+            first.validation.checks[0],
             StepCheck::Unsat { .. }
         ));
         assert!(matches!(
-            argument.steps[1].validation.checks[0],
+            &first.steps[0],
+            ArgumentItem::Sentence(step)
+                if matches!(step.validation.checks[0], StepCheck::Counterexample { .. })
+        ));
+
+        let ArgumentItem::Goal(second) = &argument.root.steps[1] else {
+            panic!("expected scoped goal")
+        };
+        assert!(matches!(
+            second.validation.checks[0],
             StepCheck::Unsat { .. }
         ));
     }
 
     #[test]
-    fn step_errors_are_recorded_and_do_not_stop_later_steps() {
-        let mut argument = Argument::parse_str(
-            r#"# Unsupported step
-
-## Assumptions
-
-## Steps
-
-1. $1$
-2. $1 = 1$"#,
-        );
-        argument.validate(0).unwrap();
-        assert!(matches!(
-            argument.steps[0].validation.checks[0],
-            StepCheck::Error { .. }
-        ));
-        assert!(matches!(
-            argument.steps[1].validation.checks[0],
-            StepCheck::Unsat { .. }
-        ));
-    }
-
-    #[test]
-    fn inconsistent_assumptions_are_recorded_on_every_step() {
+    fn inconsistent_givens_are_reported_on_the_goal_only() {
         let mut argument = Argument::parse_str(
             r#"# Inconsistent
 
-## Assumptions
+Given:
 
 - $n < 0$
 
-## Steps
+WTS $n = n$
 
-1. $n = n$"#,
+1. $n = 0$"#,
         );
         argument.validate(2).unwrap();
         assert!(matches!(
-            argument.steps[0].validation.checks[0],
-            StepCheck::InconsistentAssumptions {
+            argument.root.validation.checks[0],
+            StepCheck::InconsistentGivens {
                 max_dimension: None
             }
         ));
+        assert!(sentence(&argument, 0).validation.checks.is_empty());
     }
 
     #[test]
-    fn verified_step_accumulates_supporting_facts_from_unsat_cores() {
+    fn unbound_child_errors_are_localized() {
         let mut argument = Argument::parse_str(
-            r#"# Supported
+            r#"# Unbound child
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
-- $x = 0$
 
-## Steps
+WTS $x = x$
 
-1. $x \le 0$"#,
+1. $y = y$
+2. $x = x$"#,
         );
         argument.validate(0).unwrap();
-        let StepCheck::Unsat {
-            supporting_facts, ..
-        } = &argument.steps[0].validation.checks[0]
-        else {
-            panic!("step should be likely")
-        };
-        assert!(supporting_facts.contains(&argument.assumptions[1]));
-        assert!(
-            argument
-                .to_string()
-                .contains("This follows from the following facts:")
-        );
+        assert!(matches!(
+            sentence(&argument, 0).validation.checks[0],
+            StepCheck::Error { .. }
+        ));
+        assert!(matches!(
+            sentence(&argument, 1).validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
+        assert!(matches!(
+            argument.root.validation.checks[0],
+            StepCheck::Unsat { .. }
+        ));
     }
 
     #[test]
-    fn value_level_inconsistency_reflects_dimension_exhaustiveness() {
+    fn local_givens_do_not_escape_their_goal() {
         let mut argument = Argument::parse_str(
-            r#"# Dimensionless inconsistency
+            r#"# Scoped givens
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
-- $x = 0$
-- $x = 1$
 
-## Steps
+WTS $x = x$
 
-1. $x = x$"#,
+1. Given:
+
+   - $x = 0$
+
+   WTS $x \le 0$
+2. $x = 0$"#,
         );
-        argument.validate(3).unwrap();
+        argument.validate(0).unwrap();
+        let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
+            panic!("expected nested goal")
+        };
+        assert!(matches!(goal.validation.checks[0], StepCheck::Unsat { .. }));
         assert!(matches!(
-            argument.steps[0].validation.checks.last(),
-            Some(StepCheck::InconsistentAssumptions {
-                max_dimension: None
-            })
+            sentence(&argument, 1).validation.checks[0],
+            StepCheck::Counterexample { .. }
         ));
+    }
 
+    #[test]
+    fn partially_feasible_givens_are_not_reported_as_vacuous() {
         let mut argument = Argument::parse_str(
-            r#"# Bounded inconsistency
+            r#"# Partial givens
 
-## Assumptions
+Given:
 
 - $A = A$
-- $A \ne A$
 
-## Steps
+WTS $A = A$
 
-1. $A = A$"#,
+1. Given:
+
+   - $A \in \mathbb{R}^{2 \times 2}$
+
+   WTS $A = A$"#,
         );
-        argument.validate(3).unwrap();
+        argument.validate(2).unwrap();
+        let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
+            panic!("expected nested goal")
+        };
         assert!(
-            argument.steps[0]
+            goal.validation
+                .checks
+                .iter()
+                .any(|check| matches!(check, StepCheck::Unsat { .. }))
+        );
+        assert!(
+            !goal
                 .validation
                 .checks
                 .iter()
-                .any(|check| matches!(
-                    check,
-                    StepCheck::InconsistentAssumptions {
-                        max_dimension: Some(3)
-                    }
-                ))
+                .any(|check| matches!(check, StepCheck::InconsistentGivens { .. }))
         );
-    }
-
-    #[test]
-    fn verified_requires_base_and_step_local_exhaustiveness() {
-        let mut fixed = Argument::parse_str(
-            r#"# Fixed
-
-## Assumptions
-
-- $A \in \mathbb{R}^{2 \times 2}$
-
-## Steps
-
-1. $A = A$"#,
-        );
-        fixed.validate(2).unwrap();
-        let rendered = fixed.to_string();
-        assert!(rendered.contains("✅ verified"));
-        assert!(!rendered.contains("maximum dimension"));
-
-        let mut symbolic = Argument::parse_str(
-            r#"# Symbolic
-
-## Assumptions
-
-- $A = A$
-
-## Steps
-
-1. $A = A$"#,
-        );
-        symbolic.validate(2).unwrap();
-        assert!(symbolic.to_string().contains("✅ likely"));
-
-        let mut step_local = Argument::parse_str(
-            r#"# Step local
-
-## Assumptions
-
-## Steps
-
-1. $I = I$"#,
-        );
-        step_local.validate(2).unwrap();
-        assert!(step_local.to_string().contains("✅ likely"));
     }
 
     #[test]
@@ -1178,19 +1637,17 @@ mod tests {
         let invalid = Argument::parse_str(
             r#"# Invalid
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{n p}$
 
-## Steps
-
-1. $A = A$"#,
+WTS $A = A$"#,
         );
         let valid = Argument::parse_str(ARGUMENT);
         let mut arguments = Arguments(vec![invalid, valid]);
         arguments.validate(0);
         assert!(arguments.0[0].error.is_some());
         assert!(arguments.0[1].error.is_none());
-        assert!(!arguments.0[1].steps[0].validation.checks.is_empty());
+        assert!(!arguments.0[1].root.validation.checks.is_empty());
     }
 }

@@ -82,6 +82,16 @@ conflicting authoritative annotations or impossible name collisions.
 Do not preemptively hide failures with fallback semantics. An explicit error is
 better than a plausible but incorrect Z3 query.
 
+## Localize Errors Without Contagion
+
+Attach a failure to the narrowest sentence responsible for it, discard that
+sentence as a premise, and continue validating independent claims. A bad step in
+a subproof does not make a correct conclusion wrong when the conclusion follows
+from the remaining validated facts.
+
+Keep the status of a conclusion separate from the quality of the justification
+offered for it. Tree ancestry alone must never propagate failure.
+
 ## Test Semantics at the Right Boundary
 
 Keep tests focused:

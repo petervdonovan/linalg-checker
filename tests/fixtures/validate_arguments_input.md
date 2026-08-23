@@ -1,147 +1,125 @@
 # Scalar argument
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 
-## Steps
+WTS $x = x$
 
 1. $x = x$
 2. $x = 0$
-3. $x = x$
 
 # Matrix argument
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
 1. $A = A$
-2. $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
 # Sequence norm sum
 
-## Assumptions
+Given:
 
 - $\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R}^{d})$
 
-## Steps
+WTS $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
 
 1. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} \ge 0$
-2. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$
 
 # Negating an inequality
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $y \in \mathbb{R}$
 - $x < y$
 
-## Steps
+WTS $-x > -y$
 
 1. $-x < -y$
-2. $-x > -y$
 
 # Independent implicit matrix constants
 
-## Assumptions
-
-## Steps
+WTS $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
 1. $I = \begin{bmatrix}1\end{bmatrix}$
 2. $I = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 3. $\mathbb{0} = \begin{bmatrix}0 & 0\end{bmatrix}$
-4. $\mathbb{0} = \begin{bmatrix}0 \\ 0\end{bmatrix}$
 
 # One-sided orthogonality
 
-## Assumptions
+Given:
 
 - $U^\top U = I$
 
-## Steps
-
-1. $U U^\top = I$
+WTS $U U^\top = I$
 
 # Logic-chain preprocessing
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $x = 0$
 
-## Steps
-
-1. $x = 0 \iff x \le 0 \implies x = x$
+WTS $x = 0 \iff x \le 0 \implies x = x$
 
 # Scalar square roots
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 - $x \ge 0$
 
-## Steps
-
-1. $x^{\frac{1}{2}} \ge 0$
+WTS $x^{\frac{1}{2}} \ge 0$
 
 # Potentially undefined square root
 
-## Assumptions
+Given:
 
 - $x \in \mathbb{R}$
 
-## Steps
-
-1. $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
+WTS $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
 
 # Assumed matrix square root
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 
-## Steps
-
-1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
 # Dimensionally invalid matrix square root
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2}$
 
-## Steps
-
-1. $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
 # Vector two-norm
 
-## Assumptions
+Given:
 
 - $v \in \mathbb{R}^{2}$
 
-## Steps
-
-1. $\left\lVert v \right\rVert_{2} \ge 0$
+WTS $\left\lVert v \right\rVert_{2} \ge 0$
 
 # Wide matrix two-norm
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{1 \times 2}$
 
-## Steps
+WTS $\left\lVert A \right\rVert_{2} \ge 0$
 
 1. $\left\lVert A \right\rVert_{2}^{2} \ge 0$
-2. $\left\lVert A \right\rVert_{2} \ge 0$
 
 # Block multiplication formula
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 - $B \in \mathbb{R}^{2 \times 2}$
@@ -152,17 +130,42 @@
 - $G \in \mathbb{R}^{2 \times 2}$
 - $H \in \mathbb{R}^{2 \times 2}$
 
-## Steps
-
-1. $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
+WTS $\begin{bmatrix}A & B \\ C & D\end{bmatrix} \begin{bmatrix}E & F \\ G & H\end{bmatrix} = \begin{bmatrix}A E + B G & A F + B H \\ C E + D G & C F + D H\end{bmatrix}$
 
 # Block selector identity
 
-## Assumptions
+Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
 - $B \in \mathbb{R}^{2 \times 2}$
 
-## Steps
+WTS $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
 
-1. $\begin{bmatrix}A & B\end{bmatrix} \begin{bmatrix}I \\ \mathbb{0}\end{bmatrix} = A$
+# Nested error localization
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x = x$
+
+1. WTS $x = x$
+
+   1. $x = 0$
+   2. $x = x$
+2. $x = x$
+
+# Local givens and sibling names
+
+WTS $0 = 0$
+
+1. Given:
+
+   - $y \in \mathbb{R}$
+
+   WTS $y = 0$
+2. Given:
+
+   - $y \in \mathbb{R}$
+
+   WTS $y = y$
