@@ -101,6 +101,15 @@ pub fn elaborate(
         );
         rewrites += memberships.finish()?;
 
+        let mut diagonals = DiagonalVisitor::new(environment);
+        visit_forest(
+            &mut diagonals,
+            prepared.context,
+            &mut expression,
+            &mut side_conditions,
+        );
+        rewrites += diagonals.finish()?;
+
         let mut sequences = SequenceVisitor::new(environment);
         visit_forest(
             &mut sequences,
@@ -315,6 +324,97 @@ struct SequenceVisitor<'a> {
     environment: &'a Environment,
     rewrites: usize,
     error: Option<ElaborationError>,
+}
+
+struct DiagonalVisitor<'a> {
+    environment: &'a Environment,
+    rewrites: usize,
+    error: Option<ElaborationError>,
+}
+
+impl<'a> DiagonalVisitor<'a> {
+    fn new(environment: &'a Environment) -> Self {
+        Self {
+            environment,
+            rewrites: 0,
+            error: None,
+        }
+    }
+
+    fn finish(self) -> Result<usize, ElaborationError> {
+        self.error.map_or(Ok(self.rewrites), Err)
+    }
+
+    fn diagonal(
+        &self,
+        operand: &Expr<TypedMetadata>,
+    ) -> Result<Expr<TypedMetadata>, ElaborationError> {
+        if !matches!(operand.raw, RawExpr::Variable(_)) {
+            return Err(ElaborationError::Unsupported(
+                "diag operand must be a sequence variable",
+            ));
+        }
+        let Type::Seq(sequence) = concrete_type(self.environment, operand)? else {
+            return Err(ElaborationError::InvalidOperands(
+                "diag operand must be a sequence",
+            ));
+        };
+        if sequence.t != Type::Real {
+            return Err(ElaborationError::InvalidOperands(
+                "diag sequence elements must be real scalars",
+            ));
+        }
+        let dimension =
+            usize::try_from(sequence.n).map_err(|_| ElaborationError::DimensionOverflow)?;
+        if dimension == 0 {
+            return Err(ElaborationError::Empty(
+                "diag operand sequence must be nonempty",
+            ));
+        }
+        let element_count = dimension
+            .checked_mul(dimension)
+            .ok_or(ElaborationError::DimensionOverflow)?;
+        let mut elements = Vec::with_capacity(element_count);
+        for row in 0..dimension {
+            for col in 0..dimension {
+                elements.push(if row == col {
+                    typed(
+                        TypeExpr::Real,
+                        RawExpr::Binop(
+                            Binop::SingleSubscript,
+                            deep_clone(operand),
+                            natural(
+                                u64::try_from(row + 1)
+                                    .map_err(|_| ElaborationError::DimensionOverflow)?,
+                            ),
+                        ),
+                    )
+                } else {
+                    real(0)
+                });
+            }
+        }
+        matrix_expression(dimension, dimension, elements)
+    }
+}
+
+impl VisitMut<TypedMetadata> for DiagonalVisitor<'_> {
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
+        if self.error.is_some() {
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context, node);
+        let RawExpr::Monop(Monop::Diag, operand) = &node.raw else {
+            return;
+        };
+        match self.diagonal(operand) {
+            Ok(replacement) => {
+                *node = replacement;
+                self.rewrites += 1;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
 }
 
 impl<'a> SequenceVisitor<'a> {
@@ -1482,12 +1582,13 @@ mod tests {
 
     use ratex_parser::parse;
 
-    use super::{ElaborationError, elaborate};
+    use super::{DiagonalVisitor, ElaborationError, elaborate};
     use crate::{
-        Environment, Expr, Finop, NaturalParameter, RawExpr, Type,
+        Environment, Expr, Finop, Matrix, NaturalParameter, RawExpr, Type, TypeExpr,
         enumerable_envspec::infer_symbolic_type_environment,
         from_tex,
         preprocessing::prepare_expression,
+        type_resolver::TypedMetadata,
         visit::{self, Visit},
         visit_mut::VisitContext,
     };
@@ -1556,6 +1657,70 @@ mod tests {
         assert_eq!(terms.len(), 2);
         assert_eq!(terms[0].as_latex().to_string(), "z_{1}");
         assert_eq!(terms[1].as_latex().to_string(), "z_{2}");
+    }
+
+    #[test]
+    fn diagonalization_materializes_exactly_the_selected_sequence_elements() {
+        for dimension in 1..=3 {
+            let assumption = format!(r"z \in \operatorname{{Seq}}_{{{dimension}}}(\mathbb{{R}})");
+            let (prepared, _) = prepare(r"\operatorname{diag}(z)", &[&assumption]);
+            let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+            let RawExpr::Matrix(matrix) = &elaborated.expression.raw else {
+                panic!("diag was not elaborated to a matrix")
+            };
+            assert_eq!((matrix.rows, matrix.cols), (dimension, dimension));
+            for row in 0..dimension {
+                for col in 0..dimension {
+                    let rendered = matrix.elements[row * dimension + col]
+                        .as_latex()
+                        .to_string();
+                    if row == col {
+                        assert_eq!(rendered, format!("z_{{{}}}", row + 1));
+                    } else {
+                        assert_eq!(rendered, "0");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonalization_rejects_nonvariable_and_empty_sequences() {
+        let sequence_type = |length| {
+            TypeExpr::Seq(
+                Expr::new(RawExpr::Type(TypeExpr::Real)),
+                Expr::new(RawExpr::NatLiteral(length)),
+            )
+        };
+        let nonvariable = Expr::with_metadata(
+            TypedMetadata::resolved(sequence_type(1)),
+            RawExpr::Matrix(Matrix {
+                rows: 1,
+                cols: 1,
+                elements: vec![Expr::with_metadata(
+                    TypedMetadata::resolved(TypeExpr::Real),
+                    RawExpr::NatLiteral(1),
+                )],
+            }),
+        );
+        let empty = Expr::with_metadata(
+            TypedMetadata::resolved(sequence_type(0)),
+            RawExpr::Variable(crate::Variable::new("z")),
+        );
+        let environment = Environment::default();
+        let visitor = DiagonalVisitor::new(&environment);
+        assert_eq!(
+            visitor.diagonal(&nonvariable),
+            Err(ElaborationError::Unsupported(
+                "diag operand must be a sequence variable"
+            ))
+        );
+        assert_eq!(
+            visitor.diagonal(&empty),
+            Err(ElaborationError::Empty(
+                "diag operand sequence must be nonempty"
+            ))
+        );
     }
 
     #[test]

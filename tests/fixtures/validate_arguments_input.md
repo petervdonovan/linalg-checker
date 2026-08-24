@@ -263,3 +263,11 @@ WTS $\exists C, C A = I$
 
 1. $B A = I$
 2. $\exists C, C A = I$
+
+# Determinant of a diagonal matrix
+
+Given:
+
+- $z \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $\det(\operatorname{diag}(z)) = \prod_{i=1}^{n}z_{i}$

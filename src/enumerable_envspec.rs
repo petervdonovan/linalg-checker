@@ -1046,6 +1046,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             "2-norm must be lowered before dimension inference".to_owned(),
                         ));
                     }
+                    (Monop::Diag, _) => {}
                     (
                         Monop::Neg
                         | Monop::Transpose

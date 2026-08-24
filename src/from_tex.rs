@@ -353,6 +353,7 @@ impl<'a> Cursor<'a> {
                 let op = match name.as_str() {
                     "tr" => Monop::Trace,
                     "det" => Monop::Det,
+                    "diag" => Monop::Diag,
                     _ => return Err(self.unsupported(format!("operator name {name}"))),
                 };
                 self.position += 1;
@@ -1230,13 +1231,14 @@ mod tests {
     #[test]
     fn parses_unary_and_finite_operators() {
         expect![
-            "\\operatorname{tr}(x)\n\\det(x)\n\\det(x)\n\\operatorname{tr}(A + B)\n\\det(A^\\top)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{2}^{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
+            "\\operatorname{tr}(x)\n\\det(x)\n\\det(x)\n\\operatorname{diag}(x)\n\\operatorname{tr}(A + B)\n\\det(A^\\top)\n\\left\\lVert x \\right\\rVert_{1}\n\\left\\lVert x \\right\\rVert_{2}\n\\left\\lVert x \\right\\rVert_{2}^{2}\n\\left\\lVert x \\right\\rVert_{\\infty}\n\\left\\lVert x \\right\\rVert_{F}\n\\max(1, 2)\n\\min(1, 2)"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             round_trip(r"\operatorname{tr}(x)").unwrap(),
             round_trip(r"\operatorname{det}(x)").unwrap(),
             round_trip(r"\det(x)").unwrap(),
+            round_trip(r"\operatorname{diag}(x)").unwrap(),
             round_trip(r"\operatorname{tr}(A + B)").unwrap(),
             round_trip(r"\det(A^\top)").unwrap(),
             round_trip(r"\left\lVert x \right\rVert_{1}").unwrap(),
@@ -1246,6 +1248,20 @@ mod tests {
             round_trip(r"\left\lVert x \right\rVert_{F}").unwrap(),
             round_trip(r"\max(1, 2)").unwrap(),
             round_trip(r"\min(1, 2)").unwrap(),
+        ));
+    }
+
+    #[test]
+    fn parses_diagonalization_inside_larger_expressions() {
+        expect![
+            "\\det(\\operatorname{diag}(x))\n\\left(\\operatorname{diag}(x)\\right)^\\top\n\\operatorname{diag}(x) \\operatorname{diag}(y)\n\\operatorname{diag}(x) = \\operatorname{diag}(y)"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}",
+            round_trip(r"\det(\operatorname{diag}(x))").unwrap(),
+            round_trip(r"\left(\operatorname{diag}(x)\right)^\top").unwrap(),
+            round_trip(r"\operatorname{diag}(x) \operatorname{diag}(y)").unwrap(),
+            round_trip(r"\operatorname{diag}(x) = \operatorname{diag}(y)").unwrap(),
         ));
     }
 

@@ -709,3 +709,19 @@ Matched facts:
 
    - $B A = I$
    </details>
+
+# Determinant of a diagonal matrix
+
+Given:
+
+- $z \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $\det(\operatorname{diag}(z)) = \prod_{i=1}^{n}z_{i}$
+
+<details>
+<summary>✅ likely</summary>
+
+No counterexamples found up to a maximum dimension of 2.
+
+No premises seemed necessary to show this.
+</details>

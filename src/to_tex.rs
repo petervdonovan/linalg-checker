@@ -75,7 +75,7 @@ fn expr_with_mode<Metadata>(
         crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
             let grouped = match op {
                 Monop::Neg => precedence(e) <= Precedence::Addition,
-                Monop::Inverse => precedence(e) < Precedence::Power,
+                Monop::Inverse | Monop::Transpose => precedence(e) < Precedence::Power,
                 _ => false,
             };
             grouped_expr(f, e, grouped, verbose)
@@ -200,7 +200,7 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::Finop(Finop::Times, _) | crate::RawExpr::Binop(Binop::Div, _, _) => {
             Precedence::Multiplication
         }
-        crate::RawExpr::Monop(Monop::Neg, _) => Precedence::Prefix,
+        crate::RawExpr::Monop(Monop::Neg | Monop::Diag, _) => Precedence::Prefix,
         crate::RawExpr::Monop(Monop::Inverse | Monop::Transpose, _)
         | crate::RawExpr::Binop(Binop::Power, _, _) => Precedence::Power,
         _ => Precedence::Atom,
@@ -271,6 +271,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
     match op {
         Monop::Trace => write!(f, r"\operatorname{{tr}}(")?,
         Monop::Det => write!(f, r"\det(")?,
+        Monop::Diag => write!(f, r"\operatorname{{diag}}(")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
         Monop::Transpose => {}
@@ -282,7 +283,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
     e(f)?;
 
     match op {
-        Monop::Trace | Monop::Det => write!(f, ")"),
+        Monop::Trace | Monop::Det | Monop::Diag => write!(f, ")"),
         Monop::Neg => Ok(()),
         Monop::Inverse => write!(f, "^{{-1}}"),
         Monop::Transpose => write!(f, r"^\top"),
@@ -750,25 +751,31 @@ mod tests {
 
     #[test]
     fn test_unary_operators() {
-        expect!["\\operatorname{tr}(x)\n\\det(x)\n-x\nx^{-1}"].assert_eq(&format!(
-            "{}\n{}\n{}\n{}",
-            as_latex(RawExpr::Monop(
-                Monop::Trace,
-                Expr::new(RawExpr::Variable(Variable::new("x"))),
-            )),
-            as_latex(RawExpr::Monop(
-                Monop::Det,
-                Expr::new(RawExpr::Variable(Variable::new("x"))),
-            )),
-            as_latex(RawExpr::Monop(
-                Monop::Neg,
-                Expr::new(RawExpr::Variable(Variable::new("x"))),
-            )),
-            as_latex(RawExpr::Monop(
-                Monop::Inverse,
-                Expr::new(RawExpr::Variable(Variable::new("x"))),
-            )),
-        ));
+        expect!["\\operatorname{tr}(x)\n\\det(x)\n\\operatorname{diag}(x)\n-x\nx^{-1}"].assert_eq(
+            &format!(
+                "{}\n{}\n{}\n{}\n{}",
+                as_latex(RawExpr::Monop(
+                    Monop::Trace,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+                as_latex(RawExpr::Monop(
+                    Monop::Det,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+                as_latex(RawExpr::Monop(
+                    Monop::Diag,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+                as_latex(RawExpr::Monop(
+                    Monop::Neg,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+                as_latex(RawExpr::Monop(
+                    Monop::Inverse,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+            ),
+        );
     }
 
     #[test]

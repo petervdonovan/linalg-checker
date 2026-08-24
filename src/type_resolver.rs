@@ -141,6 +141,7 @@ impl OperatorTypeRules {
         let mut rules = Self::new();
         rules.register_monop(Monop::Neg, numeric_identity_rule);
         rules.register_monop(Monop::Transpose, transpose_rule);
+        rules.register_monop(Monop::Diag, diagonal_rule);
         for op in [
             Monop::Trace,
             Monop::Det,
@@ -530,6 +531,19 @@ fn real_result_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeEr
     Ok(TypeExpr::Real)
 }
 
+fn diagonal_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let operands = exactly(operands, 1)?;
+    let TypeExpr::Seq(element, size) = operands[0].value()? else {
+        return Err(TypeError::Invalid("diag operand must be a sequence"));
+    };
+    if !matches!(&element.raw, RawExpr::Type(TypeExpr::Real)) {
+        return Err(TypeError::Invalid(
+            "diag sequence elements must be real scalars",
+        ));
+    }
+    Ok(TypeExpr::Matrix(size.clone(), size))
+}
+
 fn bool_result_rule(_operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
     Ok(TypeExpr::Bool)
 }
@@ -754,7 +768,7 @@ mod tests {
         MaybeTyped, OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata,
     };
     use crate::{
-        Binop, Expr, Finop, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext,
+        Binop, Expr, Finop, Monop, RawExpr, TypeExpr, Variable, from_tex, visit_mut::VisitContext,
     };
     use ratex_parser::parse;
     use std::collections::HashMap;
@@ -783,6 +797,58 @@ mod tests {
             expression.meta.get_type().unwrap(),
             TypeExpr::Matrix(n.clone(), n)
         );
+    }
+
+    #[test]
+    fn diagonalization_preserves_the_symbolic_sequence_length() {
+        let n = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let sequence_element = |ty| Expr::new(RawExpr::Type(ty));
+        let resolve = |ty| {
+            let types = SymbolicTypeEnvironment {
+                types: HashMap::from([(Variable::new("z"), ty)]),
+            };
+            let mut expression = Expr::with_metadata(
+                TypedMetadata::default(),
+                RawExpr::Monop(
+                    Monop::Diag,
+                    Expr::with_metadata(
+                        TypedMetadata::default(),
+                        RawExpr::Variable(Variable::new("z")),
+                    ),
+                ),
+            );
+            let result = TypeResolver::new(&types, &OperatorTypeRules::core()).resolve(
+                &mut expression,
+                VisitContext {
+                    logical_polarity: true,
+                },
+            );
+            (result, expression)
+        };
+
+        let (result, expression) =
+            resolve(TypeExpr::Seq(sequence_element(TypeExpr::Real), n.clone()));
+        result.unwrap();
+        assert_eq!(
+            expression.meta.get_type().unwrap(),
+            TypeExpr::Matrix(n.clone(), n.clone())
+        );
+
+        for invalid in [
+            TypeExpr::Real,
+            TypeExpr::Matrix(n.clone(), n.clone()),
+            TypeExpr::Seq(sequence_element(TypeExpr::Nat), n.clone()),
+            TypeExpr::Seq(
+                sequence_element(TypeExpr::Matrix(n.clone(), n.clone())),
+                n.clone(),
+            ),
+            TypeExpr::Seq(
+                sequence_element(TypeExpr::Seq(sequence_element(TypeExpr::Real), n.clone())),
+                n.clone(),
+            ),
+        ] {
+            assert!(resolve(invalid).0.is_err());
+        }
     }
 
     #[test]

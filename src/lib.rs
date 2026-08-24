@@ -260,6 +260,7 @@ pub enum Logic {
 pub enum Monop {
     Trace,
     Det,
+    Diag,
     Neg,
     Inverse,
     Norm1,

@@ -211,3 +211,18 @@ fn validates_quantified_steps_and_goal_evidence() {
     };
     assert!(existential.validation.checks.iter().any(witness_is_b));
 }
+
+#[test]
+fn validates_determinant_of_a_diagonal_sequence() {
+    let mut arguments = Arguments::parse_str(INPUT);
+    arguments.validate(MAX_DIMENSION);
+    let argument = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Determinant of a diagonal matrix")
+        .expect("missing diagonal determinant argument");
+
+    assert!(argument.error.is_none());
+    assert!(is_verified(&argument.root.validation));
+    assert!(!argument.root.validation.environments_exhaustive);
+}

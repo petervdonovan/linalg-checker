@@ -769,6 +769,36 @@ mod tests {
     }
 
     #[test]
+    fn test_sequence_diagonalization_lowers_to_scalar_cells() {
+        let sequence = Variable::new("z");
+        let diagonal = matrix(
+            Environment {
+                types: HashMap::from([(
+                    sequence,
+                    Type::Seq(Box::new(SeqType {
+                        t: Type::Real,
+                        n: 3,
+                    })),
+                )]),
+                ..Environment::default()
+            },
+            expression(r"\operatorname{diag}(z)"),
+        );
+        assert_eq!((diagonal.rows, diagonal.cols), (3, 3));
+        let cells = matrix_strings(&diagonal);
+        for row in 0..3 {
+            for col in 0..3 {
+                let cell = &cells[row * 3 + col];
+                if row == col {
+                    assert_eq!(cell, &format!("|z_{{{}}}|", row + 1));
+                } else {
+                    assert_eq!(cell, "(to_real 0)");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_sequence_index_must_be_in_bounds() {
         let sequence = Variable::new("z");
         assert_lowering_error(
