@@ -195,6 +195,81 @@ pub(crate) fn extract_prepared_environment_iterator_with_required_context(
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<EnvironmentIterator, ShapeError> {
+    let inputs =
+        collect_prepared_dimension_inputs(assumptions, required_context, contextual_expressions)?;
+    extract_typed_environment_iterator_with_hidden(
+        symbolic_types,
+        inputs.assumptions,
+        inputs.required,
+        inputs.contextual,
+        max_dimension,
+        inputs.hidden_types,
+    )
+}
+
+pub(crate) struct DimensionEquivalenceQuery {
+    solver: Solver,
+    natural_symbols: NaturalSymbols,
+}
+
+impl DimensionEquivalenceQuery {
+    pub(crate) fn necessarily_equal(
+        &mut self,
+        left: ImplicitDimension,
+        right: ImplicitDimension,
+    ) -> Option<bool> {
+        if left == right {
+            return Some(true);
+        }
+        let left = self
+            .natural_symbols
+            .get(&NaturalParameter::ImplicitDimension(left))?;
+        let right = self
+            .natural_symbols
+            .get(&NaturalParameter::ImplicitDimension(right))?;
+        self.solver.push();
+        self.solver.assert(left.eq(right).not());
+        let result = self.solver.check();
+        self.solver.pop(1);
+        match result {
+            SatResult::Unsat => Some(true),
+            SatResult::Sat => Some(false),
+            SatResult::Unknown => None,
+        }
+    }
+}
+
+pub(crate) fn dimension_equivalence_query(
+    symbolic_types: &SymbolicTypeEnvironment,
+    assumptions: &[PreparedExpression],
+    required_context: &[PreparedExpression],
+) -> Result<DimensionEquivalenceQuery, ShapeError> {
+    let inputs = collect_prepared_dimension_inputs(assumptions, required_context, &[])?;
+    let system = build_dimension_constraint_system(
+        symbolic_types,
+        &inputs.assumptions,
+        &inputs.required,
+        &inputs.contextual,
+        &inputs.hidden_types,
+    )?;
+    Ok(DimensionEquivalenceQuery {
+        solver: system.solver,
+        natural_symbols: system.natural_symbols,
+    })
+}
+
+struct PreparedDimensionInputs {
+    assumptions: Vec<Expr<TypedMetadata>>,
+    required: Vec<Expr<TypedMetadata>>,
+    contextual: Vec<Expr<TypedMetadata>>,
+    hidden_types: BTreeMap<Variable, TypeExpr<()>>,
+}
+
+fn collect_prepared_dimension_inputs(
+    assumptions: &[PreparedExpression],
+    required_context: &[PreparedExpression],
+    contextual_expressions: &[PreparedExpression],
+) -> Result<PreparedDimensionInputs, ShapeError> {
     let mut hidden_types = BTreeMap::new();
     let mut prepared_assumptions: Vec<Expr<TypedMetadata>> = Vec::new();
     let mut prepared_required: Vec<Expr<TypedMetadata>> = Vec::new();
@@ -213,14 +288,12 @@ pub(crate) fn extract_prepared_environment_iterator_with_required_context(
         // the ordinary-context implicit-nonce filter.
         append_side_condition_definitions(prepared, &mut prepared_assumptions, &mut hidden_types)?;
     }
-    extract_typed_environment_iterator_with_hidden(
-        symbolic_types,
-        prepared_assumptions,
-        prepared_required,
-        prepared_context,
-        max_dimension,
+    Ok(PreparedDimensionInputs {
+        assumptions: prepared_assumptions,
+        required: prepared_required,
+        contextual: prepared_context,
         hidden_types,
-    )
+    })
 }
 
 fn append_side_condition_definitions(
@@ -252,47 +325,17 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     max_dimension: u64,
     hidden_types: BTreeMap<Variable, TypeExpr<()>>,
 ) -> Result<EnvironmentIterator, ShapeError> {
-    let hidden_variables = hidden_types.keys().cloned().collect::<BTreeSet<_>>();
-    if let Some(collision) = hidden_variables
-        .iter()
-        .find(|variable| symbolic_types.types.contains_key(*variable))
-    {
-        return Err(ShapeError::InvalidTyping(format!(
-            "generated variable {} collides with a user variable",
-            collision.z3_name()
-        )));
-    }
-    let mut solver = Solver::new();
-    let implicit_dimensions = collect_implicit_dimension_ids(
-        assumptions
-            .iter()
-            .chain(required_context.iter())
-            .chain(contextual_expressions.iter()),
-    );
-    let (variable_types, natural_symbols) = collect_symbolic_types_and_natural_symbols(
-        &mut solver,
+    let DimensionConstraintSystem {
+        mut solver,
+        variable_types,
+        natural_symbols,
+    } = build_dimension_constraint_system(
         symbolic_types,
+        &assumptions,
+        &required_context,
+        &contextual_expressions,
         &hidden_types,
-        &implicit_dimensions,
     )?;
-    assert_positive_structural_dimensions(&mut solver, &variable_types, &natural_symbols)?;
-    {
-        let mut context = DimensionConstraintBuilder {
-            solver: &mut solver,
-            variable_types: &variable_types,
-            natural_symbols: &natural_symbols,
-            mode: ConstraintMode::Permanent,
-        };
-        for assumption in &assumptions {
-            context.constrain_top_level_assertion(assumption)?;
-        }
-        run_dimension_constraint_visitors(&mut context, &assumptions)?;
-        run_dimension_constraint_visitors(&mut context, &required_context)?;
-        check_base_constraints(context.solver)?;
-        context.mode = ConstraintMode::Contextual;
-        run_dimension_constraint_visitors(&mut context, &contextual_expressions)?;
-        check_contextual_constraints(context.solver)?;
-    }
 
     let structural_dimensions = lower_structural_dimensions(&variable_types, &natural_symbols)?;
     let parameters = natural_symbols.into_iter().collect::<Vec<_>>();
@@ -332,6 +375,68 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         iterator.push_dimension_sum();
     }
     Ok(iterator)
+}
+
+struct DimensionConstraintSystem {
+    solver: Solver,
+    variable_types: SymbolicTypes,
+    natural_symbols: NaturalSymbols,
+}
+
+fn build_dimension_constraint_system<Metadata: MaybeTyped>(
+    symbolic_types: &SymbolicTypeEnvironment,
+    assumptions: &[Expr<Metadata>],
+    required_context: &[Expr<Metadata>],
+    contextual_expressions: &[Expr<Metadata>],
+    hidden_types: &BTreeMap<Variable, TypeExpr<()>>,
+) -> Result<DimensionConstraintSystem, ShapeError> {
+    let hidden_variables = hidden_types.keys().cloned().collect::<BTreeSet<_>>();
+    if let Some(collision) = hidden_variables
+        .iter()
+        .find(|variable| symbolic_types.types.contains_key(*variable))
+    {
+        return Err(ShapeError::InvalidTyping(format!(
+            "generated variable {} collides with a user variable",
+            collision.z3_name()
+        )));
+    }
+    let mut solver = Solver::new();
+    let implicit_dimensions = collect_implicit_dimension_ids(
+        assumptions
+            .iter()
+            .chain(required_context.iter())
+            .chain(contextual_expressions.iter()),
+    );
+    let (variable_types, natural_symbols) = collect_symbolic_types_and_natural_symbols(
+        &mut solver,
+        symbolic_types,
+        hidden_types,
+        &implicit_dimensions,
+    )?;
+    assert_positive_structural_dimensions(&mut solver, &variable_types, &natural_symbols)?;
+    {
+        let mut context = DimensionConstraintBuilder {
+            solver: &mut solver,
+            variable_types: &variable_types,
+            natural_symbols: &natural_symbols,
+            mode: ConstraintMode::Permanent,
+        };
+        for assumption in assumptions {
+            context.constrain_top_level_assertion(assumption)?;
+        }
+        run_dimension_constraint_visitors(&mut context, assumptions)?;
+        run_dimension_constraint_visitors(&mut context, required_context)?;
+        check_base_constraints(context.solver)?;
+        context.mode = ConstraintMode::Contextual;
+        run_dimension_constraint_visitors(&mut context, contextual_expressions)?;
+        check_contextual_constraints(context.solver)?;
+    }
+
+    Ok(DimensionConstraintSystem {
+        solver,
+        variable_types,
+        natural_symbols,
+    })
 }
 
 fn dimension_bound_is_exhaustive(
@@ -1547,9 +1652,9 @@ mod tests {
 
     use super::{
         ShapeError, collect_implicit_dimensions, collect_variables, depends_on_implicit_dimension,
-        extract_environment_iterator, extract_environment_iterator_with_context,
-        extract_prepared_environment_iterator, infer_symbolic_type_environment,
-        type_depends_on_implicit,
+        dimension_equivalence_query, extract_environment_iterator,
+        extract_environment_iterator_with_context, extract_prepared_environment_iterator,
+        infer_symbolic_type_environment, type_depends_on_implicit,
     };
     use crate::{
         Annotation, Environment, Expr, Finop, ImplicitDimension, Matrix, NaturalParameter, Range,
@@ -1572,6 +1677,55 @@ mod tests {
 
     fn implicit(environment: &Environment, dimension: crate::ImplicitDimension) -> u64 {
         environment.natural_assignment[&NaturalParameter::ImplicitDimension(dimension)]
+    }
+
+    fn identity_dimension(expression: &Expr<()>) -> ImplicitDimension {
+        let RawExpr::IdentityMatrix { dimension } = expression.raw else {
+            panic!("expected an identity matrix")
+        };
+        dimension
+    }
+
+    #[test]
+    fn dimension_equivalence_queries_are_unbounded_and_constraint_aware() {
+        let left = expression("I");
+        let right = expression("I");
+        let left_dimension = identity_dimension(&left);
+        let right_dimension = identity_dimension(&right);
+        let types = SymbolicTypeEnvironment::default();
+        let positive = VisitContext {
+            logical_polarity: true,
+        };
+        let unconstrained = [left.clone(), right.clone()]
+            .iter()
+            .map(|expression| prepare_expression(&types, expression, positive).unwrap())
+            .collect::<Vec<_>>();
+        let mut query = dimension_equivalence_query(&types, &[], &unconstrained).unwrap();
+        assert_eq!(
+            query.necessarily_equal(left_dimension, right_dimension),
+            Some(false)
+        );
+
+        let one = Expr::new(RawExpr::Matrix(Matrix {
+            rows: 1,
+            cols: 1,
+            elements: vec![Expr::new(RawExpr::NatLiteral(1))],
+        }));
+        let constrained = [left, right]
+            .map(|identity| {
+                Expr::new(RawExpr::CmpChain(crate::CmpChain {
+                    start: identity,
+                    assertions: vec![(crate::Cmp::Eq, one.clone())],
+                }))
+            })
+            .iter()
+            .map(|expression| prepare_expression(&types, expression, positive).unwrap())
+            .collect::<Vec<_>>();
+        let mut query = dimension_equivalence_query(&types, &[], &constrained).unwrap();
+        assert_eq!(
+            query.necessarily_equal(left_dimension, right_dimension),
+            Some(true)
+        );
     }
 
     fn concrete_type(

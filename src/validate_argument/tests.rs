@@ -1,4 +1,3 @@
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
@@ -364,7 +363,13 @@ fn existential_matching_joins_assignments_across_requirements() {
     let facts = [r"1 > 0", r"2 > 0", r"1 < y", r"3 < y"]
         .map(|tex| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap());
     assert!(
-        super::quantifier::find_existential_witness(&spec, &active, &facts).is_some(),
+        super::quantifier::find_existential_witness(
+            &spec,
+            &active,
+            &Environment::default(),
+            &facts,
+        )
+        .is_some(),
         "direct matching failed for spec {:?} and facts {:?}",
         spec.introduced,
         facts
@@ -464,6 +469,9 @@ fn existential_unification_does_not_leak_inner_binders() {
         candidate_accessible: BTreeSet::new(),
         pattern_bound: BTreeSet::new(),
         candidate_bound: BTreeSet::new(),
+        bound_forward: BTreeMap::new(),
+        bound_reverse: BTreeMap::new(),
+        nonce_pairs: BTreeSet::new(),
     };
     assert!(!unifier.expression(&pattern, &candidate));
 }

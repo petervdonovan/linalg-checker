@@ -183,4 +183,31 @@ fn validates_quantified_steps_and_goal_evidence() {
             .iter()
             .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
     );
+
+    let inferred_dimensions = arguments
+        .0
+        .iter()
+        .find(|argument| argument.name == "Existential involving inferred dimensions")
+        .expect("missing inferred-dimension existential argument");
+    let witness_is_b = |check: &StepCheck| {
+        matches!(
+            check,
+            StepCheck::ExistentialWitness { assignments, .. }
+                if assignments.iter().any(|(variable, value)|
+                    variable.name == "C"
+                        && matches!(&value.raw, RawExpr::Variable(value) if value.name == "B"))
+        )
+    };
+    assert!(
+        inferred_dimensions
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(witness_is_b)
+    );
+    let ArgumentItem::Sentence(existential) = &inferred_dimensions.root.steps[1] else {
+        panic!("expected existential sentence")
+    };
+    assert!(existential.validation.checks.iter().any(witness_is_b));
 }

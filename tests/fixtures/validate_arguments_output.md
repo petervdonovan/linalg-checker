@@ -663,3 +663,49 @@ Matched facts:
 
    - $1 < y$
    </details>
+
+# Existential involving inferred dimensions
+
+Given:
+
+- $A \in \mathbb{R}^{n \times n}$
+- $A B = I$
+
+WTS $\exists C, C A = I$
+
+<details>
+<summary>✅ witness found</summary>
+
+Witness:
+
+- $C = B$
+
+Matched facts:
+
+- $B A = I$
+</details>
+
+1. $B A = I$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   This may follow from the following facts:
+
+   - $A B = I$
+   </details>
+2. $\exists C, C A = I$
+
+   <details>
+   <summary>✅ witness found</summary>
+
+   Witness:
+
+   - $C = B$
+
+   Matched facts:
+
+   - $B A = I$
+   </details>

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    Expr, Finop, RawExpr, TypeExpr, Variable,
+    Expr, Finop, ImplicitDimension, RawExpr, TypeExpr, Variable,
     formula::{free_variables, quantifier_binders},
 };
 
@@ -12,10 +12,19 @@ pub(crate) struct Unifier<'a> {
     pub(crate) candidate_accessible: BTreeSet<Variable>,
     pub(crate) pattern_bound: BTreeSet<Variable>,
     pub(crate) candidate_bound: BTreeSet<Variable>,
+    pub(crate) bound_forward: BTreeMap<Variable, Variable>,
+    pub(crate) bound_reverse: BTreeMap<Variable, Variable>,
+    pub(crate) nonce_pairs: BTreeSet<(ImplicitDimension, ImplicitDimension)>,
 }
 
 impl Unifier<'_> {
     pub(crate) fn expression(&mut self, pattern: &Expr<()>, candidate: &Expr<()>) -> bool {
+        if let (RawExpr::Variable(pattern), RawExpr::Variable(candidate)) =
+            (&pattern.raw, &candidate.raw)
+            && (self.pattern_bound.contains(pattern) || self.candidate_bound.contains(candidate))
+        {
+            return self.bound_variable(pattern, candidate);
+        }
         if let RawExpr::Variable(variable) = &pattern.raw
             && self.metavariables.contains(variable)
             && !self.pattern_bound.contains(variable)
@@ -33,11 +42,11 @@ impl Unifier<'_> {
         }
         match (&pattern.raw, &candidate.raw) {
             (RawExpr::Hole, RawExpr::Hole) => true,
-            (RawExpr::ImplicitDimension(a), RawExpr::ImplicitDimension(b)) => a == b,
+            (RawExpr::ImplicitDimension(a), RawExpr::ImplicitDimension(b)) => self.nonce(*a, *b),
             (
                 RawExpr::IdentityMatrix { dimension: a },
                 RawExpr::IdentityMatrix { dimension: b },
-            ) => a == b,
+            ) => self.nonce(*a, *b),
             (
                 RawExpr::StandardBasis {
                     index: ai,
@@ -47,11 +56,11 @@ impl Unifier<'_> {
                     index: bi,
                     dimension: bd,
                 },
-            ) => ad == bd && self.expression(ai, bi),
+            ) => self.nonce(*ad, *bd) && self.expression(ai, bi),
             (
                 RawExpr::ZeroMatrix { rows: ar, cols: ac },
                 RawExpr::ZeroMatrix { rows: br, cols: bc },
-            ) => ar == br && ac == bc,
+            ) => self.nonce(*ar, *br) && self.nonce(*ac, *bc),
             (RawExpr::Type(a), RawExpr::Type(b)) => self.type_expr(a, b),
             (RawExpr::Variable(a), RawExpr::Variable(b)) => a == b,
             (RawExpr::NatLiteral(a), RawExpr::NatLiteral(b)) => a == b,
@@ -93,10 +102,34 @@ impl Unifier<'_> {
             }
             (RawExpr::Seqop(ao, ar, ab), RawExpr::Seqop(bo, br, bb)) => {
                 ao == bo
-                    && ar.index_variable == br.index_variable
                     && self.expression(&ar.from, &br.from)
                     && self.expression(&ar.to, &br.to)
                     && self.bound_sequence_body(&ar.index_variable, &br.index_variable, ab, bb)
+            }
+            _ => false,
+        }
+    }
+
+    fn nonce(&mut self, pattern: ImplicitDimension, candidate: ImplicitDimension) -> bool {
+        self.nonce_pairs.insert((pattern, candidate));
+        true
+    }
+
+    fn bound_variable(&mut self, pattern: &Variable, candidate: &Variable) -> bool {
+        if !self.pattern_bound.contains(pattern) || !self.candidate_bound.contains(candidate) {
+            return false;
+        }
+        match (
+            self.bound_forward.get(pattern),
+            self.bound_reverse.get(candidate),
+        ) {
+            (Some(mapped), Some(reverse)) => mapped == candidate && reverse == pattern,
+            (None, None) => {
+                self.bound_forward
+                    .insert(pattern.clone(), candidate.clone());
+                self.bound_reverse
+                    .insert(candidate.clone(), pattern.clone());
+                true
             }
             _ => false,
         }
@@ -120,6 +153,8 @@ impl Unifier<'_> {
         let old_candidate_bound = self.candidate_bound.clone();
         let old_pattern_accessible = self.pattern_accessible.clone();
         let old_candidate_accessible = self.candidate_accessible.clone();
+        let old_bound_forward = self.bound_forward.clone();
+        let old_bound_reverse = self.bound_reverse.clone();
         self.pattern_bound.extend(pattern_binders.iter().cloned());
         self.candidate_bound
             .extend(candidate_binders.iter().cloned());
@@ -130,6 +165,8 @@ impl Unifier<'_> {
         self.candidate_bound = old_candidate_bound;
         self.pattern_accessible = old_pattern_accessible;
         self.candidate_accessible = old_candidate_accessible;
+        self.bound_forward = old_bound_forward;
+        self.bound_reverse = old_bound_reverse;
         matched
     }
 
@@ -142,6 +179,8 @@ impl Unifier<'_> {
     ) -> bool {
         let pattern_was_bound = !self.pattern_bound.insert(pattern_index.clone());
         let candidate_was_bound = !self.candidate_bound.insert(candidate_index.clone());
+        let old_bound_forward = self.bound_forward.clone();
+        let old_bound_reverse = self.bound_reverse.clone();
         let matched = self.expression(pattern, candidate);
         if !pattern_was_bound {
             self.pattern_bound.remove(pattern_index);
@@ -149,6 +188,8 @@ impl Unifier<'_> {
         if !candidate_was_bound {
             self.candidate_bound.remove(candidate_index);
         }
+        self.bound_forward = old_bound_forward;
+        self.bound_reverse = old_bound_reverse;
         matched
     }
 
@@ -164,5 +205,83 @@ impl Unifier<'_> {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Range, SeqOp};
+
+    fn expression(tex: &str) -> Expr<()> {
+        crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap()
+    }
+
+    fn unifier<'a>(metavariables: &'a BTreeSet<Variable>) -> Unifier<'a> {
+        Unifier {
+            metavariables,
+            assignments: BTreeMap::new(),
+            pattern_accessible: BTreeSet::new(),
+            candidate_accessible: BTreeSet::new(),
+            pattern_bound: BTreeSet::new(),
+            candidate_bound: BTreeSet::new(),
+            bound_forward: BTreeMap::new(),
+            bound_reverse: BTreeMap::new(),
+            nonce_pairs: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn context_dependent_constants_match_modulo_nonce_names() {
+        let empty = BTreeSet::new();
+        for (pattern, candidate, expected_pairs) in [
+            ("I", "I", 1),
+            (r"\mathbb{0}", r"\mathbb{0}", 2),
+            ("e_{1}", "e_{1}", 1),
+        ] {
+            let mut unifier = unifier(&empty);
+            assert!(unifier.expression(&expression(pattern), &expression(candidate)));
+            assert_eq!(unifier.nonce_pairs.len(), expected_pairs);
+        }
+
+        let pattern_dimension = crate::ImplicitDimension::fresh();
+        let candidate_dimension = crate::ImplicitDimension::fresh();
+        let mut unifier = unifier(&empty);
+        assert!(unifier.expression(
+            &Expr::new(RawExpr::ImplicitDimension(pattern_dimension)),
+            &Expr::new(RawExpr::ImplicitDimension(candidate_dimension)),
+        ));
+        assert_eq!(
+            unifier.nonce_pairs,
+            BTreeSet::from([(pattern_dimension, candidate_dimension)])
+        );
+    }
+
+    #[test]
+    fn lexical_binders_match_by_correspondence_but_free_variables_do_not() {
+        let empty = BTreeSet::new();
+        let mut quantified = unifier(&empty);
+        assert!(quantified.expression(
+            &expression(r"\forall x \in \mathbb{R}, x = x"),
+            &expression(r"\forall y \in \mathbb{R}, y = y"),
+        ));
+
+        let mut free = unifier(&empty);
+        assert!(!free.expression(&expression("x = x"), &expression("y = y")));
+
+        let sequence = |index: &str| {
+            let index = Variable::new(index);
+            Expr::new(RawExpr::Seqop(
+                SeqOp::Sum,
+                Range {
+                    index_variable: index.clone(),
+                    from: Expr::new(RawExpr::NatLiteral(1)),
+                    to: Expr::new(RawExpr::NatLiteral(2)),
+                },
+                Expr::new(RawExpr::Variable(index)),
+            ))
+        };
+        let mut sequence_unifier = unifier(&empty);
+        assert!(sequence_unifier.expression(&sequence("i"), &sequence("j")));
     }
 }

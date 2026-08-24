@@ -251,3 +251,15 @@ WTS $\exists x > 0, x < y$
 
 1. WTS $1 > 0$
 2. WTS $1 < y$
+
+# Existential involving inferred dimensions
+
+Given:
+
+- $A \in \mathbb{R}^{n \times n}$
+- $A B = I$
+
+WTS $\exists C, C A = I$
+
+1. $B A = I$
+2. $\exists C, C A = I$
