@@ -3,8 +3,8 @@
 //! Trait methods delegate to public free walkers, following `syn::visit`.
 
 use crate::{
-    Binop, CmpChain, Expr, Finop, ImplicitDimension, LogicChain, Matrix, MetaExpr, Monop, Range,
-    RawExpr, SeqOp, Triop, TypeExpr, Variable,
+    Binop, CmpChain, DeBruijnIndex, Expr, Finop, ImplicitDimension, LogicChain, Matrix, MetaExpr,
+    Monop, Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
 };
 
 pub trait Visit<Metadata> {
@@ -45,8 +45,8 @@ pub trait Visit<Metadata> {
     fn visit_raw_expr_implicit_dimension(&mut self, dimension: &ImplicitDimension) {
         visit_raw_expr_implicit_dimension(self, dimension);
     }
-    fn visit_raw_expr_bound_natural(&mut self, depth: &usize) {
-        visit_raw_expr_bound_natural(self, depth);
+    fn visit_raw_expr_bound_natural(&mut self, index: &DeBruijnIndex) {
+        visit_raw_expr_bound_natural(self, index);
     }
     fn visit_raw_expr_identity_matrix(&mut self, dimension: &ImplicitDimension) {
         visit_raw_expr_identity_matrix(self, dimension);
@@ -175,7 +175,7 @@ pub fn visit_raw_expr_implicit_dimension<V: Visit<M> + ?Sized, M>(
     _dimension: &ImplicitDimension,
 ) {
 }
-pub fn visit_raw_expr_bound_natural<V: Visit<M> + ?Sized, M>(_v: &mut V, _depth: &usize) {}
+pub fn visit_raw_expr_bound_natural<V: Visit<M> + ?Sized, M>(_v: &mut V, _index: &DeBruijnIndex) {}
 pub fn visit_raw_expr_identity_matrix<V: Visit<M> + ?Sized, M>(_v: &mut V, _d: &ImplicitDimension) {
 }
 pub fn visit_raw_expr_standard_basis<V: Visit<M> + ?Sized, M>(
@@ -251,8 +251,8 @@ mod tests {
 
     use super::Visit;
     use crate::{
-        Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix, Monop,
-        Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
+        Binop, Cmp, CmpChain, DeBruijnIndex, Expr, Finop, ImplicitDimension, Logic, LogicChain,
+        Matrix, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
     };
     struct Variables(Vec<String>);
     impl Visit<()> for Variables {
@@ -304,7 +304,7 @@ mod tests {
         let expressions = vec![
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::ImplicitDimension(d)),
-            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::BoundNatural(DeBruijnIndex::new(0))),
             Expr::new(RawExpr::IdentityMatrix { dimension: d }),
             Expr::new(RawExpr::StandardBasis {
                 index: literal(),

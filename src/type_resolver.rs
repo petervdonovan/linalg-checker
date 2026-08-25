@@ -542,7 +542,7 @@ fn map_rule(range: &Range<()>, operand: &TypeRuleOperand) -> Result<TypeExpr<()>
         Finop::Plus,
         vec![
             range.from.with_default_metadata(),
-            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0))),
             Expr::new(RawExpr::Monop(
                 Monop::Neg,
                 Expr::new(RawExpr::NatLiteral(1)),
@@ -961,7 +961,7 @@ mod tests {
                     Variable::new("A"),
                     TypeExpr::Seq(
                         Expr::new(RawExpr::Type(TypeExpr::Matrix(
-                            Expr::new(RawExpr::BoundNatural(0)),
+                            Expr::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0))),
                             Expr::new(RawExpr::NatLiteral(1)),
                         ))),
                         n,

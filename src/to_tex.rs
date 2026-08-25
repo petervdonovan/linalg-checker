@@ -44,31 +44,34 @@ fn expr_with_mode<Metadata>(
     match &e.raw {
         crate::RawExpr::Hole => write!(f, r"\square"),
         crate::RawExpr::ImplicitDimension(dimension) if verbose => {
-            write!(f, r"\text{{dim}}_{{{}}}", dimension.id())
+            write!(f, "@{}", dimension.nonce_id())
         }
         crate::RawExpr::ImplicitDimension(_) => {
             panic!("implicit dimension leaves cannot be rendered in ordinary TeX")
+        }
+        crate::RawExpr::BoundNatural(index) if verbose => {
+            write!(f, r"\#{}", index.get())
         }
         crate::RawExpr::BoundNatural(_) => {
             panic!("bound natural indices are internal and cannot be rendered")
         }
         crate::RawExpr::IdentityMatrix { dimension } if verbose => {
-            write!(f, "I_{{\\text{{dim}}_{}}}", dimension.id())
+            write!(f, "I_{{@{}}}", dimension.nonce_id())
         }
         crate::RawExpr::IdentityMatrix { .. } => write!(f, "I"),
         crate::RawExpr::StandardBasis { index, dimension } => {
             write!(f, "e_{{")?;
             expr_with_mode(f, index, verbose)?;
             if verbose {
-                write!(f, ",\\text{{dim}}_{}", dimension.id())?;
+                write!(f, ",@{}", dimension.nonce_id())?;
             }
             write!(f, "}}")
         }
         crate::RawExpr::ZeroMatrix { rows, cols } if verbose => write!(
             f,
-            r"\mathbb{{0}}_{{\text{{dim}}_{},\text{{dim}}_{}}}",
-            rows.id(),
-            cols.id()
+            r"\mathbb{{0}}_{{@{},@{}}}",
+            rows.nonce_id(),
+            cols.nonce_id()
         ),
         crate::RawExpr::ZeroMatrix { .. } => write!(f, r"\mathbb{{0}}"),
         crate::RawExpr::Type(ty) => type_expr(f, ty, verbose),
@@ -582,12 +585,29 @@ mod tests {
         assert_eq!(
             expression.as_latex_verbose().to_string(),
             format!(
-                r"I_{{\text{{dim}}_{}}} + \mathbb{{0}}_{{\text{{dim}}_{},\text{{dim}}_{}}}",
-                identity.id(),
-                rows.id(),
-                cols.id()
+                r"I_{{@{}}} + \mathbb{{0}}_{{@{},@{}}}",
+                identity.nonce_id(),
+                rows.nonce_id(),
+                cols.nonce_id()
             )
         );
+
+        let bound = Expr::<()>::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0)));
+        assert_eq!(bound.as_latex_verbose().to_string(), r"\#0");
+        assert_eq!(
+            Expr::<()>::new(RawExpr::NatLiteral(0))
+                .as_latex()
+                .to_string(),
+            "0"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bound natural indices are internal")]
+    fn ordinary_latex_rejects_bound_natural_indices() {
+        Expr::<()>::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0)))
+            .as_latex()
+            .to_string();
     }
 
     #[test]

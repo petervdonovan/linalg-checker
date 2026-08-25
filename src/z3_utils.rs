@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use z3::ast::{Ast, Bool, Int};
 
 use crate::{
-    Binop, Cmp, Expr, Finop, Monop, NaturalEvaluationError, NaturalParameter, RawExpr, visit::Visit,
+    Binop, Cmp, DeBruijnIndex, Expr, Finop, Monop, NaturalEvaluationError, NaturalParameter,
+    RawExpr, visit::Visit,
 };
 
 pub(crate) fn compare_int(left: &Int, comparison: Cmp, right: &Int) -> Bool {
@@ -21,15 +22,15 @@ pub(crate) fn lower_natural_with<Metadata>(
     expression: &Expr<Metadata>,
     resolve: &mut impl FnMut(&NaturalParameter) -> Result<Int, NaturalEvaluationError>,
 ) -> Result<Int, NaturalEvaluationError> {
-    lower_natural_scoped_with(expression, resolve, &mut |depth| {
-        Err(NaturalEvaluationError::UnboundNatural(depth))
+    lower_natural_scoped_with(expression, resolve, &mut |de_bruijn_index| {
+        Err(NaturalEvaluationError::UnboundNatural(de_bruijn_index))
     })
 }
 
 pub(crate) fn lower_natural_scoped_with<Metadata>(
     expression: &Expr<Metadata>,
     resolve: &mut impl FnMut(&NaturalParameter) -> Result<Int, NaturalEvaluationError>,
-    resolve_bound: &mut impl FnMut(usize) -> Result<Int, NaturalEvaluationError>,
+    resolve_bound: &mut impl FnMut(DeBruijnIndex) -> Result<Int, NaturalEvaluationError>,
 ) -> Result<Int, NaturalEvaluationError> {
     match &expression.raw {
         RawExpr::NatLiteral(value) => Ok(Int::from_u64(*value)),
@@ -37,7 +38,7 @@ pub(crate) fn lower_natural_scoped_with<Metadata>(
         RawExpr::ImplicitDimension(dimension) => {
             resolve(&NaturalParameter::ImplicitDimension(*dimension))
         }
-        RawExpr::BoundNatural(depth) => resolve_bound(*depth),
+        RawExpr::BoundNatural(index) => resolve_bound(*index),
         RawExpr::Finop(Finop::Plus, terms) => {
             let mut terms = terms.iter();
             let first = terms
@@ -88,14 +89,17 @@ pub(crate) fn evaluate_natural<Metadata>(
 pub(crate) fn evaluate_natural_with_context<Metadata>(
     expression: &Expr<Metadata>,
     assignment: &std::collections::HashMap<NaturalParameter, u64>,
-    locals: &[(crate::Variable, u64)],
-    bound_values: &[u64],
+    lexical_range_values: &[(crate::Variable, u64)],
+    bound_natural_values: &[u64],
 ) -> Result<u64, NaturalEvaluationError> {
     lower_natural_scoped_with(
         expression,
         &mut |parameter| {
             if let NaturalParameter::Variable(variable) = parameter
-                && let Some((_, value)) = locals.iter().rev().find(|(found, _)| found == variable)
+                && let Some((_, value)) = lexical_range_values
+                    .iter()
+                    .rev()
+                    .find(|(found, _)| found == variable)
             {
                 return Ok(Int::from_u64(*value));
             }
@@ -105,14 +109,14 @@ pub(crate) fn evaluate_natural_with_context<Metadata>(
                 .map(Int::from_u64)
                 .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
         },
-        &mut |depth| {
-            bound_values
+        &mut |de_bruijn_index| {
+            bound_natural_values
                 .iter()
                 .rev()
-                .nth(depth)
+                .nth(de_bruijn_index.get())
                 .copied()
                 .map(Int::from_u64)
-                .ok_or(NaturalEvaluationError::UnboundNatural(depth))
+                .ok_or(NaturalEvaluationError::UnboundNatural(de_bruijn_index))
         },
     )?
     .simplify()

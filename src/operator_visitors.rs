@@ -286,7 +286,7 @@ fn bound_source_position(range: &crate::Range<()>) -> Expr<()> {
         Finop::Plus,
         vec![
             range.from.with_default_metadata(),
-            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0))),
             Expr::new(RawExpr::Monop(
                 Monop::Neg,
                 Expr::new(RawExpr::NatLiteral(1)),

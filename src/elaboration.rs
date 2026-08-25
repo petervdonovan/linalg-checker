@@ -1632,7 +1632,7 @@ fn substitute_index(
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
-        RawExpr::BoundNatural(depth) => RawExpr::BoundNatural(*depth),
+        RawExpr::BoundNatural(index) => RawExpr::BoundNatural(*index),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
             dimension: *dimension,
         },

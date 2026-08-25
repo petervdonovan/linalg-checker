@@ -440,8 +440,8 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
             variable_types: &variable_types,
             natural_symbols: &natural_symbols,
             mode: ConstraintMode::Permanent,
-            locals: Vec::new(),
-            guards: Vec::new(),
+            lexical_range_values: Vec::new(),
+            active_range_guards: Vec::new(),
             max_dimension,
         };
         for assumption in assumptions {
@@ -843,18 +843,18 @@ struct DimensionConstraintBuilder<'a> {
     variable_types: &'a BTreeMap<Variable, TypeExpr<()>>,
     natural_symbols: &'a BTreeMap<NaturalParameter, Int>,
     mode: ConstraintMode,
-    locals: Vec<(Variable, u64)>,
-    guards: Vec<Bool>,
+    lexical_range_values: Vec<(Variable, u64)>,
+    active_range_guards: Vec<Bool>,
     max_dimension: Option<u64>,
 }
 
 impl DimensionConstraintBuilder<'_> {
     fn assert_if_relevant(&mut self, assertion: Bool, depends_on_implicit: bool) {
         if matches!(self.mode, ConstraintMode::Permanent) || depends_on_implicit {
-            let assertion = if self.guards.is_empty() {
+            let assertion = if self.active_range_guards.is_empty() {
                 assertion
             } else {
-                Bool::and(&self.guards).implies(assertion)
+                Bool::and(&self.active_range_guards).implies(assertion)
             };
             self.solver.assert(assertion);
         }
@@ -941,7 +941,7 @@ impl DimensionConstraintBuilder<'_> {
 
     fn lower_nat<Metadata>(&self, expression: &Expr<Metadata>) -> Result<Option<Int>, ShapeError> {
         let mut symbols = self.natural_symbols.clone();
-        for (variable, value) in &self.locals {
+        for (variable, value) in &self.lexical_range_values {
             symbols.insert(
                 NaturalParameter::Variable(variable.clone()),
                 Int::from_u64(*value),
@@ -959,7 +959,7 @@ impl DimensionConstraintBuilder<'_> {
             &mut |parameter| {
                 if let NaturalParameter::Variable(variable) = parameter
                     && let Some((_, value)) = self
-                        .locals
+                        .lexical_range_values
                         .iter()
                         .rev()
                         .find(|(found, _)| found == variable)
@@ -971,7 +971,9 @@ impl DimensionConstraintBuilder<'_> {
                     .cloned()
                     .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
             },
-            &mut |depth| Err(NaturalEvaluationError::UnboundNatural(depth)),
+            &mut |de_bruijn_index| {
+                Err(NaturalEvaluationError::UnboundNatural(de_bruijn_index))
+            },
         ) {
             Ok(value) => Ok(Some(value)),
             Err(NaturalEvaluationError::MissingAssignment(_)) => Ok(None),
@@ -1472,15 +1474,15 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceBodyConstraintVisitor<'_,
             for value in 0..=max_dimension {
                 let value_ast = Int::from_u64(value);
                 self.builder
-                    .guards
+                    .active_range_guards
                     .push(Bool::and(&[from.le(&value_ast), value_ast.le(&to)]));
                 self.builder
-                    .locals
+                    .lexical_range_values
                     .push((range.index_variable.clone(), value));
                 let nested =
                     run_dimension_constraint_visitors(self.builder, std::slice::from_ref(body));
-                self.builder.locals.pop();
-                self.builder.guards.pop();
+                self.builder.lexical_range_values.pop();
+                self.builder.active_range_guards.pop();
                 nested?;
             }
             Ok(())
@@ -1604,7 +1606,7 @@ fn dependent_structural_dimension_cases(
     fn lower(
         expression: &Expr<()>,
         natural_symbols: &BTreeMap<NaturalParameter, Int>,
-        bound_values: &[u64],
+        bound_natural_values: &[u64],
     ) -> Result<Int, ShapeError> {
         crate::z3_utils::lower_natural_scoped_with(
             expression,
@@ -1614,14 +1616,14 @@ fn dependent_structural_dimension_cases(
                     .cloned()
                     .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
             },
-            &mut |depth| {
-                bound_values
+            &mut |de_bruijn_index| {
+                bound_natural_values
                     .iter()
                     .rev()
-                    .nth(depth)
+                    .nth(de_bruijn_index.get())
                     .copied()
                     .map(Int::from_u64)
-                    .ok_or(NaturalEvaluationError::UnboundNatural(depth))
+                    .ok_or(NaturalEvaluationError::UnboundNatural(de_bruijn_index))
             },
         )
         .map_err(|error| ShapeError::Unsupported(error.to_string()))
@@ -1631,15 +1633,15 @@ fn dependent_structural_dimension_cases(
         ty: &TypeExpr<()>,
         natural_symbols: &BTreeMap<NaturalParameter, Int>,
         max_dimension: u64,
-        bound_values: &mut Vec<u64>,
-        guards: &mut Vec<Bool>,
+        bound_natural_values: &mut Vec<u64>,
+        active_range_guards: &mut Vec<Bool>,
         cases: &mut Vec<(Bool, Int)>,
     ) -> Result<(), ShapeError> {
         let guard = || {
-            if guards.is_empty() {
+            if active_range_guards.is_empty() {
                 Bool::from_bool(true)
             } else {
-                Bool::and(guards)
+                Bool::and(active_range_guards)
             }
         };
         match ty {
@@ -1647,34 +1649,40 @@ fn dependent_structural_dimension_cases(
             TypeExpr::Matrix(rows, cols) => {
                 for dimension in [rows, cols] {
                     if crate::type_expr::expression_contains_bound_natural(dimension) {
-                        cases.push((guard(), lower(dimension, natural_symbols, bound_values)?));
+                        cases.push((
+                            guard(),
+                            lower(dimension, natural_symbols, bound_natural_values)?,
+                        ));
                     }
                 }
             }
             TypeExpr::Seq(element, length) => {
                 if crate::type_expr::expression_contains_bound_natural(length) {
-                    cases.push((guard(), lower(length, natural_symbols, bound_values)?));
+                    cases.push((
+                        guard(),
+                        lower(length, natural_symbols, bound_natural_values)?,
+                    ));
                 }
                 let RawExpr::Type(element) = &element.raw else {
                     return Err(ShapeError::InvalidTyping(
                         "sequence element must be a type expression".to_owned(),
                     ));
                 };
-                let length = lower(length, natural_symbols, bound_values)?;
+                let length = lower(length, natural_symbols, bound_natural_values)?;
                 for position in 1..=max_dimension {
                     let position_ast = Int::from_u64(position);
-                    guards.push(position_ast.le(&length));
-                    bound_values.push(position);
+                    active_range_guards.push(position_ast.le(&length));
+                    bound_natural_values.push(position);
                     collect(
                         element,
                         natural_symbols,
                         max_dimension,
-                        bound_values,
-                        guards,
+                        bound_natural_values,
+                        active_range_guards,
                         cases,
                     )?;
-                    bound_values.pop();
-                    guards.pop();
+                    bound_natural_values.pop();
+                    active_range_guards.pop();
                 }
             }
         }
@@ -2205,7 +2213,7 @@ mod tests {
                     Variable::new("A"),
                     TypeExpr::Seq(
                         Expr::new(RawExpr::Type(TypeExpr::Matrix(
-                            Expr::new(RawExpr::BoundNatural(0)),
+                            Expr::new(RawExpr::BoundNatural(crate::DeBruijnIndex::new(0))),
                             Expr::new(RawExpr::NatLiteral(1)),
                         ))),
                         Expr::new(RawExpr::Variable(n.clone())),

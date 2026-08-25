@@ -44,7 +44,20 @@ impl ImplicitDimension {
         format!("__implicit_dimension_{}", self.0)
     }
 
-    pub(crate) fn id(self) -> u64 {
+    pub(crate) fn nonce_id(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeBruijnIndex(usize);
+
+impl DeBruijnIndex {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) const fn get(self) -> usize {
         self.0
     }
 }
@@ -71,7 +84,7 @@ pub enum NaturalEvaluationError {
     EmptyOperation(&'static str),
     NotANumeral,
     Overflow,
-    UnboundNatural(usize),
+    UnboundNatural(DeBruijnIndex),
 }
 
 impl fmt::Display for NaturalEvaluationError {
@@ -86,8 +99,8 @@ impl fmt::Display for NaturalEvaluationError {
             }
             Self::NotANumeral => f.write_str("natural expression did not simplify to a numeral"),
             Self::Overflow => f.write_str("natural expression is outside the u64 range"),
-            Self::UnboundNatural(depth) => {
-                write!(f, "unbound natural type index at depth {depth}")
+            Self::UnboundNatural(index) => {
+                write!(f, "unbound natural type index at de Bruijn index #{}", index.get())
             }
         }
     }
@@ -139,14 +152,14 @@ impl Environment {
     pub(crate) fn evaluate_natural_with_context<Metadata>(
         &self,
         expression: &Expr<Metadata>,
-        locals: &[(Variable, u64)],
-        bound_values: &[u64],
+        lexical_range_values: &[(Variable, u64)],
+        bound_natural_values: &[u64],
     ) -> Result<u64, NaturalEvaluationError> {
         crate::z3_utils::evaluate_natural_with_context(
             expression,
             &self.natural_assignment,
-            locals,
-            bound_values,
+            lexical_range_values,
+            bound_natural_values,
         )
     }
 }
@@ -297,7 +310,7 @@ impl<Metadata> Expr<Metadata> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
             RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
-            RawExpr::BoundNatural(depth) => RawExpr::BoundNatural(*depth),
+            RawExpr::BoundNatural(index) => RawExpr::BoundNatural(*index),
             RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
                 dimension: *dimension,
             },
@@ -448,7 +461,7 @@ pub enum RawExpr<Metadata> {
     /// matrix constant's dimension through symbolic typing.
     ImplicitDimension(ImplicitDimension),
     /// An internal de Bruijn reference to a one-based sequence position.
-    BoundNatural(usize),
+    BoundNatural(DeBruijnIndex),
     IdentityMatrix {
         dimension: ImplicitDimension,
     },

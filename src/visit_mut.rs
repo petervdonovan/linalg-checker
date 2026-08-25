@@ -5,8 +5,8 @@
 //! the corresponding free function to continue the default traversal.
 
 use crate::{
-    Binop, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix, MetaExpr, Monop,
-    Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
+    Binop, CmpChain, DeBruijnIndex, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix,
+    MetaExpr, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
 };
 
 #[derive(Clone, Debug)]
@@ -140,8 +140,12 @@ pub trait VisitMut<Metadata> {
         visit_raw_expr_implicit_dimension_mut(self, context, dimension);
     }
 
-    fn visit_raw_expr_bound_natural_mut(&mut self, context: VisitContext, depth: &mut usize) {
-        visit_raw_expr_bound_natural_mut(self, context, depth);
+    fn visit_raw_expr_bound_natural_mut(
+        &mut self,
+        context: VisitContext,
+        index: &mut DeBruijnIndex,
+    ) {
+        visit_raw_expr_bound_natural_mut(self, context, index);
     }
 
     fn visit_raw_expr_identity_matrix_mut(
@@ -448,7 +452,7 @@ pub fn visit_raw_expr_implicit_dimension_mut<V, Metadata>(
 pub fn visit_raw_expr_bound_natural_mut<V, Metadata>(
     _visitor: &mut V,
     _context: VisitContext,
-    _depth: &mut usize,
+    _index: &mut DeBruijnIndex,
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
@@ -622,8 +626,8 @@ mod tests {
 
     use super::{VisitContext, VisitMut};
     use crate::{
-        Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain, Matrix, Monop,
-        Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
+        Binop, Cmp, CmpChain, DeBruijnIndex, Expr, Finop, ImplicitDimension, Logic, LogicChain,
+        Matrix, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
     };
 
     const POSITIVE: VisitContext = VisitContext {
@@ -852,7 +856,7 @@ mod tests {
         let mut expressions = vec![
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::ImplicitDimension(dimension)),
-            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::BoundNatural(DeBruijnIndex::new(0))),
             Expr::new(RawExpr::IdentityMatrix { dimension }),
             Expr::new(RawExpr::StandardBasis {
                 index: Expr::new(RawExpr::NatLiteral(1)),
