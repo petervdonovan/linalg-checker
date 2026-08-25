@@ -49,6 +49,9 @@ fn expr_with_mode<Metadata>(
         crate::RawExpr::ImplicitDimension(_) => {
             panic!("implicit dimension leaves cannot be rendered in ordinary TeX")
         }
+        crate::RawExpr::BoundNatural(_) => {
+            panic!("bound natural indices are internal and cannot be rendered")
+        }
         crate::RawExpr::IdentityMatrix { dimension } if verbose => {
             write!(f, "I_{{\\text{{dim}}_{}}}", dimension.id())
         }
@@ -547,11 +550,18 @@ mod tests {
 
     use crate::{
         Annotation, Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Logic, LogicChain,
-        Matrix, Monop, Range, RawExpr, SeqOp, Triop, Type, TypeExpr, Variable,
+        Matrix, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr, Variable,
     };
 
     fn as_latex(raw: RawExpr<()>) -> String {
         Expr::new(raw).as_latex().to_string()
+    }
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
     }
 
     #[test]
@@ -593,15 +603,15 @@ mod tests {
     #[test]
     fn test_types_and_membership() {
         let rendered_types = [
-            Type::Bool,
-            Type::Nat,
-            Type::Int,
-            Type::Real,
-            Type::Matrix(3, 1),
-            Type::Matrix(3, 4),
-            Type::Matrix(1, 1),
+            TypeExpr::Bool,
+            TypeExpr::Nat,
+            TypeExpr::Int,
+            TypeExpr::Real,
+            matrix_type(3, 1),
+            matrix_type(3, 4),
+            matrix_type(1, 1),
         ]
-        .map(|ty| as_latex(RawExpr::Type(TypeExpr::from(ty))))
+        .map(|ty| as_latex(RawExpr::Type(ty)))
         .join("\n");
         expect![
             "\\mathbb{B}\n\\mathbb{N}\n\\mathbb{Z}\n\\mathbb{R}\n\\mathbb{R}^{3}\n\\mathbb{R}^{3 \\times 4}\n\\mathbb{R}^{1}"
@@ -611,7 +621,7 @@ mod tests {
         expect!["A \\in \\mathbb{R}^{2 \\times 3}"].assert_eq(&as_latex(RawExpr::Binop(
             Binop::ElementOf,
             variable_expr("A"),
-            Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(2, 3)))),
+            Expr::new(RawExpr::Type(matrix_type(2, 3))),
         )));
     }
 

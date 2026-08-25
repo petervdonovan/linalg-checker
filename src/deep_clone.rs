@@ -4,6 +4,7 @@ pub(crate) fn deep_clone<Metadata: Clone>(expression: &Expr<Metadata>) -> Expr<M
     let raw = match &expression.raw {
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
+        RawExpr::BoundNatural(depth) => RawExpr::BoundNatural(*depth),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
             dimension: *dimension,
         },

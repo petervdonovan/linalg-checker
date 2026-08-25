@@ -55,11 +55,15 @@ but stronger assumptions are not valid substitutes.
 
 ## Separate Symbolic and Concrete Facts
 
-Matrix and sequence dimensions remain symbolic until environment enumeration.
-Do not require concrete sizes during symbolic typing, and do not duplicate
-concrete variable types in `Environment`. Evaluate existing symbolic dimension
-expressions against the selected natural assignment when concrete values become
-necessary.
+`TypeExpr` is the sole type representation. Matrix dimensions, sequence lengths,
+and dependent sequence element types remain symbolic throughout the pipeline.
+Do not introduce a parallel concrete type or duplicate types in `Environment`.
+Evaluate only the required natural expressions against the selected assignment
+when an operation needs a concrete size.
+
+Lexically bound natural values belong in type expressions as bound leaves, not
+in the environment assignment. Opening and abstraction must preserve their
+scope rather than recovering it from variable names.
 
 Hidden nonce dimensions identify occurrences; they are internal implementation
 details and must not leak into user-facing TeX, Markdown, or models.

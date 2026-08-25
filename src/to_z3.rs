@@ -8,7 +8,7 @@ use z3::ast::{Bool, Int, Real};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, Logic, LogicChain, Matrix, Monop,
-    NaturalEvaluationError, RawExpr, Type, TypeExpr, Variable,
+    NaturalEvaluationError, RawExpr, TypeExpr, Variable,
     elaboration::{ElaborationError, elaborate},
     preprocessing::PreparedExpression,
     type_resolver::{MaybeTyped, TypeError},
@@ -83,7 +83,7 @@ pub struct ToZ3Result {
 pub struct LoweredSideCondition {
     pub introduced_variable: Variable,
     pub display_name: String,
-    pub introduced_type: Type,
+    pub introduced_type: TypeExpr<()>,
     pub defining_assertions: Vec<Z3Object>,
     pub existence: LoweredExistence,
 }
@@ -290,6 +290,7 @@ fn lower<Metadata: MaybeTyped + Clone>(
     match &e.raw {
         RawExpr::Hole
         | RawExpr::ImplicitDimension(_)
+        | RawExpr::BoundNatural(_)
         | RawExpr::IdentityMatrix { .. }
         | RawExpr::StandardBasis { .. }
         | RawExpr::ZeroMatrix { .. }
@@ -299,12 +300,12 @@ fn lower<Metadata: MaybeTyped + Clone>(
             "expression was not removed by concrete elaboration",
         )),
         RawExpr::Variable(variable) => {
-            let ty = e.meta.get_type()?.concretize(γ)?;
+            let ty = e.meta.get_type()?;
             match ty {
-                Type::Bool | Type::Nat | Type::Int | Type::Real => {
+                TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {
                     lower_typed_name(variable.z3_name(), &ty)
                 }
-                Type::Matrix(_, _) | Type::Seq(_) => Err(ToZ3Error::Unsupported(
+                TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => Err(ToZ3Error::Unsupported(
                     "nonscalar variable remains after concrete elaboration",
                 )),
             }
@@ -434,12 +435,12 @@ fn lower_logic_chain<Metadata: MaybeTyped + Clone>(
     }
 }
 
-fn lower_typed_name(name: String, ty: &Type) -> Result<Z3Object, ToZ3Error> {
+fn lower_typed_name(name: String, ty: &TypeExpr<()>) -> Result<Z3Object, ToZ3Error> {
     Ok(match ty {
-        Type::Bool => Z3Object::Z3(Bool::new_const(name).into()),
-        Type::Nat | Type::Int => Z3Object::Z3(Int::new_const(name).into()),
-        Type::Real => Z3Object::Z3(Real::new_const(name).into()),
-        Type::Matrix(_, _) | Type::Seq(_) => {
+        TypeExpr::Bool => Z3Object::Z3(Bool::new_const(name).into()),
+        TypeExpr::Nat | TypeExpr::Int => Z3Object::Z3(Int::new_const(name).into()),
+        TypeExpr::Real => Z3Object::Z3(Real::new_const(name).into()),
+        TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => {
             return Err(ToZ3Error::Unsupported(
                 "nonscalar variables must be elaborated before Z3 lowering",
             ));
@@ -509,20 +510,18 @@ mod tests {
 
     use crate::{
         Binop, Cmp, CmpChain, Expr, Finop, ImplicitDimension, Matrix, Monop, NaturalParameter,
-        RawExpr, SeqType, Type, TypeExpr, Variable,
+        RawExpr, TypeExpr, Variable,
         elaboration::ElaborationError,
         from_tex,
         preprocessing::prepare_expression,
         to_z3::{ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
-        type_resolver::{
-            OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata, type_expr,
-        },
+        type_resolver::{OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata},
         visit_mut::VisitContext,
     };
 
     #[derive(Clone, Default)]
     struct Environment {
-        types: HashMap<Variable, Type>,
+        types: HashMap<Variable, TypeExpr<()>>,
         equalities: HashMap<Expr<()>, u64>,
         implicit_dimensions: HashMap<ImplicitDimension, u64>,
     }
@@ -532,7 +531,7 @@ mod tests {
             let mut types = self
                 .types
                 .iter()
-                .map(|(variable, ty)| (variable.clone(), type_expr(ty.clone())))
+                .map(|(variable, ty)| (variable.clone(), ty.clone()))
                 .collect::<HashMap<_, _>>();
             for expression in self.equalities.keys() {
                 if let RawExpr::Variable(variable) = &expression.raw {
@@ -555,6 +554,20 @@ mod tests {
             }
             crate::Environment { natural_assignment }
         }
+    }
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
+    }
+
+    fn sequence_type(element: TypeExpr<()>, length: u64) -> TypeExpr<()> {
+        TypeExpr::Seq(
+            Expr::new(RawExpr::Type(element)),
+            Expr::new(RawExpr::NatLiteral(length)),
+        )
     }
 
     const POSITIVE: VisitContext = VisitContext {
@@ -649,10 +662,10 @@ mod tests {
     #[test]
     fn test_variable_sorts() {
         for (name, τ, expected_sort) in [
-            ("b", Type::Bool, SortKind::Bool),
-            ("n", Type::Nat, SortKind::Int),
-            ("i", Type::Int, SortKind::Int),
-            ("x", Type::Real, SortKind::Real),
+            ("b", TypeExpr::Bool, SortKind::Bool),
+            ("n", TypeExpr::Nat, SortKind::Int),
+            ("i", TypeExpr::Int, SortKind::Int),
+            ("x", TypeExpr::Real, SortKind::Real),
         ] {
             let variable = Variable::new(name);
             let environment = Environment {
@@ -753,13 +766,7 @@ mod tests {
     fn test_sequence_operations_expand_exactly_the_selected_terms() {
         let sequence = Variable::new("z");
         let environment = || Environment {
-            types: HashMap::from([(
-                sequence.clone(),
-                Type::Seq(Box::new(SeqType {
-                    t: Type::Real,
-                    n: 3,
-                })),
-            )]),
+            types: HashMap::from([(sequence.clone(), sequence_type(TypeExpr::Real, 3))]),
             implicit_dimensions: HashMap::new(),
             equalities: HashMap::from([(expression("n"), 3)]),
         };
@@ -771,17 +778,27 @@ mod tests {
     }
 
     #[test]
+    fn test_triangular_sequence_ranges_expand_exactly_their_terms() {
+        let environment = || Environment {
+            equalities: HashMap::from([(expression("n"), 3)]),
+            ..Environment::default()
+        };
+        expect!["(+ 1 (+ 1 2) (+ 1 2) 3)\n(* 1 (* 1 2) (* 1 2) 3)"].assert_eq(&format!(
+            "{}\n{}",
+            scalar(environment(), expression(r"\sum_{i=1}^{n}\sum_{j=1}^{i}j"),),
+            scalar(
+                environment(),
+                expression(r"\prod_{i=1}^{n}\prod_{j=1}^{i}j"),
+            ),
+        ));
+    }
+
+    #[test]
     fn test_sequence_diagonalization_lowers_to_scalar_cells() {
         let sequence = Variable::new("z");
         let diagonal = matrix(
             Environment {
-                types: HashMap::from([(
-                    sequence,
-                    Type::Seq(Box::new(SeqType {
-                        t: Type::Real,
-                        n: 3,
-                    })),
-                )]),
+                types: HashMap::from([(sequence, sequence_type(TypeExpr::Real, 3))]),
                 ..Environment::default()
             },
             expression(r"\operatorname{diag}(z)"),
@@ -805,13 +822,7 @@ mod tests {
         let sequence = Variable::new("z");
         assert_lowering_error(
             Environment {
-                types: HashMap::from([(
-                    sequence,
-                    Type::Seq(Box::new(SeqType {
-                        t: Type::Real,
-                        n: 2,
-                    })),
-                )]),
+                types: HashMap::from([(sequence, sequence_type(TypeExpr::Real, 2))]),
                 implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
@@ -824,13 +835,7 @@ mod tests {
     fn test_matrix_sequence_product_uses_only_selected_terms() {
         let sequence = Variable::new("A");
         let environment = Environment {
-            types: HashMap::from([(
-                sequence,
-                Type::Seq(Box::new(SeqType {
-                    t: Type::Matrix(2, 2),
-                    n: 3,
-                })),
-            )]),
+            types: HashMap::from([(sequence, sequence_type(matrix_type(2, 2), 3))]),
             implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
@@ -866,11 +871,11 @@ mod tests {
         let matrix_variable = Variable::new("A");
         let real_variable = Variable::new("x");
         let matrix_environment = Environment {
-            types: HashMap::from([(matrix_variable, Type::Matrix(1, 1))]),
+            types: HashMap::from([(matrix_variable, matrix_type(1, 1))]),
             ..Environment::default()
         };
         let real_environment = Environment {
-            types: HashMap::from([(real_variable, Type::Real)]),
+            types: HashMap::from([(real_variable, TypeExpr::Real)]),
             ..Environment::default()
         };
 
@@ -897,7 +902,7 @@ mod tests {
         )));
         let cast = Expr::new(RawExpr::Binop(Binop::Cast, target, expression("x")));
         let environment = Environment {
-            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
             equalities: HashMap::from([(expression("m"), 1), (expression("n"), 1)]),
             implicit_dimensions: HashMap::new(),
         };
@@ -911,7 +916,7 @@ mod tests {
         let matrix_variable = Variable::new("A");
         assert_lowering_error(
             Environment {
-                types: HashMap::from([(matrix_variable, Type::Matrix(2, 2))]),
+                types: HashMap::from([(matrix_variable, matrix_type(2, 2))]),
                 ..Environment::default()
             },
             expression(r"\operatorname{cast}(\mathbb{R}, A)"),
@@ -921,7 +926,7 @@ mod tests {
         );
         assert_lowering_error(
             Environment {
-                types: HashMap::from([(Variable::new("n"), Type::Nat)]),
+                types: HashMap::from([(Variable::new("n"), TypeExpr::Nat)]),
                 ..Environment::default()
             },
             expression(r"\operatorname{cast}(\mathbb{R}, n)"),
@@ -931,7 +936,7 @@ mod tests {
         );
         assert_lowering_error(
             Environment {
-                types: HashMap::from([(Variable::new("x"), Type::Real)]),
+                types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
                 ..Environment::default()
             },
             expression(r"\operatorname{cast}(\mathbb{N}, x)"),
@@ -946,7 +951,7 @@ mod tests {
         };
         let value = || expression("x");
         let environment = || Environment {
-            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
             ..Environment::default()
         };
         assert_lowering_error(
@@ -998,7 +1003,7 @@ mod tests {
         let environment = Environment {
             types: ["p", "q", "r"]
                 .into_iter()
-                .map(|name| (Variable::new(name), Type::Bool))
+                .map(|name| (Variable::new(name), TypeExpr::Bool))
                 .collect(),
             ..Environment::default()
         };
@@ -1037,7 +1042,7 @@ mod tests {
     #[test]
     fn test_forall_is_retained_but_not_lowered_to_z3() {
         let environment = Environment {
-            types: [(Variable::new("p"), Type::Bool)].into_iter().collect(),
+            types: [(Variable::new("p"), TypeExpr::Bool)].into_iter().collect(),
             ..Environment::default()
         };
         assert_lowering_error(
@@ -1061,7 +1066,7 @@ mod tests {
         let environment = Environment {
             types: ["p", "q", "r"]
                 .into_iter()
-                .map(|name| (Variable::new(name), Type::Bool))
+                .map(|name| (Variable::new(name), TypeExpr::Bool))
                 .collect(),
             ..Environment::default()
         };
@@ -1086,7 +1091,7 @@ mod tests {
         let environment = Environment {
             types: ["p", "q", "r"]
                 .into_iter()
-                .map(|name| (Variable::new(name), Type::Bool))
+                .map(|name| (Variable::new(name), TypeExpr::Bool))
                 .collect(),
             ..Environment::default()
         };
@@ -1119,7 +1124,7 @@ mod tests {
     #[test]
     fn test_negative_polarity_does_not_negate_the_result() {
         let environment = Environment {
-            types: [(Variable::new("p"), Type::Bool)].into_iter().collect(),
+            types: [(Variable::new("p"), TypeExpr::Bool)].into_iter().collect(),
             ..Environment::default()
         };
         let expression = expression("p");
@@ -1152,7 +1157,7 @@ mod tests {
         assert_eq!(
             scalar(
                 Environment {
-                    types: HashMap::from([(Variable::new("x"), Type::Matrix(2, 2),)]),
+                    types: HashMap::from([(Variable::new("x"), matrix_type(2, 2),)]),
                     ..Environment::default()
                 },
                 membership,
@@ -1170,10 +1175,10 @@ mod tests {
         let p = Variable::new("p");
         let environment = |p_value| Environment {
             types: [
-                (a.clone(), Type::Matrix(3, 8)),
-                (n.clone(), Type::Nat),
-                (d.clone(), Type::Nat),
-                (p.clone(), Type::Nat),
+                (a.clone(), matrix_type(3, 8)),
+                (n.clone(), TypeExpr::Nat),
+                (d.clone(), TypeExpr::Nat),
+                (p.clone(), TypeExpr::Nat),
             ]
             .into_iter()
             .collect(),
@@ -1225,7 +1230,7 @@ mod tests {
     fn test_trace_of_symbolic_literal_and_mixed_matrices() {
         let a = Variable::new("A");
         let environment = Environment {
-            types: HashMap::from([(a, Type::Matrix(2, 2))]),
+            types: HashMap::from([(a, matrix_type(2, 2))]),
             ..Environment::default()
         };
         expect!["(+ |A_{1,1}| |A_{2,2}|)"]
@@ -1239,7 +1244,7 @@ mod tests {
         let x = Variable::new("x");
         let mixed = scalar(
             Environment {
-                types: HashMap::from([(x, Type::Real)]),
+                types: HashMap::from([(x, TypeExpr::Real)]),
                 ..Environment::default()
             },
             expression(r"\operatorname{tr}(\begin{bmatrix}x & 2 \\ 3 & 4\end{bmatrix})"),
@@ -1267,7 +1272,7 @@ mod tests {
         let x = Variable::new("x");
         let mixed = scalar(
             Environment {
-                types: HashMap::from([(x, Type::Real)]),
+                types: HashMap::from([(x, TypeExpr::Real)]),
                 ..Environment::default()
             },
             expression(r"\det(\begin{bmatrix}x & 2 \\ 3 & 4\end{bmatrix})"),
@@ -1402,7 +1407,7 @@ mod tests {
     fn test_mixed_numeric_operations_promote_to_real() {
         let x = Variable::new("x");
         let environment = || Environment {
-            types: [(x.clone(), Type::Real)].into_iter().collect(),
+            types: [(x.clone(), TypeExpr::Real)].into_iter().collect(),
             implicit_dimensions: HashMap::new(),
             equalities: [].into_iter().collect(),
         };
@@ -1432,7 +1437,7 @@ mod tests {
             ))
         };
         let environment = |value| Environment {
-            types: [(x.clone(), Type::Int)].into_iter().collect(),
+            types: [(x.clone(), TypeExpr::Int)].into_iter().collect(),
             implicit_dimensions: HashMap::new(),
             equalities: [(exponent().with_default_metadata(), value)]
                 .into_iter()
@@ -1453,7 +1458,7 @@ mod tests {
             exponent.clone(),
         ));
         let environment = Environment {
-            types: [(x, Type::Real)].into_iter().collect(),
+            types: [(x, TypeExpr::Real)].into_iter().collect(),
             implicit_dimensions: HashMap::new(),
             equalities: [(exponent, 0)].into_iter().collect(),
         };
@@ -1471,7 +1476,7 @@ mod tests {
 
         assert_lowering_error(
             Environment {
-                types: [(Variable::new("n"), Type::Nat)].into_iter().collect(),
+                types: [(Variable::new("n"), TypeExpr::Nat)].into_iter().collect(),
                 ..Environment::default()
             },
             power,
@@ -1484,7 +1489,7 @@ mod tests {
     #[test]
     fn test_scalar_square_root_returns_principal_root_side_conditions() {
         let environment = Environment {
-            types: HashMap::from([(Variable::new("x"), Type::Real)]),
+            types: HashMap::from([(Variable::new("x"), TypeExpr::Real)]),
             ..Environment::default()
         };
         let lowered = lower_to_z3(&environment, &expression(r"x^{\frac{1}{2}}"), POSITIVE).unwrap();
@@ -1493,7 +1498,7 @@ mod tests {
         assert_eq!(lowered.side_conditions.len(), 1);
         let condition = &lowered.side_conditions[0];
         assert_eq!(condition.introduced_variable.name, r"x^{\frac{1}{2}}");
-        assert_eq!(condition.introduced_type, Type::Real);
+        assert_eq!(condition.introduced_type, TypeExpr::Real);
         assert_eq!(condition.defining_assertions.len(), 2);
         assert!(matches!(
             condition.existence,
@@ -1519,7 +1524,7 @@ mod tests {
     #[test]
     fn test_two_norm_and_squared_two_norm_lower_through_core_operations() {
         let environment = Environment {
-            types: HashMap::from([(Variable::new("v"), Type::Matrix(2, 1))]),
+            types: HashMap::from([(Variable::new("v"), matrix_type(2, 1))]),
             ..Environment::default()
         };
         let norm = lower_to_z3(
@@ -1583,8 +1588,8 @@ mod tests {
     fn test_matrix_compound_and_repeated_square_roots() {
         let environment = Environment {
             types: HashMap::from([
-                (Variable::new("A"), Type::Matrix(2, 2)),
-                (Variable::new("x"), Type::Real),
+                (Variable::new("A"), matrix_type(2, 2)),
+                (Variable::new("x"), TypeExpr::Real),
             ]),
             ..Environment::default()
         };
@@ -1601,7 +1606,7 @@ mod tests {
         );
         assert_eq!(
             matrix_root.side_conditions[0].introduced_type,
-            Type::Matrix(2, 2)
+            matrix_type(2, 2)
         );
         assert!(matches!(
             matrix_root.side_conditions[0].existence,
@@ -1634,7 +1639,7 @@ mod tests {
         let a = Variable::new("A");
         let lowered = matrix(
             Environment {
-                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(2, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
@@ -1667,10 +1672,10 @@ mod tests {
     fn test_block_matrix_lowering_flattens_typed_and_recursive_blocks() {
         let environment = Environment {
             types: HashMap::from([
-                (Variable::new("A"), Type::Matrix(2, 2)),
-                (Variable::new("b"), Type::Matrix(2, 1)),
-                (Variable::new("c"), Type::Matrix(2, 1)),
-                (Variable::new("d"), Type::Real),
+                (Variable::new("A"), matrix_type(2, 2)),
+                (Variable::new("b"), matrix_type(2, 1)),
+                (Variable::new("c"), matrix_type(2, 1)),
+                (Variable::new("d"), TypeExpr::Real),
             ]),
             ..Environment::default()
         };
@@ -1767,8 +1772,8 @@ mod tests {
                 r"\begin{bmatrix}A & b\end{bmatrix}",
                 Environment {
                     types: HashMap::from([
-                        (Variable::new("A"), Type::Matrix(2, 2)),
-                        (Variable::new("b"), Type::Matrix(3, 1)),
+                        (Variable::new("A"), matrix_type(2, 2)),
+                        (Variable::new("b"), matrix_type(3, 1)),
                     ]),
                     ..Environment::default()
                 },
@@ -1778,8 +1783,8 @@ mod tests {
                 r"\begin{bmatrix}A \\ c^\top\end{bmatrix}",
                 Environment {
                     types: HashMap::from([
-                        (Variable::new("A"), Type::Matrix(2, 2)),
-                        (Variable::new("c"), Type::Matrix(3, 1)),
+                        (Variable::new("A"), matrix_type(2, 2)),
+                        (Variable::new("c"), matrix_type(3, 1)),
                     ]),
                     ..Environment::default()
                 },
@@ -1796,8 +1801,8 @@ mod tests {
         let b = Variable::new("B");
         let environment = || Environment {
             types: [
-                (a.clone(), Type::Matrix(1, 2)),
-                (b.clone(), Type::Matrix(1, 2)),
+                (a.clone(), matrix_type(1, 2)),
+                (b.clone(), matrix_type(1, 2)),
             ]
             .into_iter()
             .collect(),
@@ -1847,8 +1852,8 @@ mod tests {
         let product = matrix(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(2, 2)),
-                    (b.clone(), Type::Matrix(2, 1)),
+                    (a.clone(), matrix_type(2, 2)),
+                    (b.clone(), matrix_type(2, 1)),
                 ]
                 .into_iter()
                 .collect(),
@@ -1879,7 +1884,7 @@ mod tests {
         let a = Variable::new("A");
         let quotient = scalar(
             Environment {
-                types: [(a.clone(), Type::Matrix(1, 1))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(1, 1))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
@@ -1899,7 +1904,7 @@ mod tests {
         let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
         let identity = matrix(
             Environment {
-                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(2, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 0)].into_iter().collect(),
             },
@@ -1949,7 +1954,7 @@ mod tests {
         let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
         let squared = matrix(
             Environment {
-                types: [(a.clone(), Type::Matrix(2, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(2, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 2)].into_iter().collect(),
             },
@@ -1973,7 +1978,7 @@ mod tests {
         let exponent = Expr::new(RawExpr::Variable(Variable::new("n")));
         assert_lowering_error(
             Environment {
-                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(1, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: [(exponent.clone(), 1)].into_iter().collect(),
             },
@@ -2000,8 +2005,8 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(2, 2)),
-                    (b.clone(), Type::Matrix(1, 2)),
+                    (a.clone(), matrix_type(2, 2)),
+                    (b.clone(), matrix_type(1, 2)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2020,8 +2025,8 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(1, 2)),
-                    (b.clone(), Type::Matrix(2, 1)),
+                    (a.clone(), matrix_type(1, 2)),
+                    (b.clone(), matrix_type(2, 1)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2044,7 +2049,7 @@ mod tests {
         let a = Variable::new("A");
         assert_lowering_error(
             Environment {
-                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(1, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },
@@ -2078,7 +2083,7 @@ mod tests {
         let environment = Environment {
             types: variables
                 .into_iter()
-                .map(|variable| (variable, Type::Int))
+                .map(|variable| (variable, TypeExpr::Int))
                 .collect(),
             implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
@@ -2096,7 +2101,7 @@ mod tests {
             assertions: vec![(Cmp::Lt, Expr::new(RawExpr::Variable(x.clone())))],
         }));
         let environment = Environment {
-            types: [(x, Type::Real)].into_iter().collect(),
+            types: [(x, TypeExpr::Real)].into_iter().collect(),
             implicit_dimensions: HashMap::new(),
             equalities: HashMap::new(),
         };
@@ -2113,7 +2118,7 @@ mod tests {
             assertions: vec![(Cmp::Eq, Expr::new(RawExpr::Variable(b.clone())))],
         }));
         let environment = Environment {
-            types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
+            types: [(a, matrix_type(1, 2)), (b, matrix_type(1, 2))]
                 .into_iter()
                 .collect(),
             implicit_dimensions: HashMap::new(),
@@ -2133,7 +2138,7 @@ mod tests {
             assertions: vec![(Cmp::Ne, Expr::new(RawExpr::Variable(b.clone())))],
         }));
         let environment = Environment {
-            types: [(a, Type::Matrix(1, 2)), (b, Type::Matrix(1, 2))]
+            types: [(a, matrix_type(1, 2)), (b, matrix_type(1, 2))]
                 .into_iter()
                 .collect(),
             implicit_dimensions: HashMap::new(),
@@ -2150,7 +2155,7 @@ mod tests {
         let q = Variable::new("Q");
         assert_lowering_error(
             Environment {
-                types: [(p.clone(), Type::Bool), (q.clone(), Type::Bool)]
+                types: [(p.clone(), TypeExpr::Bool), (q.clone(), TypeExpr::Bool)]
                     .into_iter()
                     .collect(),
                 implicit_dimensions: HashMap::new(),
@@ -2171,8 +2176,8 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(1, 2)),
-                    (b.clone(), Type::Matrix(2, 1)),
+                    (a.clone(), matrix_type(1, 2)),
+                    (b.clone(), matrix_type(2, 1)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2194,8 +2199,8 @@ mod tests {
         assert_lowering_error(
             Environment {
                 types: [
-                    (a.clone(), Type::Matrix(1, 2)),
-                    (b.clone(), Type::Matrix(1, 2)),
+                    (a.clone(), matrix_type(1, 2)),
+                    (b.clone(), matrix_type(1, 2)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2215,7 +2220,7 @@ mod tests {
         let a = Variable::new("A");
         assert_lowering_error(
             Environment {
-                types: [(a.clone(), Type::Matrix(1, 2))].into_iter().collect(),
+                types: [(a.clone(), matrix_type(1, 2))].into_iter().collect(),
                 implicit_dimensions: HashMap::new(),
                 equalities: HashMap::new(),
             },

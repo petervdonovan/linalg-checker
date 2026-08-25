@@ -1,13 +1,11 @@
 use std::{collections::HashMap, error::Error, fmt};
 
+use crate::type_expr::{abstract_type_variable, open_sequence_element};
 use crate::{
     Binop, Expr, Finop, LogicChain, Matrix, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr,
     Variable,
     visit_mut::{VisitContext, VisitMut},
 };
-
-#[cfg(test)]
-use crate::Type;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
@@ -277,7 +275,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
     ) -> Result<Option<TypeExpr<()>>, TypeError> {
         let ty = match &expression.raw {
             RawExpr::Hole | RawExpr::Type(_) => return Ok(None),
-            RawExpr::ImplicitDimension(_) => TypeExpr::Nat,
+            RawExpr::ImplicitDimension(_) | RawExpr::BoundNatural(_) => TypeExpr::Nat,
             RawExpr::IdentityMatrix { dimension } => {
                 let dimension = implicit_dimension(*dimension);
                 TypeExpr::Matrix(dimension.clone(), dimension)
@@ -325,6 +323,25 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                     .infer_binop(Binop::Cast, &[target, value])
                     .transpose();
             }
+            RawExpr::Binop(Binop::SingleSubscript, sequence, index) => {
+                let Some(TypeRuleOperand::Value(sequence_type)) = operand(sequence) else {
+                    return Ok(None);
+                };
+                let TypeExpr::Seq(element, _) = sequence_type else {
+                    return Err(TypeError::Invalid(
+                        "subscripted expression is not a sequence",
+                    ));
+                };
+                let RawExpr::Type(element) = &element.raw else {
+                    return Err(TypeError::Invalid(
+                        "sequence element must be a type expression",
+                    ));
+                };
+                return Ok(Some(open_sequence_element(
+                    element,
+                    &index.with_default_metadata(),
+                )));
+            }
             RawExpr::Binop(op, left, right) => {
                 return infer_operator([left, right], |operands| {
                     self.rules.infer_binop(*op, operands)
@@ -369,6 +386,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
             match raw {
                 RawExpr::Hole
                 | RawExpr::ImplicitDimension(_)
+                | RawExpr::BoundNatural(_)
                 | RawExpr::IdentityMatrix { .. }
                 | RawExpr::ZeroMatrix { .. }
                 | RawExpr::Variable(_)
@@ -520,7 +538,19 @@ fn sequence_fold_rule(
 }
 
 fn map_rule(range: &Range<()>, operand: &TypeRuleOperand) -> Result<TypeExpr<()>, TypeError> {
-    let element_type = uniform_sequence_body_type(range, operand.value()?)?;
+    let source_position = Expr::new(RawExpr::Finop(
+        Finop::Plus,
+        vec![
+            range.from.with_default_metadata(),
+            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::Monop(
+                Monop::Neg,
+                Expr::new(RawExpr::NatLiteral(1)),
+            )),
+        ],
+    ));
+    let element_type =
+        abstract_type_variable(&operand.value()?, &range.index_variable, &source_position);
     Ok(TypeExpr::Seq(
         Expr::new(RawExpr::Type(element_type)),
         range_length(range),
@@ -663,21 +693,6 @@ fn multiplication_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, Typ
 }
 fn scalar_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
     fold_operand_types(operands, scalar_lub)
-}
-
-#[cfg(test)]
-pub(crate) fn type_expr(ty: Type) -> TypeExpr<()> {
-    match ty {
-        Type::Bool => TypeExpr::Bool,
-        Type::Nat => TypeExpr::Nat,
-        Type::Int => TypeExpr::Int,
-        Type::Real => TypeExpr::Real,
-        Type::Matrix(rows, cols) => TypeExpr::Matrix(natural(rows), natural(cols)),
-        Type::Seq(sequence) => TypeExpr::Seq(
-            Expr::new(RawExpr::Type(type_expr(sequence.t))),
-            natural(sequence.n),
-        ),
-    }
 }
 
 fn natural(value: u64) -> Expr<()> {
@@ -933,6 +948,80 @@ mod tests {
                 .evaluate_natural(&length)
                 .unwrap(),
             3
+        );
+    }
+
+    #[test]
+    fn map_preserves_dependent_element_types_with_a_bound_position() {
+        let n = Expr::new(RawExpr::Variable(Variable::new("n")));
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([
+                (Variable::new("n"), TypeExpr::Nat),
+                (
+                    Variable::new("A"),
+                    TypeExpr::Seq(
+                        Expr::new(RawExpr::Type(TypeExpr::Matrix(
+                            Expr::new(RawExpr::BoundNatural(0)),
+                            Expr::new(RawExpr::NatLiteral(1)),
+                        ))),
+                        n,
+                    ),
+                ),
+            ]),
+        };
+        let parsed: Expr<()> =
+            from_tex::expr(&parse(r"\operatorname{map}_{i=1}^{n}A_i").unwrap()).unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        TypeResolver::new(&types, &OperatorTypeRules::core())
+            .resolve(&mut expression, VisitContext::positive())
+            .unwrap();
+        let TypeExpr::Seq(element, _) = expression.meta.get_type().unwrap() else {
+            panic!("map should produce a sequence")
+        };
+        let RawExpr::Type(element) = &element.raw else {
+            panic!("expected an element type")
+        };
+        let opened =
+            crate::type_expr::open_sequence_element(element, &Expr::new(RawExpr::NatLiteral(2)));
+        let TypeExpr::Matrix(rows, _) = opened else {
+            panic!("expected a matrix element")
+        };
+        assert_eq!(crate::Environment::default().evaluate_natural(&rows), Ok(2));
+    }
+
+    #[test]
+    fn nested_triangular_maps_preserve_the_outer_position_in_the_inner_length() {
+        let n = Variable::new("n");
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([(n.clone(), TypeExpr::Nat)]),
+        };
+        let parsed: Expr<()> = from_tex::expr(
+            &parse(r"\operatorname{map}_{i=1}^{n}\operatorname{map}_{j=1}^{i}\left(i + j\right)")
+                .unwrap(),
+        )
+        .unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        TypeResolver::new(&types, &OperatorTypeRules::core())
+            .resolve(&mut expression, VisitContext::positive())
+            .unwrap();
+
+        let TypeExpr::Seq(outer_element, _) = expression.meta.get_type().unwrap() else {
+            panic!("outer map should produce a sequence")
+        };
+        let RawExpr::Type(outer_element) = &outer_element.raw else {
+            panic!("expected an outer element type")
+        };
+        let opened = crate::type_expr::open_sequence_element(
+            outer_element,
+            &Expr::new(RawExpr::NatLiteral(3)),
+        );
+        let TypeExpr::Seq(inner_element, inner_length) = opened else {
+            panic!("outer elements should be sequences")
+        };
+        assert!(matches!(inner_element.raw, RawExpr::Type(TypeExpr::Nat)));
+        assert_eq!(
+            crate::Environment::default().evaluate_natural(&inner_length),
+            Ok(3)
         );
     }
 

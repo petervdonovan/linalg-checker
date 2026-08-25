@@ -1012,7 +1012,14 @@ mod tests {
     use ratex_parser::parse;
 
     use super::FromTexError;
-    use crate::{Binop, Expr, Finop, RawExpr, Type, TypeExpr};
+    use crate::{Binop, Expr, Finop, RawExpr, TypeExpr};
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
+    }
 
     struct Latex(Expr<()>);
 
@@ -1095,7 +1102,7 @@ mod tests {
 
     #[test]
     fn one_by_one_matrix_type_remains_a_matrix() {
-        let expression: Expr<()> = Expr::new(RawExpr::Type(TypeExpr::from(Type::Matrix(1, 1))));
+        let expression: Expr<()> = Expr::new(RawExpr::Type(matrix_type(1, 1)));
         let parsed = parse(&expression.as_latex().to_string()).unwrap();
         assert!(matches!(
             super::expr(&parsed).unwrap().raw,

@@ -254,6 +254,7 @@ pub(crate) fn dimension_equivalence_query(
         &inputs.required,
         &inputs.contextual,
         &inputs.hidden_types,
+        None,
     )?;
     Ok(DimensionEquivalenceQuery {
         solver: system.solver,
@@ -332,12 +333,14 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         mut solver,
         variable_types,
         natural_symbols,
+        dependent_dimension_cases,
     } = build_dimension_constraint_system(
         symbolic_types,
         &assumptions,
         &required_context,
         &contextual_expressions,
         &hidden_types,
+        Some(max_dimension),
     )?;
 
     let structural_dimensions = lower_structural_dimensions(&variable_types, &natural_symbols)?;
@@ -348,14 +351,21 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         .collect::<Vec<_>>();
     let mut exhaustiveness_values = parameter_values.clone();
     exhaustiveness_values.extend(structural_dimensions.iter().cloned());
-    let dimension_bound_is_exhaustive =
-        dimension_bound_is_exhaustive(&mut solver, &exhaustiveness_values, max_dimension);
+    let dimension_bound_is_exhaustive = dimension_bound_is_exhaustive(
+        &mut solver,
+        &exhaustiveness_values,
+        &dependent_dimension_cases,
+        max_dimension,
+    );
     let max_dimension_value = Int::from_u64(max_dimension);
     for value in &parameter_values {
         solver.assert(value.le(&max_dimension_value));
     }
     for dimension in &structural_dimensions {
         solver.assert(dimension.le(&max_dimension_value));
+    }
+    for (guard, dimension) in &dependent_dimension_cases {
+        solver.assert(guard.implies(dimension.le(&max_dimension_value)));
     }
     let finished = false;
     let parameter_count = u64::try_from(parameter_values.len()).map_err(|_| {
@@ -384,6 +394,7 @@ struct DimensionConstraintSystem {
     solver: Solver,
     variable_types: SymbolicTypes,
     natural_symbols: NaturalSymbols,
+    dependent_dimension_cases: Vec<(Bool, Int)>,
 }
 
 fn build_dimension_constraint_system<Metadata: MaybeTyped>(
@@ -392,6 +403,7 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
     required_context: &[Expr<Metadata>],
     contextual_expressions: &[Expr<Metadata>],
     hidden_types: &BTreeMap<Variable, TypeExpr<()>>,
+    max_dimension: Option<u64>,
 ) -> Result<DimensionConstraintSystem, ShapeError> {
     let hidden_variables = hidden_types.keys().cloned().collect::<BTreeSet<_>>();
     if let Some(collision) = hidden_variables
@@ -417,12 +429,20 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
         &implicit_dimensions,
     )?;
     assert_positive_structural_dimensions(&mut solver, &variable_types, &natural_symbols)?;
+    let dependent_dimension_cases =
+        dependent_structural_dimension_cases(&variable_types, &natural_symbols, max_dimension)?;
+    for (guard, dimension) in &dependent_dimension_cases {
+        solver.assert(guard.implies(dimension.gt(0)));
+    }
     {
         let mut context = DimensionConstraintBuilder {
             solver: &mut solver,
             variable_types: &variable_types,
             natural_symbols: &natural_symbols,
             mode: ConstraintMode::Permanent,
+            locals: Vec::new(),
+            guards: Vec::new(),
+            max_dimension,
         };
         for assumption in assumptions {
             context.constrain_top_level_assertion(assumption)?;
@@ -439,23 +459,30 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
         solver,
         variable_types,
         natural_symbols,
+        dependent_dimension_cases,
     })
 }
 
 fn dimension_bound_is_exhaustive(
     solver: &mut Solver,
     dimensions: &[Int],
+    dependent_dimensions: &[(Bool, Int)],
     max_dimension: u64,
 ) -> bool {
-    if dimensions.is_empty() {
+    if dimensions.is_empty() && dependent_dimensions.is_empty() {
         return true;
     }
 
     let max_dimension = Int::from_u64(max_dimension);
-    let exceeds_bound = dimensions
+    let mut exceeds_bound = dimensions
         .iter()
         .map(|dimension| dimension.gt(&max_dimension))
         .collect::<Vec<_>>();
+    exceeds_bound.extend(
+        dependent_dimensions
+            .iter()
+            .map(|(guard, dimension)| Bool::and(&[guard.clone(), dimension.gt(&max_dimension)])),
+    );
     solver.push();
     solver.assert(Bool::or(&exceeds_bound));
     let result = solver.check();
@@ -816,11 +843,19 @@ struct DimensionConstraintBuilder<'a> {
     variable_types: &'a BTreeMap<Variable, TypeExpr<()>>,
     natural_symbols: &'a BTreeMap<NaturalParameter, Int>,
     mode: ConstraintMode,
+    locals: Vec<(Variable, u64)>,
+    guards: Vec<Bool>,
+    max_dimension: Option<u64>,
 }
 
 impl DimensionConstraintBuilder<'_> {
     fn assert_if_relevant(&mut self, assertion: Bool, depends_on_implicit: bool) {
         if matches!(self.mode, ConstraintMode::Permanent) || depends_on_implicit {
+            let assertion = if self.guards.is_empty() {
+                assertion
+            } else {
+                Bool::and(&self.guards).implies(assertion)
+            };
             self.solver.assert(assertion);
         }
     }
@@ -870,7 +905,7 @@ impl DimensionConstraintBuilder<'_> {
         if matches!(self.mode, ConstraintMode::Permanent)
             || types.iter().any(|ty| type_depends_on_implicit(ty))
         {
-            self.solver.assert(Bool::from_bool(false));
+            self.assert_if_relevant(Bool::from_bool(false), true);
         }
     }
 
@@ -905,7 +940,43 @@ impl DimensionConstraintBuilder<'_> {
     }
 
     fn lower_nat<Metadata>(&self, expression: &Expr<Metadata>) -> Result<Option<Int>, ShapeError> {
-        lower_nat_via_to_z3(expression, self.natural_symbols)
+        let mut symbols = self.natural_symbols.clone();
+        for (variable, value) in &self.locals {
+            symbols.insert(
+                NaturalParameter::Variable(variable.clone()),
+                Int::from_u64(*value),
+            );
+        }
+        match classify_presburger(expression, &symbols) {
+            PresburgerClassification::NotNatural => return Ok(None),
+            PresburgerClassification::Unsupported(message) => {
+                return Err(ShapeError::Unsupported(message.to_owned()));
+            }
+            PresburgerClassification::Valid => {}
+        }
+        match crate::z3_utils::lower_natural_scoped_with(
+            expression,
+            &mut |parameter| {
+                if let NaturalParameter::Variable(variable) = parameter
+                    && let Some((_, value)) = self
+                        .locals
+                        .iter()
+                        .rev()
+                        .find(|(found, _)| found == variable)
+                {
+                    return Ok(Int::from_u64(*value));
+                }
+                self.natural_symbols
+                    .get(parameter)
+                    .cloned()
+                    .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
+            },
+            &mut |depth| Err(NaturalEvaluationError::UnboundNatural(depth)),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(NaturalEvaluationError::MissingAssignment(_)) => Ok(None),
+            Err(error) => Err(ShapeError::Unsupported(error.to_string())),
+        }
     }
 
     fn type_of<Metadata: MaybeTyped>(
@@ -1207,6 +1278,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
             }
             RawExpr::Hole
             | RawExpr::ImplicitDimension(_)
+            | RawExpr::BoundNatural(_)
             | RawExpr::IdentityMatrix { .. }
             | RawExpr::ZeroMatrix { .. }
             | RawExpr::Type(_)
@@ -1230,6 +1302,16 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for OperatorCompatibilityVisitor<'_, 
         {
             self.error = Some(error);
         }
+    }
+
+    fn visit_raw_expr_seqop(
+        &mut self,
+        _op: &SeqOp,
+        range: &crate::Range<Metadata>,
+        _body: &Expr<Metadata>,
+    ) {
+        self.visit_expr(&range.from);
+        self.visit_expr(&range.to);
     }
 }
 
@@ -1296,6 +1378,16 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for BlockMatrixCompatibilityVisitor<'
             self.error = Some(error);
         }
     }
+
+    fn visit_raw_expr_seqop(
+        &mut self,
+        _op: &SeqOp,
+        range: &crate::Range<Metadata>,
+        _body: &Expr<Metadata>,
+    ) {
+        self.visit_expr(&range.from);
+        self.visit_expr(&range.to);
+    }
 }
 
 struct SequenceCompatibilityVisitor<'a, 'builder> {
@@ -1336,6 +1428,67 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
             self.error = Some(error);
         }
     }
+
+    fn visit_raw_expr_seqop(
+        &mut self,
+        _op: &SeqOp,
+        range: &crate::Range<Metadata>,
+        _body: &Expr<Metadata>,
+    ) {
+        self.visit_expr(&range.from);
+        self.visit_expr(&range.to);
+    }
+}
+
+struct SequenceBodyConstraintVisitor<'a, 'builder> {
+    builder: &'a mut DimensionConstraintBuilder<'builder>,
+    error: Option<ShapeError>,
+}
+
+impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceBodyConstraintVisitor<'_, '_> {
+    fn visit_raw_expr_seqop(
+        &mut self,
+        _op: &SeqOp,
+        range: &crate::Range<Metadata>,
+        body: &Expr<Metadata>,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+        self.visit_expr(&range.from);
+        self.visit_expr(&range.to);
+        let Some(max_dimension) = self.builder.max_dimension else {
+            return;
+        };
+        let result = (|| {
+            let from = required_natural(
+                self.builder.lower_nat(&range.from)?,
+                "sequence lower bound is not linear natural arithmetic",
+            )?;
+            let to = required_natural(
+                self.builder.lower_nat(&range.to)?,
+                "sequence upper bound is not linear natural arithmetic",
+            )?;
+            for value in 0..=max_dimension {
+                let value_ast = Int::from_u64(value);
+                self.builder
+                    .guards
+                    .push(Bool::and(&[from.le(&value_ast), value_ast.le(&to)]));
+                self.builder
+                    .locals
+                    .push((range.index_variable.clone(), value));
+                let nested =
+                    run_dimension_constraint_visitors(self.builder, std::slice::from_ref(body));
+                self.builder.locals.pop();
+                self.builder.guards.pop();
+                nested?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.error = Some(error);
+        }
+    }
 }
 
 fn run_dimension_constraint_visitors<Metadata: MaybeTyped>(
@@ -1364,6 +1517,16 @@ fn run_dimension_constraint_visitors<Metadata: MaybeTyped>(
     }
     for expression in expressions {
         let mut visitor = SequenceCompatibilityVisitor {
+            builder,
+            error: None,
+        };
+        visitor.visit_expr(expression);
+        if let Some(error) = visitor.error {
+            return Err(error);
+        }
+    }
+    for expression in expressions {
+        let mut visitor = SequenceBodyConstraintVisitor {
             builder,
             error: None,
         };
@@ -1412,7 +1575,10 @@ fn lower_required_natural<Metadata>(
 fn structural_dimensions(ty: &TypeExpr<()>) -> Result<Vec<&Expr<()>>, ShapeError> {
     match ty {
         TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok(Vec::new()),
-        TypeExpr::Matrix(rows, cols) => Ok(vec![rows, cols]),
+        TypeExpr::Matrix(rows, cols) => Ok([rows, cols]
+            .into_iter()
+            .filter(|dimension| !crate::type_expr::expression_contains_bound_natural(dimension))
+            .collect()),
         TypeExpr::Seq(element, length) => {
             let RawExpr::Type(element) = &element.raw else {
                 return Err(ShapeError::InvalidTyping(
@@ -1424,6 +1590,109 @@ fn structural_dimensions(ty: &TypeExpr<()>) -> Result<Vec<&Expr<()>>, ShapeError
             Ok(dimensions)
         }
     }
+}
+
+fn dependent_structural_dimension_cases(
+    variable_types: &BTreeMap<Variable, TypeExpr<()>>,
+    natural_symbols: &BTreeMap<NaturalParameter, Int>,
+    max_dimension: Option<u64>,
+) -> Result<Vec<(Bool, Int)>, ShapeError> {
+    let Some(max_dimension) = max_dimension else {
+        return Ok(Vec::new());
+    };
+
+    fn lower(
+        expression: &Expr<()>,
+        natural_symbols: &BTreeMap<NaturalParameter, Int>,
+        bound_values: &[u64],
+    ) -> Result<Int, ShapeError> {
+        crate::z3_utils::lower_natural_scoped_with(
+            expression,
+            &mut |parameter| {
+                natural_symbols
+                    .get(parameter)
+                    .cloned()
+                    .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
+            },
+            &mut |depth| {
+                bound_values
+                    .iter()
+                    .rev()
+                    .nth(depth)
+                    .copied()
+                    .map(Int::from_u64)
+                    .ok_or(NaturalEvaluationError::UnboundNatural(depth))
+            },
+        )
+        .map_err(|error| ShapeError::Unsupported(error.to_string()))
+    }
+
+    fn collect(
+        ty: &TypeExpr<()>,
+        natural_symbols: &BTreeMap<NaturalParameter, Int>,
+        max_dimension: u64,
+        bound_values: &mut Vec<u64>,
+        guards: &mut Vec<Bool>,
+        cases: &mut Vec<(Bool, Int)>,
+    ) -> Result<(), ShapeError> {
+        let guard = || {
+            if guards.is_empty() {
+                Bool::from_bool(true)
+            } else {
+                Bool::and(guards)
+            }
+        };
+        match ty {
+            TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
+            TypeExpr::Matrix(rows, cols) => {
+                for dimension in [rows, cols] {
+                    if crate::type_expr::expression_contains_bound_natural(dimension) {
+                        cases.push((guard(), lower(dimension, natural_symbols, bound_values)?));
+                    }
+                }
+            }
+            TypeExpr::Seq(element, length) => {
+                if crate::type_expr::expression_contains_bound_natural(length) {
+                    cases.push((guard(), lower(length, natural_symbols, bound_values)?));
+                }
+                let RawExpr::Type(element) = &element.raw else {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence element must be a type expression".to_owned(),
+                    ));
+                };
+                let length = lower(length, natural_symbols, bound_values)?;
+                for position in 1..=max_dimension {
+                    let position_ast = Int::from_u64(position);
+                    guards.push(position_ast.le(&length));
+                    bound_values.push(position);
+                    collect(
+                        element,
+                        natural_symbols,
+                        max_dimension,
+                        bound_values,
+                        guards,
+                        cases,
+                    )?;
+                    bound_values.pop();
+                    guards.pop();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut cases = Vec::new();
+    for ty in variable_types.values() {
+        collect(
+            ty,
+            natural_symbols,
+            max_dimension,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut cases,
+        )?;
+    }
+    Ok(cases)
 }
 
 fn lower_structural_dimensions(
@@ -1646,9 +1915,8 @@ mod tests {
     };
     use crate::{
         Annotation, Environment, Expr, Finop, ImplicitDimension, Matrix, NaturalParameter, Range,
-        RawExpr, SeqOp, SeqType, Type, TypeExpr, Variable, from_tex,
-        preprocessing::prepare_expression, type_resolver::SymbolicTypeEnvironment,
-        visit_mut::VisitContext,
+        RawExpr, SeqOp, TypeExpr, Variable, from_tex, preprocessing::prepare_expression,
+        type_resolver::SymbolicTypeEnvironment, visit_mut::VisitContext,
     };
 
     fn expression(tex: &str) -> Expr<()> {
@@ -1721,8 +1989,65 @@ mod tests {
         environment: &Environment,
         types: &SymbolicTypeEnvironment,
         variable: &Variable,
-    ) -> Type {
-        types.types[variable].concretize(environment).unwrap()
+    ) -> TypeExpr<()> {
+        fn specialize(ty: &TypeExpr<()>, environment: &Environment) -> TypeExpr<()> {
+            match ty {
+                TypeExpr::Bool => TypeExpr::Bool,
+                TypeExpr::Nat => TypeExpr::Nat,
+                TypeExpr::Int => TypeExpr::Int,
+                TypeExpr::Real => TypeExpr::Real,
+                TypeExpr::Matrix(rows, cols) => matrix_type(
+                    environment.evaluate_natural(rows).unwrap(),
+                    environment.evaluate_natural(cols).unwrap(),
+                ),
+                TypeExpr::Seq(element, length) => {
+                    let RawExpr::Type(element) = &element.raw else {
+                        panic!("expected sequence element type")
+                    };
+                    TypeExpr::Seq(
+                        Expr::new(RawExpr::Type(specialize(element, environment))),
+                        Expr::new(RawExpr::NatLiteral(
+                            environment.evaluate_natural(length).unwrap(),
+                        )),
+                    )
+                }
+            }
+        }
+        specialize(&types.types[variable], environment)
+    }
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
+    }
+
+    fn matrix_dimensions(ty: &TypeExpr<()>) -> Option<(u64, u64)> {
+        let TypeExpr::Matrix(rows, cols) = ty else {
+            return None;
+        };
+        let (RawExpr::NatLiteral(rows), RawExpr::NatLiteral(cols)) = (&rows.raw, &cols.raw) else {
+            return None;
+        };
+        Some((*rows, *cols))
+    }
+
+    fn sequence_type(element: TypeExpr<()>, length: u64) -> TypeExpr<()> {
+        TypeExpr::Seq(
+            Expr::new(RawExpr::Type(element)),
+            Expr::new(RawExpr::NatLiteral(length)),
+        )
+    }
+
+    fn sequence_length(ty: &TypeExpr<()>) -> Option<u64> {
+        let TypeExpr::Seq(_, length) = ty else {
+            return None;
+        };
+        let RawExpr::NatLiteral(length) = length.raw else {
+            return None;
+        };
+        Some(length)
     }
 
     fn inferred_types(tex: &[&str]) -> SymbolicTypeEnvironment {
@@ -1804,15 +2129,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             concrete_type(&environment, &types, &Variable::new("a")),
-            Type::Real
+            TypeExpr::Real
         );
         assert_eq!(
             concrete_type(&environment, &types, &Variable::new("n")),
-            Type::Nat
+            TypeExpr::Nat
         );
         assert_eq!(
             concrete_type(&environment, &types, &Variable::new("x")),
-            Type::Real
+            TypeExpr::Real
         );
     }
 
@@ -1840,7 +2165,7 @@ mod tests {
             .unwrap();
         assert_eq!(environments.len(), 2);
         assert!(environments.iter().all(|environment| {
-            matches!(concrete_type(environment, &types, &Variable::new("A")), Type::Matrix(rows, cols) if rows == cols)
+            matches!(matrix_dimensions(&concrete_type(environment, &types, &Variable::new("A"))), Some((rows, cols)) if rows == cols)
         }));
     }
 
@@ -1868,6 +2193,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn dependent_sequence_dimensions_are_checked_for_every_active_position() {
+        let n = Variable::new("n");
+        let types = SymbolicTypeEnvironment {
+            types: std::collections::HashMap::from([
+                (n.clone(), TypeExpr::Nat),
+                (
+                    Variable::new("A"),
+                    TypeExpr::Seq(
+                        Expr::new(RawExpr::Type(TypeExpr::Matrix(
+                            Expr::new(RawExpr::BoundNatural(0)),
+                            Expr::new(RawExpr::NatLiteral(1)),
+                        ))),
+                        Expr::new(RawExpr::Variable(n.clone())),
+                    ),
+                ),
+            ]),
+        };
+        let assertion = expression(r"\sum_{i=1}^{n}\det(A_i) = 0");
+        let prepared = prepare_expression(&types, &assertion, VisitContext::positive()).unwrap();
+        let environments = extract_prepared_environment_iterator(&types, &[prepared], &[], 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(environments.len(), 1);
+        assert_eq!(natural(&environments[0], "n"), 1);
     }
 
     #[test]
@@ -1899,8 +2252,8 @@ mod tests {
             assert_eq!(environments.len(), 2);
             assert!(environments.iter().all(|environment| {
                 matches!(
-                    concrete_type(environment, &types, &Variable::new("A")),
-                    Type::Matrix(_, 1)
+                    matrix_dimensions(&concrete_type(environment, &types, &Variable::new("A"))),
+                    Some((_, 1))
                 )
             }));
         }
@@ -1955,7 +2308,7 @@ mod tests {
         let first = environments.next().unwrap().unwrap();
         assert_eq!(
             concrete_type(&first, &types, &Variable::new("A")),
-            Type::Matrix(1, 1)
+            matrix_type(1, 1)
         );
 
         let next_assignments: Vec<_> = environments
@@ -1985,8 +2338,8 @@ mod tests {
             .map(|environment| {
                 let environment = environment.unwrap();
                 let types = inferred_types(&["U = U"]);
-                let Type::Matrix(rows, cols) =
-                    concrete_type(&environment, &types, &Variable::new("U"))
+                let Some((rows, cols)) =
+                    matrix_dimensions(&concrete_type(&environment, &types, &Variable::new("U")))
                 else {
                     panic!("expected a matrix")
                 };
@@ -2035,14 +2388,8 @@ mod tests {
             .map(|environment| concrete_type(environment, &inferred, &z))
             .collect();
         assert_eq!(types.len(), 4);
-        assert!(types.contains(&Type::Seq(Box::new(SeqType {
-            t: Type::Matrix(1, 1),
-            n: 1,
-        }))));
-        assert!(types.contains(&Type::Seq(Box::new(SeqType {
-            t: Type::Matrix(2, 1),
-            n: 2,
-        }))));
+        assert!(types.contains(&sequence_type(matrix_type(1, 1), 1)));
+        assert!(types.contains(&sequence_type(matrix_type(2, 1), 2)));
     }
 
     #[test]
@@ -2066,17 +2413,15 @@ mod tests {
                 (
                     natural(environment, "a"),
                     natural(environment, "b"),
-                    match concrete_type(
+                    sequence_length(&concrete_type(
                         environment,
                         &inferred_types(&[
                             r"\vec{z} \in \operatorname{Seq}_{n}(\mathbb{R})",
                             r"\sum_{i=a}^{b} \vec{z}_i = 0",
                         ]),
                         &z,
-                    ) {
-                        Type::Seq(sequence) => sequence.n,
-                        _ => panic!("expected a sequence"),
-                    },
+                    ))
+                    .expect("expected a sequence"),
                 )
             })
             .collect();
@@ -2391,7 +2736,7 @@ mod tests {
         let types = inferred_types(&valid);
         assert_eq!(
             concrete_type(&environments[0], &types, &Variable::new("M")),
-            Type::Matrix(3, 3)
+            matrix_type(3, 3)
         );
 
         for invalid in [
@@ -2516,7 +2861,8 @@ mod tests {
                 .next()
                 .unwrap()
                 .unwrap();
-            let Type::Matrix(rows, cols) = concrete_type(&environment, &types, &Variable::new("A"))
+            let Some((rows, cols)) =
+                matrix_dimensions(&concrete_type(&environment, &types, &Variable::new("A")))
             else {
                 panic!("expected a matrix")
             };

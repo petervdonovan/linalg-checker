@@ -13,6 +13,7 @@ pub mod operator_visitors;
 pub mod preprocessing;
 pub mod to_tex;
 pub mod to_z3;
+mod type_expr;
 pub mod type_resolver;
 mod unification;
 pub mod validate_argument;
@@ -49,22 +50,6 @@ impl ImplicitDimension {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Type {
-    Bool,
-    Nat,
-    Int,
-    Real,
-    Matrix(u64, u64),
-    Seq(Box<SeqType>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SeqType {
-    pub t: Type,
-    pub n: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NaturalParameter {
     Variable(Variable),
     ImplicitDimension(ImplicitDimension),
@@ -86,6 +71,7 @@ pub enum NaturalEvaluationError {
     EmptyOperation(&'static str),
     NotANumeral,
     Overflow,
+    UnboundNatural(usize),
 }
 
 impl fmt::Display for NaturalEvaluationError {
@@ -100,6 +86,9 @@ impl fmt::Display for NaturalEvaluationError {
             }
             Self::NotANumeral => f.write_str("natural expression did not simplify to a numeral"),
             Self::Overflow => f.write_str("natural expression is outside the u64 range"),
+            Self::UnboundNatural(depth) => {
+                write!(f, "unbound natural type index at depth {depth}")
+            }
         }
     }
 }
@@ -132,49 +121,6 @@ impl<Metadata> TypeExpr<Metadata> {
             ),
         }
     }
-
-    pub fn concretize(&self, environment: &Environment) -> Result<Type, NaturalEvaluationError> {
-        match self {
-            Self::Bool => Ok(Type::Bool),
-            Self::Nat => Ok(Type::Nat),
-            Self::Int => Ok(Type::Int),
-            Self::Real => Ok(Type::Real),
-            Self::Matrix(rows, cols) => Ok(Type::Matrix(
-                environment.evaluate_natural(rows)?,
-                environment.evaluate_natural(cols)?,
-            )),
-            Self::Seq(element, size) => {
-                let RawExpr::Type(element) = &element.raw else {
-                    return Err(NaturalEvaluationError::UnsupportedSyntax(
-                        "a sequence element must be a type expression",
-                    ));
-                };
-                Ok(Type::Seq(Box::new(SeqType {
-                    t: element.concretize(environment)?,
-                    n: environment.evaluate_natural(size)?,
-                })))
-            }
-        }
-    }
-}
-
-impl From<Type> for TypeExpr<()> {
-    fn from(ty: Type) -> Self {
-        match ty {
-            Type::Bool => Self::Bool,
-            Type::Nat => Self::Nat,
-            Type::Int => Self::Int,
-            Type::Real => Self::Real,
-            Type::Matrix(rows, cols) => Self::Matrix(
-                Expr::new(RawExpr::NatLiteral(rows)),
-                Expr::new(RawExpr::NatLiteral(cols)),
-            ),
-            Type::Seq(sequence) => Self::Seq(
-                Expr::new(RawExpr::Type(TypeExpr::from(sequence.t))),
-                Expr::new(RawExpr::NatLiteral(sequence.n)),
-            ),
-        }
-    }
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -188,6 +134,20 @@ impl Environment {
         expression: &Expr<Metadata>,
     ) -> Result<u64, NaturalEvaluationError> {
         crate::z3_utils::evaluate_natural(expression, &self.natural_assignment)
+    }
+
+    pub(crate) fn evaluate_natural_with_context<Metadata>(
+        &self,
+        expression: &Expr<Metadata>,
+        locals: &[(Variable, u64)],
+        bound_values: &[u64],
+    ) -> Result<u64, NaturalEvaluationError> {
+        crate::z3_utils::evaluate_natural_with_context(
+            expression,
+            &self.natural_assignment,
+            locals,
+            bound_values,
+        )
     }
 }
 
@@ -337,6 +297,7 @@ impl<Metadata> Expr<Metadata> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
             RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
+            RawExpr::BoundNatural(depth) => RawExpr::BoundNatural(*depth),
             RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
                 dimension: *dimension,
             },
@@ -486,6 +447,8 @@ pub enum RawExpr<Metadata> {
     /// An internal natural-valued leaf used to preserve a context-dependent
     /// matrix constant's dimension through symbolic typing.
     ImplicitDimension(ImplicitDimension),
+    /// An internal de Bruijn reference to a one-based sequence position.
+    BoundNatural(usize),
     IdentityMatrix {
         dimension: ImplicitDimension,
     },
@@ -516,7 +479,7 @@ mod tests {
 
     use super::{
         Environment, Expr, Finop, ImplicitDimension, NaturalEvaluationError, NaturalParameter,
-        RawExpr, Type, TypeExpr, Variable,
+        RawExpr, TypeExpr, Variable,
     };
 
     struct MetadataWithoutClone;
@@ -543,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluates_natural_expressions_and_concretizes_symbolic_types() {
+    fn evaluates_natural_expressions_used_by_symbolic_types() {
         let n = Variable::new("n");
         let dimension = ImplicitDimension::fresh();
         let environment = Environment {
@@ -561,19 +524,7 @@ mod tests {
             ],
         ));
         assert_eq!(environment.evaluate_natural(&cols), Ok(3));
-        assert_eq!(
-            TypeExpr::Matrix(rows, cols).concretize(&environment),
-            Ok(Type::Matrix(1, 3))
-        );
-
-        assert_eq!(
-            TypeExpr::<()>::Matrix(
-                Expr::new(RawExpr::NatLiteral(1)),
-                Expr::new(RawExpr::NatLiteral(1)),
-            )
-            .concretize(&Environment::default()),
-            Ok(Type::Matrix(1, 1))
-        );
+        assert_eq!(environment.evaluate_natural(&rows), Ok(1));
     }
 
     #[test]

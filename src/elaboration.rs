@@ -8,9 +8,10 @@ use std::{error::Error, fmt};
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Finop, Logic, LogicChain, Matrix, Monop,
-    NaturalEvaluationError, NaturalParameter, Range, RawExpr, SeqOp, Type, TypeExpr, Variable,
+    NaturalEvaluationError, NaturalParameter, Range, RawExpr, SeqOp, TypeExpr, Variable,
     deep_clone::deep_clone,
     preprocessing::PreparedExpression,
+    type_expr::{contains_unbound_natural, open_sequence_element, substitute_type_variable},
     type_resolver::{MaybeTyped, TypeError, TypedMetadata},
     visit::{self, Visit},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
@@ -19,7 +20,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct ElaboratedExpression {
     pub expression: Expr<TypedMetadata>,
-    pub side_conditions: Vec<SideCondition<TypedMetadata, Type>>,
+    pub side_conditions: Vec<SideCondition<TypedMetadata>>,
     pub context: VisitContext,
 }
 
@@ -78,7 +79,7 @@ pub fn elaborate(
             Ok(SideCondition {
                 introduced_variable: condition.introduced_variable.clone(),
                 display_name: condition.display_name.clone(),
-                introduced_type: condition.introduced_type.concretize(environment)?,
+                introduced_type: condition.introduced_type.clone(),
                 active_ranges: condition.active_ranges.clone(),
                 defining_assertions: condition
                     .defining_assertions
@@ -164,7 +165,7 @@ fn clone_existence(existence: &Existence<TypedMetadata>) -> Existence<TypedMetad
 
 fn expand_pointwise_side_conditions(
     environment: &Environment,
-    conditions: &mut [SideCondition<TypedMetadata, Type>],
+    conditions: &mut [SideCondition<TypedMetadata>],
 ) -> Result<(), ElaborationError> {
     for condition in conditions {
         if condition.active_ranges.is_empty() {
@@ -205,26 +206,34 @@ fn concrete_range_assignments(
     environment: &Environment,
     ranges: &[Range<()>],
 ) -> Result<Vec<Vec<(Variable, u64)>>, ElaborationError> {
-    let mut assignments = vec![Vec::new()];
-    for range in ranges {
-        let from = environment.evaluate_natural(&range.from)?;
-        let to = environment.evaluate_natural(&range.to)?;
+    fn expand(
+        environment: &Environment,
+        ranges: &[Range<()>],
+        index: usize,
+        assignment: &mut Vec<(Variable, u64)>,
+        result: &mut Vec<Vec<(Variable, u64)>>,
+    ) -> Result<(), ElaborationError> {
+        let Some(range) = ranges.get(index) else {
+            result.push(assignment.clone());
+            return Ok(());
+        };
+        let from = environment.evaluate_natural_with_context(&range.from, assignment, &[])?;
+        let to = environment.evaluate_natural_with_context(&range.to, assignment, &[])?;
         if from > to {
             return Err(ElaborationError::InvalidOperands(
                 "sequence range must be nonempty",
             ));
         }
-        let mut expanded = Vec::new();
-        for assignment in &assignments {
-            for value in from..=to {
-                let mut next = assignment.clone();
-                next.push((range.index_variable.clone(), value));
-                expanded.push(next);
-            }
+        for value in from..=to {
+            assignment.push((range.index_variable.clone(), value));
+            expand(environment, ranges, index + 1, assignment, result)?;
+            assignment.pop();
         }
-        assignments = expanded;
+        Ok(())
     }
-    Ok(assignments)
+    let mut result = Vec::new();
+    expand(environment, ranges, 0, &mut Vec::new(), &mut result)?;
+    Ok(result)
 }
 
 fn substitute_indices(
@@ -246,11 +255,11 @@ fn boolean_terms(op: Finop, mut expressions: Vec<Expr<TypedMetadata>>) -> Expr<T
     }
 }
 
-fn visit_forest<V: VisitMut<TypedMetadata>, IntroducedType>(
+fn visit_forest<V: VisitMut<TypedMetadata>>(
     visitor: &mut V,
     context: VisitContext,
     expression: &mut Expr<TypedMetadata>,
-    side_conditions: &mut [SideCondition<TypedMetadata, IntroducedType>],
+    side_conditions: &mut [SideCondition<TypedMetadata>],
 ) {
     visitor.visit_expr_mut(context.clone(), expression);
     for condition in side_conditions {
@@ -301,11 +310,62 @@ fn comparison(
     )
 }
 
-fn concrete_type(
+fn symbolic_type(expression: &Expr<TypedMetadata>) -> Result<TypeExpr<()>, ElaborationError> {
+    expression.meta.get_type().map_err(Into::into)
+}
+
+fn matrix_dimensions<Metadata>(
     environment: &Environment,
-    expression: &Expr<TypedMetadata>,
-) -> Result<Type, ElaborationError> {
-    Ok(expression.meta.get_type()?.concretize(environment)?)
+    ty: &TypeExpr<Metadata>,
+) -> Result<Option<(u64, u64)>, ElaborationError> {
+    match ty {
+        TypeExpr::Matrix(rows, cols) => Ok(Some((
+            environment.evaluate_natural(rows)?,
+            environment.evaluate_natural(cols)?,
+        ))),
+        _ => Ok(None),
+    }
+}
+
+fn sequence_parts<'a, Metadata>(
+    environment: &Environment,
+    ty: &'a TypeExpr<Metadata>,
+) -> Result<Option<(&'a TypeExpr<Metadata>, u64)>, ElaborationError> {
+    let TypeExpr::Seq(element, length) = ty else {
+        return Ok(None);
+    };
+    let RawExpr::Type(element) = &element.raw else {
+        return Err(ElaborationError::InvalidOperands(
+            "sequence element must be a type expression",
+        ));
+    };
+    Ok(Some((element, environment.evaluate_natural(length)?)))
+}
+
+fn types_equal<A, B>(
+    environment: &Environment,
+    left: &TypeExpr<A>,
+    right: &TypeExpr<B>,
+) -> Result<bool, ElaborationError> {
+    Ok(match (left, right) {
+        (TypeExpr::Bool, TypeExpr::Bool)
+        | (TypeExpr::Nat, TypeExpr::Nat)
+        | (TypeExpr::Int, TypeExpr::Int)
+        | (TypeExpr::Real, TypeExpr::Real) => true,
+        (TypeExpr::Matrix(_, _), TypeExpr::Matrix(_, _)) => {
+            matrix_dimensions(environment, left)? == matrix_dimensions(environment, right)?
+        }
+        (TypeExpr::Seq(_, _), TypeExpr::Seq(_, _)) => {
+            let Some((left_element, left_length)) = sequence_parts(environment, left)? else {
+                unreachable!()
+            };
+            let Some((right_element, right_length)) = sequence_parts(environment, right)? else {
+                unreachable!()
+            };
+            left_length == right_length && types_equal(environment, left_element, right_element)?
+        }
+        _ => false,
+    })
 }
 
 fn matrix_expression(
@@ -370,15 +430,15 @@ impl<'a> MembershipVisitor<'a> {
                 "type membership requires a type expression",
             ));
         };
-        let actual = concrete_type(self.environment, left)?;
-        let expected = expected.concretize(self.environment)?;
-        if actual != expected {
+        let actual = symbolic_type(left)?;
+        if !types_equal(self.environment, &actual, expected)? {
             return Ok(boolean(false));
         }
-        if matches!(actual, Type::Nat) {
+        if matches!(actual, TypeExpr::Nat) {
             return Ok(comparison(deep_clone(left), Cmp::Ge, natural(0)));
         }
-        if matches!(actual, Type::Seq(ref sequence) if matches!(sequence.t, Type::Seq(_))) {
+        if matches!(actual, TypeExpr::Seq(ref element, _) if matches!(element.raw, RawExpr::Type(TypeExpr::Seq(_, _))))
+        {
             return Err(ElaborationError::Unsupported(
                 "nested sequence membership is not supported",
             ));
@@ -435,18 +495,18 @@ impl<'a> DiagonalVisitor<'a> {
         &self,
         operand: &Expr<TypedMetadata>,
     ) -> Result<Expr<TypedMetadata>, ElaborationError> {
-        let Type::Seq(sequence) = concrete_type(self.environment, operand)? else {
+        let operand_type = symbolic_type(operand)?;
+        let Some((element_type, length)) = sequence_parts(self.environment, &operand_type)? else {
             return Err(ElaborationError::InvalidOperands(
                 "diag operand must be a sequence",
             ));
         };
-        if sequence.t != Type::Real {
+        if !matches!(element_type, TypeExpr::Real) {
             return Err(ElaborationError::InvalidOperands(
                 "diag sequence elements must be real scalars",
             ));
         }
-        let dimension =
-            usize::try_from(sequence.n).map_err(|_| ElaborationError::DimensionOverflow)?;
+        let dimension = usize::try_from(length).map_err(|_| ElaborationError::DimensionOverflow)?;
         if dimension == 0 {
             return Err(ElaborationError::Empty(
                 "diag operand sequence must be nonempty",
@@ -528,19 +588,21 @@ impl<'a> SequenceVisitor<'a> {
                 "sequence element must be a type expression",
             ));
         };
-        let Type::Seq(sequence) = concrete_type(self.environment, base)? else {
+        let base_type = symbolic_type(base)?;
+        let Some((_, length)) = sequence_parts(self.environment, &base_type)? else {
             return Err(ElaborationError::InvalidOperands(
                 "subscripted variable is not a sequence",
             ));
         };
+        let element_type = open_sequence_element(element_type, &index.with_default_metadata());
         let index = self.environment.evaluate_natural(index)?;
-        if index == 0 || index > sequence.n {
+        if index == 0 || index > length {
             return Err(ElaborationError::InvalidOperands(
                 "sequence index is outside its one-based bounds",
             ));
         }
         Ok(typed(
-            element_type.with_default_metadata(),
+            element_type,
             RawExpr::Variable(Variable::new(format!("{}_{{{index}}}", variable.z3_name()))),
         ))
     }
@@ -605,7 +667,7 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
             return;
         }
         if let RawExpr::Binop(Binop::SingleSubscript, base, index) = &node.raw
-            && !matches!(base.raw, RawExpr::Variable(_))
+            && matches!(base.raw, RawExpr::Seqop(SeqOp::Map, _, _))
         {
             match self.materialized_subscript(base, index) {
                 Ok(replacement) => {
@@ -656,16 +718,17 @@ fn materialize_sequence(
     environment: &Environment,
     expression: &Expr<TypedMetadata>,
 ) -> Result<Vec<Expr<TypedMetadata>>, ElaborationError> {
-    let Type::Seq(sequence) = concrete_type(environment, expression)? else {
+    let expression_type = symbolic_type(expression)?;
+    let Some((element_type, length)) = sequence_parts(environment, &expression_type)? else {
         return Err(ElaborationError::InvalidOperands(
             "expression does not evaluate to a sequence",
         ));
     };
     match &expression.raw {
-        RawExpr::Variable(_) => (1..=sequence.n)
+        RawExpr::Variable(_) => (1..=length)
             .map(|index| {
                 Ok(typed(
-                    TypeExpr::from(sequence.t.clone()),
+                    open_sequence_element(element_type, &Expr::new(RawExpr::NatLiteral(index))),
                     RawExpr::Binop(
                         Binop::SingleSubscript,
                         deep_clone(expression),
@@ -686,7 +749,7 @@ fn materialize_sequence(
                 .map(|index| substitute_index(body, &range.index_variable, index))
                 .collect::<Vec<_>>();
             if elements.len()
-                != usize::try_from(sequence.n).map_err(|_| ElaborationError::DimensionOverflow)?
+                != usize::try_from(length).map_err(|_| ElaborationError::DimensionOverflow)?
             {
                 return Err(ElaborationError::InvalidOperands(
                     "map range length does not match its sequence type",
@@ -735,9 +798,9 @@ impl<'a> ConcreteLeafVisitor<'a> {
     fn variable(
         &self,
         variable: &Variable,
-        ty: Type,
+        ty: &TypeExpr<()>,
     ) -> Result<Option<Expr<TypedMetadata>>, ElaborationError> {
-        let Type::Matrix(rows, cols) = ty else {
+        let Some((rows, cols)) = matrix_dimensions(self.environment, ty)? else {
             return Ok(None);
         };
         let rows = usize::try_from(rows).map_err(|_| ElaborationError::DimensionOverflow)?;
@@ -808,7 +871,7 @@ impl VisitMut<TypedMetadata> for ConcreteLeafVisitor<'_> {
                     )?)
                 }
                 RawExpr::Variable(variable) => match node.meta.get_type() {
-                    Ok(ty) => self.variable(variable, ty.concretize(self.environment)?)?,
+                    Ok(ty) => self.variable(variable, &ty)?,
                     Err(_) => None,
                 },
                 _ => None,
@@ -865,8 +928,8 @@ impl<'a> MatrixVisitor<'a> {
     }
 
     fn value(&self, expression: &Expr<TypedMetadata>) -> Result<Value, ElaborationError> {
-        match concrete_type(self.environment, expression)? {
-            Type::Matrix(_, _) => {
+        match symbolic_type(expression)? {
+            TypeExpr::Matrix(_, _) => {
                 let RawExpr::Matrix(matrix) = &expression.raw else {
                     return Err(ElaborationError::Unsupported(
                         "matrix expression remains unmaterialized",
@@ -874,7 +937,9 @@ impl<'a> MatrixVisitor<'a> {
                 };
                 Ok(Value::Matrix(clone_matrix(matrix)))
             }
-            Type::Nat | Type::Int | Type::Real => Ok(Value::Scalar(deep_clone(expression))),
+            TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {
+                Ok(Value::Scalar(deep_clone(expression)))
+            }
             _ => Err(ElaborationError::InvalidOperands(
                 "operation requires numeric operands",
             )),
@@ -885,10 +950,8 @@ impl<'a> MatrixVisitor<'a> {
         &self,
         expression: &Expr<TypedMetadata>,
     ) -> Result<bool, ElaborationError> {
-        Ok(matches!(
-            concrete_type(self.environment, expression)?,
-            Type::Matrix(_, _)
-        ) && !matches!(expression.raw, RawExpr::Matrix(_)))
+        Ok(matches!(symbolic_type(expression)?, TypeExpr::Matrix(_, _))
+            && !matches!(expression.raw, RawExpr::Matrix(_)))
     }
 
     fn node_has_pending_matrix_operand(
@@ -1163,12 +1226,9 @@ impl<'a> MatrixVisitor<'a> {
             }));
         }
         if !matches!(op, Finop::Plus | Finop::Times)
-            || expressions.iter().all(|expression| {
-                !matches!(
-                    concrete_type(self.environment, expression),
-                    Ok(Type::Matrix(_, _))
-                )
-            })
+            || expressions
+                .iter()
+                .all(|expression| !matches!(symbolic_type(expression), Ok(TypeExpr::Matrix(_, _))))
         {
             return Ok(None);
         }
@@ -1227,10 +1287,10 @@ impl<'a> MatrixVisitor<'a> {
         }
         if exponent == 0 {
             return match base_value {
-                Value::Scalar(base) => Ok(match concrete_type(self.environment, &base)? {
-                    Type::Nat => natural(1),
-                    Type::Int => typed(TypeExpr::Int, RawExpr::NatLiteral(1)),
-                    Type::Real => real(1),
+                Value::Scalar(base) => Ok(match symbolic_type(&base)? {
+                    TypeExpr::Nat => natural(1),
+                    TypeExpr::Int => typed(TypeExpr::Int, RawExpr::NatLiteral(1)),
+                    TypeExpr::Real => real(1),
                     _ => {
                         return Err(ElaborationError::InvalidOperands(
                             "zero power requires a numeric scalar base",
@@ -1257,33 +1317,41 @@ impl<'a> MatrixVisitor<'a> {
                 "cast target must be a type expression",
             ));
         };
-        let target = target.concretize(self.environment)?;
+        let target: TypeExpr<()> = target.with_default_metadata();
         match (target, self.value(value)?) {
-            (Type::Real, Value::Scalar(value))
-                if matches!(concrete_type(self.environment, &value)?, Type::Real) =>
+            (TypeExpr::Real, Value::Scalar(value))
+                if matches!(symbolic_type(&value)?, TypeExpr::Real) =>
             {
                 Ok(value)
             }
-            (Type::Real, Value::Matrix(mut matrix))
+            (TypeExpr::Real, Value::Matrix(mut matrix))
                 if matrix.rows == 1 && matrix.cols == 1 && matrix.elements.len() == 1 =>
             {
                 Ok(matrix.elements.pop().unwrap())
             }
-            (Type::Real, _) => Err(ElaborationError::InvalidOperands(
+            (TypeExpr::Real, _) => Err(ElaborationError::InvalidOperands(
                 "a cast to real requires a real scalar or real-valued 1x1 matrix",
             )),
-            (Type::Matrix(1, 1), Value::Scalar(value))
-                if matches!(concrete_type(self.environment, &value)?, Type::Real) =>
+            (TypeExpr::Matrix(rows, cols), Value::Scalar(value))
+                if matches!(symbolic_type(&value)?, TypeExpr::Real) =>
             {
-                matrix_expression(1, 1, vec![value])
+                let rows = self.environment.evaluate_natural(&rows)?;
+                let cols = self.environment.evaluate_natural(&cols)?;
+                if (rows, cols) == (1, 1) {
+                    matrix_expression(1, 1, vec![value])
+                } else {
+                    Err(ElaborationError::Shape(
+                        "a real scalar can only be cast to a 1x1 matrix",
+                    ))
+                }
             }
-            (Type::Matrix(_, _), Value::Scalar(_)) => Err(ElaborationError::Shape(
-                "a real scalar can only be cast to a 1x1 matrix",
+            (TypeExpr::Matrix(_, _), Value::Scalar(_)) => Err(ElaborationError::InvalidOperands(
+                "a cast to a matrix requires a real scalar",
             )),
-            (Type::Bool | Type::Nat | Type::Int | Type::Seq(_), _) => Err(
+            (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => Err(
                 ElaborationError::Unsupported("only real and 1x1 matrix casts are supported"),
             ),
-            (Type::Matrix(_, _), _) => Err(ElaborationError::InvalidOperands(
+            (TypeExpr::Matrix(_, _), _) => Err(ElaborationError::InvalidOperands(
                 "a cast to a matrix requires a real scalar",
             )),
         }
@@ -1332,9 +1400,10 @@ impl<'a> MatrixVisitor<'a> {
         let mut clauses = Vec::with_capacity(chain.assertions.len());
         let mut changed = false;
         for (op, current) in &chain.assertions {
-            let left_type = concrete_type(self.environment, previous)?;
-            let right_type = concrete_type(self.environment, current)?;
-            if !matches!(left_type, Type::Matrix(_, _)) && !matches!(right_type, Type::Matrix(_, _))
+            let left_type = symbolic_type(previous)?;
+            let right_type = symbolic_type(current)?;
+            if !matches!(left_type, TypeExpr::Matrix(_, _))
+                && !matches!(right_type, TypeExpr::Matrix(_, _))
             {
                 clauses.push(comparison(deep_clone(previous), *op, deep_clone(current)));
                 previous = current;
@@ -1414,7 +1483,7 @@ impl VisitMut<TypedMetadata> for MatrixVisitor<'_> {
             match &node.raw {
                 RawExpr::Matrix(matrix) => self.flatten_matrix(matrix),
                 RawExpr::Monop(Monop::Neg, inner)
-                    if matches!(concrete_type(self.environment, inner)?, Type::Matrix(_, _)) =>
+                    if matches!(symbolic_type(inner)?, TypeExpr::Matrix(_, _)) =>
                 {
                     let Value::Matrix(matrix) = self.value(inner)? else {
                         unreachable!()
@@ -1563,6 +1632,7 @@ fn substitute_index(
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
+        RawExpr::BoundNatural(depth) => RawExpr::BoundNatural(*depth),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
             dimension: *dimension,
         },
@@ -1620,7 +1690,18 @@ fn substitute_index(
             },
         ),
     };
-    Expr::with_metadata(expression.meta.clone(), raw)
+    let metadata = expression
+        .meta
+        .get_type()
+        .map(|ty| {
+            TypedMetadata::resolved(substitute_type_variable(
+                &ty,
+                variable,
+                &Expr::new(RawExpr::NatLiteral(value)),
+            ))
+        })
+        .unwrap_or_else(|_| expression.meta.clone());
+    Expr::with_metadata(metadata, raw)
 }
 
 fn substitute_type(
@@ -1646,7 +1727,7 @@ fn substitute_type(
 
 fn validate_forest(
     expression: &Expr<TypedMetadata>,
-    side_conditions: &[SideCondition<TypedMetadata, Type>],
+    side_conditions: &[SideCondition<TypedMetadata>],
 ) -> Result<(), ElaborationError> {
     let mut validator = CoreValidator { error: None };
     validator.visit_expr(expression);
@@ -1676,11 +1757,22 @@ impl Visit<TypedMetadata> for CoreValidator {
         if self.error.is_some() {
             return;
         }
+        if node
+            .meta
+            .get_type()
+            .is_ok_and(|ty| contains_unbound_natural(&ty))
+        {
+            self.error = Some(ElaborationError::Unsupported(
+                "unbound natural type index remains after concrete elaboration",
+            ));
+            return;
+        }
         self.error = match &node.raw {
             RawExpr::Hole => Some(ElaborationError::Unsupported(
                 "holes are not supported by to_z3",
             )),
             RawExpr::ImplicitDimension(_)
+            | RawExpr::BoundNatural(_)
             | RawExpr::IdentityMatrix { .. }
             | RawExpr::StandardBasis { .. }
             | RawExpr::ZeroMatrix { .. }
@@ -1746,7 +1838,7 @@ mod tests {
 
     use super::{DiagonalVisitor, ElaborationError, elaborate};
     use crate::{
-        Environment, Expr, Finop, Matrix, NaturalParameter, RawExpr, Type, TypeExpr,
+        Environment, Expr, Finop, Matrix, NaturalParameter, RawExpr, TypeExpr,
         enumerable_envspec::infer_symbolic_type_environment,
         from_tex,
         preprocessing::prepare_expression,
@@ -1762,6 +1854,13 @@ mod tests {
 
     fn expression(tex: &str) -> Expr<()> {
         from_tex::expr(&parse(tex).unwrap()).unwrap()
+    }
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
     }
 
     fn prepare(
@@ -1943,13 +2042,13 @@ mod tests {
     }
 
     #[test]
-    fn side_condition_types_and_definitions_are_concretized() {
+    fn side_condition_types_remain_symbolic_while_definitions_are_elaborated() {
         let (prepared, _) = prepare(r"A^{\frac{1}{2}}", &[r"A \in \mathbb{R}^{2 \times 2}"]);
         let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
         let [condition] = elaborated.side_conditions.as_slice() else {
             panic!("expected one square-root side condition")
         };
-        assert_eq!(condition.introduced_type, Type::Matrix(2, 2));
+        assert_eq!(condition.introduced_type, matrix_type(2, 2));
         struct PowerFinder(bool);
         impl Visit<crate::type_resolver::TypedMetadata> for PowerFinder {
             fn visit_raw_expr_binop(
@@ -1967,6 +2066,26 @@ mod tests {
             powers.visit_expr(assertion);
         }
         assert!(!powers.0);
+    }
+
+    #[test]
+    fn triangular_ranges_expand_pointwise_side_conditions_exactly() {
+        let (prepared, _) = prepare(
+            r"\sum_{i=1}^{n}\sum_{j=1}^{i}\left(x + i + j\right)^{\frac{1}{2}}",
+            &[r"x \in \mathbb{R}", r"n \in \mathbb{N}"],
+        );
+        let environment = Environment {
+            natural_assignment: HashMap::from([(
+                NaturalParameter::Variable(crate::Variable::new("n")),
+                2,
+            )]),
+        };
+        let elaborated = elaborate(&environment, &prepared).unwrap();
+        let [condition] = elaborated.side_conditions.as_slice() else {
+            panic!("expected one lifted root condition")
+        };
+        assert!(condition.active_ranges.is_empty());
+        assert_eq!(condition.defining_assertions.len(), 6);
     }
 
     #[test]

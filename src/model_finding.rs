@@ -13,8 +13,8 @@ use z3::{
 };
 
 use crate::{
-    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, NaturalParameter, RawExpr, Type,
-    Variable,
+    Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, NaturalParameter, RawExpr,
+    TypeExpr, Variable,
     enumerable_envspec::{ShapeError, infer_symbolic_type_environment},
     preprocessing::{PreparedExpression, prepare_expression},
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, to_z3},
@@ -445,10 +445,7 @@ pub(crate) fn extract_model(
     variables.sort_by_key(|(variable, _)| *variable);
     variables
         .into_iter()
-        .map(|(variable, ty)| {
-            let ty = ty.concretize(environment).map_err(ToZ3Error::from)?;
-            extract_variable(environment, variable_types, model, variable, &ty)
-        })
+        .map(|(variable, ty)| extract_variable(environment, variable_types, model, variable, ty))
         .collect::<Result<Vec<_>, _>>()
         .map(|assignments| assignments.into_iter().flatten().collect())
 }
@@ -458,16 +455,24 @@ fn extract_variable(
     variable_types: &SymbolicTypeEnvironment,
     model: &Z3Model,
     variable: &crate::Variable,
-    ty: &Type,
+    ty: &TypeExpr<()>,
 ) -> Result<Vec<Expr<()>>, ModelFindingError> {
     match ty {
-        Type::Seq(sequence) => {
-            if matches!(sequence.t, Type::Seq(_)) {
+        TypeExpr::Seq(element, length) => {
+            let RawExpr::Type(element) = &element.raw else {
+                return Err(ModelFindingError::UnsupportedModel(
+                    "sequence element must be a type expression",
+                ));
+            };
+            if matches!(element, TypeExpr::Seq(_, _)) {
                 return Err(ModelFindingError::UnsupportedModel(
                     "nested sequence extraction is not supported",
                 ));
             }
-            (1..=sequence.n)
+            let length = environment
+                .evaluate_natural(length)
+                .map_err(ToZ3Error::from)?;
+            (1..=length)
                 .map(|index| {
                     let left = Expr::new(RawExpr::Binop(
                         Binop::SingleSubscript,
@@ -489,7 +494,7 @@ fn extract_variable(
                 })
                 .collect()
         }
-        Type::Bool => Err(ModelFindingError::UnsupportedModel(
+        TypeExpr::Bool => Err(ModelFindingError::UnsupportedModel(
             "Boolean model extraction is not supported",
         )),
         _ => {
@@ -1049,7 +1054,7 @@ mod tests {
         extract_model, solve_given_environment,
     };
     use crate::{
-        Binop, Cmp, CmpChain, Environment, Expr, RawExpr, SeqType, Type, TypeExpr, Variable,
+        Binop, Cmp, CmpChain, Environment, Expr, RawExpr, TypeExpr, Variable,
         type_resolver::SymbolicTypeEnvironment,
     };
 
@@ -1065,22 +1070,33 @@ mod tests {
     }
 
     fn symbolic_types(
-        entries: impl IntoIterator<Item = (Variable, Type)>,
+        entries: impl IntoIterator<Item = (Variable, TypeExpr<()>)>,
     ) -> SymbolicTypeEnvironment {
         SymbolicTypeEnvironment {
-            types: entries
-                .into_iter()
-                .map(|(variable, ty)| (variable, TypeExpr::from(ty)))
-                .collect(),
+            types: entries.into_iter().collect(),
         }
     }
 
-    fn declaration(variable: Variable, ty: Type) -> Expr<()> {
+    fn declaration(variable: Variable, ty: TypeExpr<()>) -> Expr<()> {
         Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             Expr::new(RawExpr::Variable(variable)),
-            Expr::new(RawExpr::Type(TypeExpr::from(ty))),
+            Expr::new(RawExpr::Type(ty)),
         ))
+    }
+
+    fn matrix_type(rows: u64, cols: u64) -> TypeExpr<()> {
+        TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(rows)),
+            Expr::new(RawExpr::NatLiteral(cols)),
+        )
+    }
+
+    fn sequence_type(element: TypeExpr<()>, length: u64) -> TypeExpr<()> {
+        TypeExpr::Seq(
+            Expr::new(RawExpr::Type(element)),
+            Expr::new(RawExpr::NatLiteral(length)),
+        )
     }
 
     fn assert_stable<T>(input: &str) -> String
@@ -1241,9 +1257,9 @@ Model
     #[test]
     fn programmatic_environment_rendering_is_deterministic() {
         let environment = vec![
-            declaration(Variable::new("x"), Type::Real),
-            declaration(Variable::new("A"), Type::Matrix(2, 3)),
-            declaration(Variable::new("b"), Type::Bool),
+            declaration(Variable::new("x"), TypeExpr::Real),
+            declaration(Variable::new("A"), matrix_type(2, 3)),
+            declaration(Variable::new("b"), TypeExpr::Bool),
             equality("k", 3),
         ];
         let case = TestCase {
@@ -1302,13 +1318,13 @@ Model
         let case = TestCase {
             name: "Canonical".to_owned(),
             sentences: Vec::new(),
-            environment: vec![declaration(Variable::new("A"), Type::Matrix(1, 1))],
+            environment: vec![declaration(Variable::new("A"), matrix_type(1, 1))],
             conclusion: NotSolvedYet,
         };
         let parsed = TestCase::<NotSolvedYet>::parse_str(&case.to_string());
         assert_eq!(
             parsed.environment,
-            vec![declaration(Variable::new("A"), Type::Matrix(1, 1))]
+            vec![declaration(Variable::new("A"), matrix_type(1, 1))]
         );
     }
 
@@ -1318,7 +1334,7 @@ Model
         let error = TestCases(vec![TestCase {
             name: "Boolean".to_owned(),
             sentences: vec![Expr::new(RawExpr::Variable(boolean.clone()))],
-            environment: vec![declaration(boolean, Type::Bool)],
+            environment: vec![declaration(boolean, TypeExpr::Bool)],
             conclusion: NotSolvedYet,
         }])
         .find_models()
@@ -1340,7 +1356,7 @@ Model
         let solver = Solver::new();
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment::default();
-        let types = symbolic_types([(Variable::new("x"), Type::Real)]);
+        let types = symbolic_types([(Variable::new("x"), TypeExpr::Real)]);
         let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
@@ -1370,7 +1386,7 @@ Model
             assert_eq!(solver.check(), SatResult::Sat);
 
             let environment = Environment::default();
-            let types = symbolic_types([(Variable::new("x"), Type::Real)]);
+            let types = symbolic_types([(Variable::new("x"), TypeExpr::Real)]);
             let extracted =
                 extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
             let RawExpr::CmpChain(equality) = &extracted[0].raw else {
@@ -1394,7 +1410,7 @@ Model
         assert_eq!(solver.check(), SatResult::Sat);
 
         let environment = Environment::default();
-        let types = symbolic_types([(Variable::new("x"), Type::Real)]);
+        let types = symbolic_types([(Variable::new("x"), TypeExpr::Real)]);
         assert_eq!(
             extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap_err(),
             ModelFindingError::UnsupportedModel(
@@ -1409,7 +1425,7 @@ Model
         solver.assert(Real::new_const("A_{1,1}").eq(Real::from_int(&Int::from_u64(1))));
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment::default();
-        let types = symbolic_types([(Variable::new("A"), Type::Matrix(1, 2))]);
+        let types = symbolic_types([(Variable::new("A"), matrix_type(1, 2))]);
         let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         let RawExpr::CmpChain(equality) = &extracted[0].raw else {
             panic!("expected an equality")
@@ -1427,13 +1443,7 @@ Model
         solver.assert(Real::new_const("z_{1}").eq(Real::from_int(&Int::from_u64(2))));
         assert_eq!(solver.check(), SatResult::Sat);
         let environment = Environment::default();
-        let types = symbolic_types([(
-            Variable::new("z"),
-            Type::Seq(Box::new(SeqType {
-                t: Type::Real,
-                n: 2,
-            })),
-        )]);
+        let types = symbolic_types([(Variable::new("z"), sequence_type(TypeExpr::Real, 2))]);
         let extracted = extract_model(&environment, &types, &solver.get_model().unwrap()).unwrap();
         assert_eq!(extracted.len(), 2);
         for (index, equality) in extracted.iter().enumerate() {

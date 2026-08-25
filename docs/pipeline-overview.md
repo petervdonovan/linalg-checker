@@ -71,7 +71,7 @@ the class of user structures being tested.
 ```rust
 pub struct PreparedExpression {
     pub expression: Expr<TypedMetadata>,
-    pub side_conditions: Vec<SideCondition<TypedMetadata, TypeExpr<()>>>,
+    pub side_conditions: Vec<SideCondition<TypedMetadata>>,
     pub context: VisitContext,
 }
 ```
@@ -209,14 +209,15 @@ The elaboration fixpoint runs these fallible mutable visitors:
 4. **Matrix elaboration** flattens block matrices and expands matrix operations,
    casts, powers, transpose, trace, determinant, and matrix comparisons.
 
-The result is an `ElaboratedExpression`. Its side conditions now carry concrete
-`Type` values rather than symbolic `TypeExpr`s.
+The result is an `ElaboratedExpression`. Its metadata and side conditions retain
+their symbolic `TypeExpr`s; concrete dimensions are evaluated only by the
+operation that needs them.
 
 ```mermaid
 flowchart LR
     PREP[PreparedExpression<br/>symbolic TypeExpr metadata] --> E[elaborate]
     ENV[Environment<br/>natural assignment] --> E
-    E --> EE[ElaboratedExpression<br/>concrete side-condition types]
+    E --> EE[ElaboratedExpression<br/>symbolic types preserved]
     EE --> CORE[Scalar-cell core]
 ```
 
@@ -368,8 +369,8 @@ Its Markdown environment remains expression-valued, but the runtime
 ### Shared model extraction
 
 Model extraction iterates over the user inventory in
-`SymbolicTypeEnvironment`, concretizes each symbolic type using the selected
-environment, and evaluates the corresponding lowered Z3 constants. Sequence
+`SymbolicTypeEnvironment`, evaluates dimensions from each symbolic type as
+needed, and evaluates the corresponding lowered Z3 constants. Sequence
 elements are prepared and elaborated through the normal indexed-expression path.
 Synthetic variables and implicit dimensions are deliberately excluded from
 presented models.

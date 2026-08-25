@@ -45,6 +45,9 @@ pub trait Visit<Metadata> {
     fn visit_raw_expr_implicit_dimension(&mut self, dimension: &ImplicitDimension) {
         visit_raw_expr_implicit_dimension(self, dimension);
     }
+    fn visit_raw_expr_bound_natural(&mut self, depth: &usize) {
+        visit_raw_expr_bound_natural(self, depth);
+    }
     fn visit_raw_expr_identity_matrix(&mut self, dimension: &ImplicitDimension) {
         visit_raw_expr_identity_matrix(self, dimension);
     }
@@ -111,6 +114,7 @@ pub fn visit_raw_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &RawExpr<M>) {
     match n {
         RawExpr::Hole => v.visit_raw_expr_hole(),
         RawExpr::ImplicitDimension(dimension) => v.visit_raw_expr_implicit_dimension(dimension),
+        RawExpr::BoundNatural(depth) => v.visit_raw_expr_bound_natural(depth),
         RawExpr::IdentityMatrix { dimension } => v.visit_raw_expr_identity_matrix(dimension),
         RawExpr::StandardBasis { index, dimension } => {
             v.visit_raw_expr_standard_basis(index, dimension)
@@ -171,6 +175,7 @@ pub fn visit_raw_expr_implicit_dimension<V: Visit<M> + ?Sized, M>(
     _dimension: &ImplicitDimension,
 ) {
 }
+pub fn visit_raw_expr_bound_natural<V: Visit<M> + ?Sized, M>(_v: &mut V, _depth: &usize) {}
 pub fn visit_raw_expr_identity_matrix<V: Visit<M> + ?Sized, M>(_v: &mut V, _d: &ImplicitDimension) {
 }
 pub fn visit_raw_expr_standard_basis<V: Visit<M> + ?Sized, M>(
@@ -275,6 +280,7 @@ mod tests {
                 self.0.insert(match node {
                     RawExpr::Hole => "hole",
                     RawExpr::ImplicitDimension(_) => "implicit dimension",
+                    RawExpr::BoundNatural(_) => "bound natural",
                     RawExpr::IdentityMatrix { .. } => "identity",
                     RawExpr::StandardBasis { .. } => "basis",
                     RawExpr::ZeroMatrix { .. } => "zero",
@@ -298,6 +304,7 @@ mod tests {
         let expressions = vec![
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::ImplicitDimension(d)),
+            Expr::new(RawExpr::BoundNatural(0)),
             Expr::new(RawExpr::IdentityMatrix { dimension: d }),
             Expr::new(RawExpr::StandardBasis {
                 index: literal(),
@@ -343,6 +350,6 @@ mod tests {
         for expression in &expressions {
             visitor.visit_expr(expression);
         }
-        assert_eq!(visitor.0.len(), 16);
+        assert_eq!(visitor.0.len(), 17);
     }
 }

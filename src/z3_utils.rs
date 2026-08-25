@@ -21,31 +21,48 @@ pub(crate) fn lower_natural_with<Metadata>(
     expression: &Expr<Metadata>,
     resolve: &mut impl FnMut(&NaturalParameter) -> Result<Int, NaturalEvaluationError>,
 ) -> Result<Int, NaturalEvaluationError> {
+    lower_natural_scoped_with(expression, resolve, &mut |depth| {
+        Err(NaturalEvaluationError::UnboundNatural(depth))
+    })
+}
+
+pub(crate) fn lower_natural_scoped_with<Metadata>(
+    expression: &Expr<Metadata>,
+    resolve: &mut impl FnMut(&NaturalParameter) -> Result<Int, NaturalEvaluationError>,
+    resolve_bound: &mut impl FnMut(usize) -> Result<Int, NaturalEvaluationError>,
+) -> Result<Int, NaturalEvaluationError> {
     match &expression.raw {
         RawExpr::NatLiteral(value) => Ok(Int::from_u64(*value)),
         RawExpr::Variable(variable) => resolve(&NaturalParameter::Variable(variable.clone())),
         RawExpr::ImplicitDimension(dimension) => {
             resolve(&NaturalParameter::ImplicitDimension(*dimension))
         }
+        RawExpr::BoundNatural(depth) => resolve_bound(*depth),
         RawExpr::Finop(Finop::Plus, terms) => {
             let mut terms = terms.iter();
             let first = terms
                 .next()
                 .ok_or(NaturalEvaluationError::EmptyOperation("addition"))?;
-            terms.try_fold(lower_natural_with(first, resolve)?, |sum, term| {
-                Ok(sum + lower_natural_with(term, resolve)?)
-            })
+            terms.try_fold(
+                lower_natural_scoped_with(first, resolve, resolve_bound)?,
+                |sum, term| Ok(sum + lower_natural_scoped_with(term, resolve, resolve_bound)?),
+            )
         }
         RawExpr::Finop(Finop::Times, factors) => {
             let mut factors = factors.iter();
             let first = factors
                 .next()
                 .ok_or(NaturalEvaluationError::EmptyOperation("multiplication"))?;
-            factors.try_fold(lower_natural_with(first, resolve)?, |product, factor| {
-                Ok(product * lower_natural_with(factor, resolve)?)
-            })
+            factors.try_fold(
+                lower_natural_scoped_with(first, resolve, resolve_bound)?,
+                |product, factor| {
+                    Ok(product * lower_natural_scoped_with(factor, resolve, resolve_bound)?)
+                },
+            )
         }
-        RawExpr::Monop(Monop::Neg, inner) => Ok(-lower_natural_with(inner, resolve)?),
+        RawExpr::Monop(Monop::Neg, inner) => {
+            Ok(-lower_natural_scoped_with(inner, resolve, resolve_bound)?)
+        }
         _ => Err(NaturalEvaluationError::UnsupportedSyntax(
             "unsupported natural expression",
         )),
@@ -63,6 +80,41 @@ pub(crate) fn evaluate_natural<Metadata>(
             .map(Int::from_u64)
             .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
     })?
+    .simplify()
+    .as_u64()
+    .ok_or(NaturalEvaluationError::Overflow)
+}
+
+pub(crate) fn evaluate_natural_with_context<Metadata>(
+    expression: &Expr<Metadata>,
+    assignment: &std::collections::HashMap<NaturalParameter, u64>,
+    locals: &[(crate::Variable, u64)],
+    bound_values: &[u64],
+) -> Result<u64, NaturalEvaluationError> {
+    lower_natural_scoped_with(
+        expression,
+        &mut |parameter| {
+            if let NaturalParameter::Variable(variable) = parameter
+                && let Some((_, value)) = locals.iter().rev().find(|(found, _)| found == variable)
+            {
+                return Ok(Int::from_u64(*value));
+            }
+            assignment
+                .get(parameter)
+                .copied()
+                .map(Int::from_u64)
+                .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
+        },
+        &mut |depth| {
+            bound_values
+                .iter()
+                .rev()
+                .nth(depth)
+                .copied()
+                .map(Int::from_u64)
+                .ok_or(NaturalEvaluationError::UnboundNatural(depth))
+        },
+    )?
     .simplify()
     .as_u64()
     .ok_or(NaturalEvaluationError::Overflow)
@@ -110,6 +162,7 @@ fn classify_node<Metadata>(
             PresburgerClassification::Valid
         }
         RawExpr::ImplicitDimension(_) => PresburgerClassification::NotNatural,
+        RawExpr::BoundNatural(_) => PresburgerClassification::NotNatural,
         RawExpr::Variable(variable)
             if natural_symbols.contains_key(&NaturalParameter::Variable(variable.clone())) =>
         {

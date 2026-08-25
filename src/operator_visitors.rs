@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::{
     Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
+    type_expr::abstract_type_variable,
     type_resolver::{MaybeTyped, TypeError},
-    visit::Visit,
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
 
@@ -223,7 +223,6 @@ where
         ty: TypeExpr<()>,
         existence: RootExistence,
     ) -> Result<Expr<Metadata>, TypeError> {
-        validate_lifted_ranges(&ty, &context.active_ranges)?;
         let mapped_source = wrap_in_maps(source, &context.active_ranges);
         let introduced_variable = Variable::new(mapped_source.as_latex_verbose().to_string());
         let introduced_type = lift_type(ty.clone(), &context.active_ranges);
@@ -268,68 +267,32 @@ where
     }
 }
 
-fn validate_lifted_ranges(ty: &TypeExpr<()>, ranges: &[crate::Range<()>]) -> Result<(), TypeError> {
-    for range in ranges {
-        if type_contains_variable(ty, &range.index_variable) {
-            return Err(TypeError::Invalid(
-                "binder-dependent generated value types are unsupported",
-            ));
-        }
-    }
-    for (index, range) in ranges.iter().enumerate() {
-        for outer in &ranges[..index] {
-            if expression_contains_variable(&range.from, &outer.index_variable)
-                || expression_contains_variable(&range.to, &outer.index_variable)
-            {
-                return Err(TypeError::Invalid(
-                    "ragged generated sequences are unsupported",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn type_contains_variable(ty: &TypeExpr<()>, variable: &Variable) -> bool {
-    match ty {
-        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => false,
-        TypeExpr::Matrix(rows, cols) => {
-            expression_contains_variable(rows, variable)
-                || expression_contains_variable(cols, variable)
-        }
-        TypeExpr::Seq(element, length) => {
-            expression_contains_variable(element, variable)
-                || expression_contains_variable(length, variable)
-        }
-    }
-}
-
-fn expression_contains_variable<Metadata>(
-    expression: &Expr<Metadata>,
-    variable: &Variable,
-) -> bool {
-    struct Finder<'a> {
-        variable: &'a Variable,
-        found: bool,
-    }
-    impl<Metadata> Visit<Metadata> for Finder<'_> {
-        fn visit_variable(&mut self, variable: &Variable) {
-            self.found |= variable == self.variable;
-        }
-    }
-    let mut finder = Finder {
-        variable,
-        found: false,
-    };
-    finder.visit_expr(expression);
-    finder.found
-}
-
 fn lift_type(mut ty: TypeExpr<()>, ranges: &[crate::Range<()>]) -> TypeExpr<()> {
     for range in ranges.iter().rev() {
-        ty = TypeExpr::Seq(Expr::new(RawExpr::Type(ty)), range_length(range));
+        ty = TypeExpr::Seq(
+            Expr::new(RawExpr::Type(abstract_type_variable(
+                &ty,
+                &range.index_variable,
+                &bound_source_position(range),
+            ))),
+            range_length(range),
+        );
     }
     ty
+}
+
+fn bound_source_position(range: &crate::Range<()>) -> Expr<()> {
+    Expr::new(RawExpr::Finop(
+        Finop::Plus,
+        vec![
+            range.from.with_default_metadata(),
+            Expr::new(RawExpr::BoundNatural(0)),
+            Expr::new(RawExpr::Monop(
+                Monop::Neg,
+                Expr::new(RawExpr::NatLiteral(1)),
+            )),
+        ],
+    ))
 }
 
 fn indexed_introduced_variable<Metadata: Default>(

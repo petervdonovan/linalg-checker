@@ -17,10 +17,10 @@ pub enum Existence<Metadata> {
 }
 
 #[derive(Clone, Debug)]
-pub struct SideCondition<Metadata, IntroducedType = TypeExpr<()>> {
+pub struct SideCondition<Metadata> {
     pub introduced_variable: Variable,
     pub display_name: String,
-    pub introduced_type: IntroducedType,
+    pub introduced_type: TypeExpr<()>,
     /// Lexical sequence ranges under which these assertion templates hold.
     pub active_ranges: Vec<Range<()>>,
     pub defining_assertions: Vec<Expr<Metadata>>,
@@ -138,6 +138,10 @@ pub trait VisitMut<Metadata> {
         dimension: &mut ImplicitDimension,
     ) {
         visit_raw_expr_implicit_dimension_mut(self, context, dimension);
+    }
+
+    fn visit_raw_expr_bound_natural_mut(&mut self, context: VisitContext, depth: &mut usize) {
+        visit_raw_expr_bound_natural_mut(self, context, depth);
     }
 
     fn visit_raw_expr_identity_matrix_mut(
@@ -298,6 +302,7 @@ pub fn visit_raw_expr_mut<V, Metadata>(
         RawExpr::ImplicitDimension(dimension) => {
             visitor.visit_raw_expr_implicit_dimension_mut(context, dimension)
         }
+        RawExpr::BoundNatural(depth) => visitor.visit_raw_expr_bound_natural_mut(context, depth),
         RawExpr::IdentityMatrix { dimension } => {
             visitor.visit_raw_expr_identity_matrix_mut(context, dimension)
         }
@@ -435,6 +440,15 @@ pub fn visit_raw_expr_implicit_dimension_mut<V, Metadata>(
     _visitor: &mut V,
     _context: VisitContext,
     _dimension: &mut ImplicitDimension,
+) where
+    V: VisitMut<Metadata> + ?Sized,
+{
+}
+
+pub fn visit_raw_expr_bound_natural_mut<V, Metadata>(
+    _visitor: &mut V,
+    _context: VisitContext,
+    _depth: &mut usize,
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
@@ -814,6 +828,7 @@ mod tests {
                 self.variants.insert(match node {
                     RawExpr::Hole => "hole",
                     RawExpr::ImplicitDimension(_) => "implicit dimension",
+                    RawExpr::BoundNatural(_) => "bound natural",
                     RawExpr::IdentityMatrix { .. } => "identity",
                     RawExpr::StandardBasis { .. } => "basis",
                     RawExpr::ZeroMatrix { .. } => "zero",
@@ -837,6 +852,7 @@ mod tests {
         let mut expressions = vec![
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::ImplicitDimension(dimension)),
+            Expr::new(RawExpr::BoundNatural(0)),
             Expr::new(RawExpr::IdentityMatrix { dimension }),
             Expr::new(RawExpr::StandardBasis {
                 index: Expr::new(RawExpr::NatLiteral(1)),
@@ -896,6 +912,6 @@ mod tests {
         for expression in &mut expressions {
             visitor.visit_expr_mut(POSITIVE, expression);
         }
-        assert_eq!(visitor.variants.len(), 16);
+        assert_eq!(visitor.variants.len(), 17);
     }
 }

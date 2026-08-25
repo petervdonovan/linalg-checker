@@ -262,18 +262,56 @@ pub(super) fn concrete_declarations(
         .types
         .iter()
         .map(|(variable, ty)| {
-            let ty = ty
-                .concretize(environment)
-                .map_err(crate::to_z3::ToZ3Error::from)?;
+            let ty = specialize_type(ty, environment)?;
             Ok(Expr::new(RawExpr::Binop(
                 Binop::ElementOf,
                 Expr::new(RawExpr::Variable(variable.clone())),
-                Expr::new(RawExpr::Type(TypeExpr::from(ty))),
+                Expr::new(RawExpr::Type(ty)),
             )))
         })
         .collect::<Result<Vec<_>, ModelFindingError>>()?;
     declarations.sort();
     Ok(declarations)
+}
+
+fn specialize_type(
+    ty: &TypeExpr<()>,
+    environment: &Environment,
+) -> Result<TypeExpr<()>, ModelFindingError> {
+    Ok(match ty {
+        TypeExpr::Bool => TypeExpr::Bool,
+        TypeExpr::Nat => TypeExpr::Nat,
+        TypeExpr::Int => TypeExpr::Int,
+        TypeExpr::Real => TypeExpr::Real,
+        TypeExpr::Matrix(rows, cols) => TypeExpr::Matrix(
+            Expr::new(RawExpr::NatLiteral(
+                environment
+                    .evaluate_natural(rows)
+                    .map_err(crate::to_z3::ToZ3Error::from)?,
+            )),
+            Expr::new(RawExpr::NatLiteral(
+                environment
+                    .evaluate_natural(cols)
+                    .map_err(crate::to_z3::ToZ3Error::from)?,
+            )),
+        ),
+        TypeExpr::Seq(element, length) => {
+            let RawExpr::Type(element) = &element.raw else {
+                return Err(crate::to_z3::ToZ3Error::InvalidOperands(
+                    "sequence element must be a type expression",
+                )
+                .into());
+            };
+            TypeExpr::Seq(
+                Expr::new(RawExpr::Type(specialize_type(element, environment)?)),
+                Expr::new(RawExpr::NatLiteral(
+                    environment
+                        .evaluate_natural(length)
+                        .map_err(crate::to_z3::ToZ3Error::from)?,
+                )),
+            )
+        }
+    })
 }
 
 pub(super) fn check_step_existence(
