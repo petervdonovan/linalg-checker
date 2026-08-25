@@ -559,10 +559,12 @@ mod tests {
 
     const POSITIVE: VisitContext = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
 
     const NEGATIVE: VisitContext = VisitContext {
         logical_polarity: false,
+        active_ranges: Vec::new(),
     };
 
     fn expression(tex: &str) -> Expr<()> {

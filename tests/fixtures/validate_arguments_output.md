@@ -725,3 +725,50 @@ No counterexamples found up to a maximum dimension of 2.
 
 No premises seemed necessary to show this.
 </details>
+
+# Sum of the first naturals by induction
+
+WTS $2 \sum_{i=1}^{n}i = n \left(n + 1\right)$ by induction on $n$
+
+<details>
+<summary>✅ likely</summary>
+
+The induction base and step were validated up to a maximum dimension of 2.
+</details>
+
+1. WTS $2 \sum_{i=1}^{1}i = 1 \left(1 + 1\right)$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+2. Given:
+
+   - $2 \sum_{i=1}^{n}i = n \left(n + 1\right)$
+
+   WTS $2 \sum_{i=1}^{n + 1}i = \left(n + 1\right) \left(n + 1 + 1\right)$
+
+   <details>
+   <summary>✅ likely</summary>
+
+   No counterexamples found up to a maximum dimension of 2.
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Diagonal mapped square roots
+
+Given:
+
+- $\lambda \in \operatorname{Seq}_{2}(\mathbb{R})$
+- $\lambda_{1} \ge 0$
+- $\lambda_{2} \ge 0$
+
+WTS $\operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) \operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) = \operatorname{diag}(\lambda)$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>

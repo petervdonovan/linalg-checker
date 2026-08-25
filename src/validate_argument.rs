@@ -33,9 +33,11 @@ use crate::deep_clone::deep_clone;
 
 const POSITIVE: VisitContext = VisitContext {
     logical_polarity: true,
+    active_ranges: Vec::new(),
 };
 const NEGATIVE: VisitContext = VisitContext {
     logical_polarity: false,
+    active_ranges: Vec::new(),
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

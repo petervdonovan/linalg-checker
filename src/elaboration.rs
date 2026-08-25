@@ -79,6 +79,7 @@ pub fn elaborate(
                 introduced_variable: condition.introduced_variable.clone(),
                 display_name: condition.display_name.clone(),
                 introduced_type: condition.introduced_type.concretize(environment)?,
+                active_ranges: condition.active_ranges.clone(),
                 defining_assertions: condition
                     .defining_assertions
                     .iter()
@@ -88,6 +89,7 @@ pub fn elaborate(
             })
         })
         .collect::<Result<Vec<_>, ElaborationError>>()?;
+    expand_pointwise_side_conditions(environment, &mut side_conditions)?;
 
     loop {
         let mut rewrites = 0;
@@ -95,7 +97,7 @@ pub fn elaborate(
         let mut memberships = MembershipVisitor::new(environment);
         visit_forest(
             &mut memberships,
-            prepared.context,
+            prepared.context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -104,7 +106,7 @@ pub fn elaborate(
         let mut diagonals = DiagonalVisitor::new(environment);
         visit_forest(
             &mut diagonals,
-            prepared.context,
+            prepared.context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -113,7 +115,7 @@ pub fn elaborate(
         let mut sequences = SequenceVisitor::new(environment);
         visit_forest(
             &mut sequences,
-            prepared.context,
+            prepared.context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -122,7 +124,7 @@ pub fn elaborate(
         let mut leaves = ConcreteLeafVisitor::new(environment);
         visit_forest(
             &mut leaves,
-            prepared.context,
+            prepared.context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -131,7 +133,7 @@ pub fn elaborate(
         let mut matrices = MatrixVisitor::new(environment);
         visit_forest(
             &mut matrices,
-            prepared.context,
+            prepared.context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -146,7 +148,7 @@ pub fn elaborate(
     Ok(ElaboratedExpression {
         expression,
         side_conditions,
-        context: prepared.context,
+        context: prepared.context.clone(),
     })
 }
 
@@ -160,20 +162,104 @@ fn clone_existence(existence: &Existence<TypedMetadata>) -> Existence<TypedMetad
     }
 }
 
+fn expand_pointwise_side_conditions(
+    environment: &Environment,
+    conditions: &mut [SideCondition<TypedMetadata, Type>],
+) -> Result<(), ElaborationError> {
+    for condition in conditions {
+        if condition.active_ranges.is_empty() {
+            continue;
+        }
+        let assignments = concrete_range_assignments(environment, &condition.active_ranges)?;
+        condition.defining_assertions = assignments
+            .iter()
+            .flat_map(|assignment| {
+                condition
+                    .defining_assertions
+                    .iter()
+                    .map(|assertion| substitute_indices(assertion, assignment))
+            })
+            .collect();
+        if let Existence::Checkable(assertions) = &condition.existence {
+            let alternatives = assignments
+                .iter()
+                .map(|assignment| {
+                    boolean_terms(
+                        Finop::And,
+                        assertions
+                            .iter()
+                            .map(|assertion| substitute_indices(assertion, assignment))
+                            .collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            condition.existence =
+                Existence::Checkable(vec![boolean_terms(Finop::Or, alternatives)]);
+        }
+        condition.active_ranges.clear();
+    }
+    Ok(())
+}
+
+fn concrete_range_assignments(
+    environment: &Environment,
+    ranges: &[Range<()>],
+) -> Result<Vec<Vec<(Variable, u64)>>, ElaborationError> {
+    let mut assignments = vec![Vec::new()];
+    for range in ranges {
+        let from = environment.evaluate_natural(&range.from)?;
+        let to = environment.evaluate_natural(&range.to)?;
+        if from > to {
+            return Err(ElaborationError::InvalidOperands(
+                "sequence range must be nonempty",
+            ));
+        }
+        let mut expanded = Vec::new();
+        for assignment in &assignments {
+            for value in from..=to {
+                let mut next = assignment.clone();
+                next.push((range.index_variable.clone(), value));
+                expanded.push(next);
+            }
+        }
+        assignments = expanded;
+    }
+    Ok(assignments)
+}
+
+fn substitute_indices(
+    expression: &Expr<TypedMetadata>,
+    assignment: &[(Variable, u64)],
+) -> Expr<TypedMetadata> {
+    assignment
+        .iter()
+        .fold(deep_clone(expression), |result, (variable, value)| {
+            substitute_index(&result, variable, *value)
+        })
+}
+
+fn boolean_terms(op: Finop, mut expressions: Vec<Expr<TypedMetadata>>) -> Expr<TypedMetadata> {
+    if expressions.len() == 1 {
+        expressions.pop().unwrap()
+    } else {
+        typed(TypeExpr::Bool, RawExpr::Finop(op, expressions))
+    }
+}
+
 fn visit_forest<V: VisitMut<TypedMetadata>, IntroducedType>(
     visitor: &mut V,
     context: VisitContext,
     expression: &mut Expr<TypedMetadata>,
     side_conditions: &mut [SideCondition<TypedMetadata, IntroducedType>],
 ) {
-    visitor.visit_expr_mut(context, expression);
+    visitor.visit_expr_mut(context.clone(), expression);
     for condition in side_conditions {
         for assertion in &mut condition.defining_assertions {
-            visitor.visit_expr_mut(context, assertion);
+            visitor.visit_expr_mut(context.clone(), assertion);
         }
         if let Existence::Checkable(assertions) = &mut condition.existence {
             for assertion in assertions {
-                visitor.visit_expr_mut(context, assertion);
+                visitor.visit_expr_mut(context.clone(), assertion);
             }
         }
     }
@@ -349,11 +435,6 @@ impl<'a> DiagonalVisitor<'a> {
         &self,
         operand: &Expr<TypedMetadata>,
     ) -> Result<Expr<TypedMetadata>, ElaborationError> {
-        if !matches!(operand.raw, RawExpr::Variable(_)) {
-            return Err(ElaborationError::Unsupported(
-                "diag operand must be a sequence variable",
-            ));
-        }
         let Type::Seq(sequence) = concrete_type(self.environment, operand)? else {
             return Err(ElaborationError::InvalidOperands(
                 "diag operand must be a sequence",
@@ -374,21 +455,17 @@ impl<'a> DiagonalVisitor<'a> {
         let element_count = dimension
             .checked_mul(dimension)
             .ok_or(ElaborationError::DimensionOverflow)?;
+        let sequence_elements = materialize_sequence(self.environment, operand)?;
+        if sequence_elements.len() != dimension {
+            return Err(ElaborationError::InvalidOperands(
+                "materialized sequence length does not match its type",
+            ));
+        }
         let mut elements = Vec::with_capacity(element_count);
-        for row in 0..dimension {
+        for (row, diagonal) in sequence_elements.iter().enumerate() {
             for col in 0..dimension {
                 elements.push(if row == col {
-                    typed(
-                        TypeExpr::Real,
-                        RawExpr::Binop(
-                            Binop::SingleSubscript,
-                            deep_clone(operand),
-                            natural(
-                                u64::try_from(row + 1)
-                                    .map_err(|_| ElaborationError::DimensionOverflow)?,
-                            ),
-                        ),
-                    )
+                    deep_clone(diagonal)
                 } else {
                     real(0)
                 });
@@ -468,6 +545,26 @@ impl<'a> SequenceVisitor<'a> {
         ))
     }
 
+    fn materialized_subscript(
+        &self,
+        base: &Expr<TypedMetadata>,
+        index: &Expr<TypedMetadata>,
+    ) -> Result<Expr<TypedMetadata>, ElaborationError> {
+        let elements = materialize_sequence(self.environment, base)?;
+        let index = self.environment.evaluate_natural(index)?;
+        let position = index
+            .checked_sub(1)
+            .ok_or(ElaborationError::InvalidOperands(
+                "sequence index is outside its one-based bounds",
+            ))?;
+        elements
+            .get(usize::try_from(position).map_err(|_| ElaborationError::DimensionOverflow)?)
+            .map(deep_clone)
+            .ok_or(ElaborationError::InvalidOperands(
+                "sequence index is outside its one-based bounds",
+            ))
+    }
+
     fn sequence(
         &self,
         op: SeqOp,
@@ -477,9 +574,9 @@ impl<'a> SequenceVisitor<'a> {
     ) -> Result<Expr<TypedMetadata>, ElaborationError> {
         let from = self.environment.evaluate_natural(&range.from)?;
         let to = self.environment.evaluate_natural(&range.to)?;
-        if from == 0 || from > to {
+        if from > to {
             return Err(ElaborationError::InvalidOperands(
-                "sequence range must be nonempty and one-based",
+                "sequence range must be nonempty",
             ));
         }
         let terms = (from..=to)
@@ -488,6 +585,11 @@ impl<'a> SequenceVisitor<'a> {
         let op = match op {
             SeqOp::Sum => Finop::Plus,
             SeqOp::Prod => Finop::Times,
+            SeqOp::Map => {
+                return Err(ElaborationError::Unsupported(
+                    "standalone map sequence cannot be lowered to a scalar value",
+                ));
+            }
         };
         Ok(if terms.len() == 1 {
             terms.into_iter().next().unwrap()
@@ -500,6 +602,18 @@ impl<'a> SequenceVisitor<'a> {
 impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
         if self.error.is_some() {
+            return;
+        }
+        if let RawExpr::Binop(Binop::SingleSubscript, base, index) = &node.raw
+            && !matches!(base.raw, RawExpr::Variable(_))
+        {
+            match self.materialized_subscript(base, index) {
+                Ok(replacement) => {
+                    *node = replacement;
+                    self.rewrites += 1;
+                }
+                Err(error) => self.error = Some(error),
+            }
             return;
         }
         if let RawExpr::Seqop(op, range, body) = &node.raw {
@@ -535,6 +649,54 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
                 Err(error) => self.error = Some(error),
             }
         }
+    }
+}
+
+fn materialize_sequence(
+    environment: &Environment,
+    expression: &Expr<TypedMetadata>,
+) -> Result<Vec<Expr<TypedMetadata>>, ElaborationError> {
+    let Type::Seq(sequence) = concrete_type(environment, expression)? else {
+        return Err(ElaborationError::InvalidOperands(
+            "expression does not evaluate to a sequence",
+        ));
+    };
+    match &expression.raw {
+        RawExpr::Variable(_) => (1..=sequence.n)
+            .map(|index| {
+                Ok(typed(
+                    TypeExpr::from(sequence.t.clone()),
+                    RawExpr::Binop(
+                        Binop::SingleSubscript,
+                        deep_clone(expression),
+                        natural(index),
+                    ),
+                ))
+            })
+            .collect(),
+        RawExpr::Seqop(SeqOp::Map, range, body) => {
+            let from = environment.evaluate_natural(&range.from)?;
+            let to = environment.evaluate_natural(&range.to)?;
+            if from > to {
+                return Err(ElaborationError::InvalidOperands(
+                    "map range must be nonempty",
+                ));
+            }
+            let elements = (from..=to)
+                .map(|index| substitute_index(body, &range.index_variable, index))
+                .collect::<Vec<_>>();
+            if elements.len()
+                != usize::try_from(sequence.n).map_err(|_| ElaborationError::DimensionOverflow)?
+            {
+                return Err(ElaborationError::InvalidOperands(
+                    "map range length does not match its sequence type",
+                ));
+            }
+            Ok(elements)
+        }
+        _ => Err(ElaborationError::Unsupported(
+            "sequence expression cannot be materialized",
+        )),
     }
 }
 
@@ -1595,6 +1757,7 @@ mod tests {
 
     const POSITIVE: VisitContext = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
 
     fn expression(tex: &str) -> Expr<()> {
@@ -1660,6 +1823,22 @@ mod tests {
     }
 
     #[test]
+    fn sequence_sums_do_not_require_sequence_access() {
+        let (prepared, _) = prepare(r"\sum_{i=0}^{2}i", &[]);
+        let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+        let RawExpr::Finop(Finop::Plus, terms) = &elaborated.expression.raw else {
+            panic!("sequence sum was not expanded")
+        };
+        assert_eq!(
+            terms
+                .iter()
+                .map(|term| term.as_latex().to_string())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+    }
+
+    #[test]
     fn diagonalization_materializes_exactly_the_selected_sequence_elements() {
         for dimension in 1..=3 {
             let assumption = format!(r"z \in \operatorname{{Seq}}_{{{dimension}}}(\mathbb{{R}})");
@@ -1682,6 +1861,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn diagonalization_materializes_mapped_square_roots() {
+        let (prepared, _) = prepare(
+            r"\operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_i^{\frac{1}{2}})",
+            &[r"\lambda \in \operatorname{Seq}_{2}(\mathbb{R})"],
+        );
+        let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+        let RawExpr::Matrix(matrix) = &elaborated.expression.raw else {
+            panic!("mapped diagonal was not elaborated")
+        };
+        assert_eq!((matrix.rows, matrix.cols), (2, 2));
+        assert_eq!(matrix.elements[1].as_latex().to_string(), "0");
+        assert_eq!(matrix.elements[2].as_latex().to_string(), "0");
+        assert_ne!(
+            matrix.elements[0].as_latex().to_string(),
+            matrix.elements[3].as_latex().to_string()
+        );
+        let [condition] = elaborated.side_conditions.as_slice() else {
+            panic!("expected one pointwise root condition")
+        };
+        assert!(condition.active_ranges.is_empty());
+        assert_eq!(condition.defining_assertions.len(), 4);
+        let crate::visit_mut::Existence::Checkable(assertions) = &condition.existence else {
+            panic!("scalar roots should retain a checkable existence condition")
+        };
+        assert_eq!(assertions.len(), 1);
+        assert!(matches!(assertions[0].raw, RawExpr::Finop(Finop::Or, _)));
     }
 
     #[test]
@@ -1712,7 +1920,7 @@ mod tests {
         assert_eq!(
             visitor.diagonal(&nonvariable),
             Err(ElaborationError::Unsupported(
-                "diag operand must be a sequence variable"
+                "sequence expression cannot be materialized"
             ))
         );
         assert_eq!(
@@ -1720,6 +1928,17 @@ mod tests {
             Err(ElaborationError::Empty(
                 "diag operand sequence must be nonempty"
             ))
+        );
+    }
+
+    #[test]
+    fn standalone_map_remains_a_structured_elaboration_error() {
+        let (prepared, _) = prepare(r"\operatorname{map}_{i=0}^{2}i", &[]);
+        assert_eq!(
+            elaborate(&Environment::default(), &prepared).unwrap_err(),
+            ElaborationError::Unsupported(
+                "standalone map sequence cannot be lowered to a scalar value"
+            )
         );
     }
 

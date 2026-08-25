@@ -520,6 +520,7 @@ fn seqop<
     match op {
         SeqOp::Sum => write!(f, r"\sum")?,
         SeqOp::Prod => write!(f, r"\prod")?,
+        SeqOp::Map => write!(f, r"\operatorname{{map}}")?,
     }
     write!(f, "_{{{index_variable}=")?;
     from(f)?;
@@ -835,11 +836,14 @@ mod tests {
             )
         };
 
-        expect!["\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i"].assert_eq(&format!(
-            "{}\n{}",
-            as_latex(sequence(SeqOp::Sum)),
-            as_latex(sequence(SeqOp::Prod)),
-        ));
+        expect!["\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i\n\\operatorname{map}_{i=1}^{3}i"].assert_eq(
+            &format!(
+                "{}\n{}\n{}",
+                as_latex(sequence(SeqOp::Sum)),
+                as_latex(sequence(SeqOp::Prod)),
+                as_latex(sequence(SeqOp::Map)),
+            ),
+        );
     }
 
     #[test]

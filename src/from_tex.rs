@@ -839,15 +839,17 @@ fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, Range<()>)>, F
     else {
         return Ok(None);
     };
-    let ParseNode::Op {
-        name: Some(name), ..
-    } = base.as_ref()
-    else {
-        return Ok(None);
-    };
-    let op = match name.as_str() {
-        r"\sum" => SeqOp::Sum,
-        r"\prod" => SeqOp::Prod,
+    let op = match base.as_ref() {
+        ParseNode::Op {
+            name: Some(name), ..
+        } => match name.as_str() {
+            r"\sum" => SeqOp::Sum,
+            r"\prod" => SeqOp::Prod,
+            _ => return Ok(None),
+        },
+        ParseNode::OperatorName { body, .. } if collect_text(body).as_deref() == Some("map") => {
+            SeqOp::Map
+        }
         _ => return Ok(None),
     };
     let lower = group_body(sub);
@@ -1344,12 +1346,13 @@ mod tests {
     #[test]
     fn parses_sequence_operators() {
         expect![
-            "\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i\n\\sum_{i=1}^{3}\\left(x + y\\right)\n\\sum_{i=1}^{3}\\left(x = y\\right)\n\\sum_{i=1}^{3}\\left(P \\implies Q\\right)\n\\sum_{i=1}^{3}x y"
+            "\\sum_{i=1}^{3}i\n\\prod_{i=1}^{3}i\n\\operatorname{map}_{i=0}^{2}\\left(i + 1\\right)\n\\sum_{i=1}^{3}\\left(x + y\\right)\n\\sum_{i=1}^{3}\\left(x = y\\right)\n\\sum_{i=1}^{3}\\left(P \\implies Q\\right)\n\\sum_{i=1}^{3}x y"
         ]
         .assert_eq(&format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
             round_trip(r"\sum_{i=1}^{3}i").unwrap(),
             round_trip(r"\prod_{i=1}^{3}i").unwrap(),
+            round_trip(r"\operatorname{map}_{i=0}^{2}\left(i + 1\right)").unwrap(),
             round_trip(r"\sum_{i=1}^{3}\left(x + y\right)").unwrap(),
             round_trip(r"\sum_{i=1}^{3}\left(x = y\right)").unwrap(),
             round_trip(r"\sum_{i=1}^{3}\left(P \implies Q\right)").unwrap(),

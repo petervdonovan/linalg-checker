@@ -158,15 +158,16 @@ impl TestCase<NotSolvedYet> {
         let symbolic_types = infer_symbolic_type_environment(&assumptions)?;
         let positive = VisitContext {
             logical_polarity: true,
+            active_ranges: Vec::new(),
         };
         let prepared_assumptions = assumptions
             .iter()
-            .map(|expression| prepare_expression(&symbolic_types, expression, positive))
+            .map(|expression| prepare_expression(&symbolic_types, expression, positive.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(crate::to_z3::ToZ3Error::from)?;
         let prepared_sentences = sentences
             .iter()
-            .map(|expression| prepare_expression(&symbolic_types, expression, positive))
+            .map(|expression| prepare_expression(&symbolic_types, expression, positive.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(crate::to_z3::ToZ3Error::from)?;
         let conclusion = match extract_prepared_environment_iterator(

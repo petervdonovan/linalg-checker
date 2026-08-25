@@ -1,7 +1,8 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
-    Binop, Expr, Finop, LogicChain, Matrix, Monop, RawExpr, SeqOp, Triop, TypeExpr, Variable,
+    Binop, Expr, Finop, LogicChain, Matrix, Monop, Range, RawExpr, SeqOp, Triop, TypeExpr,
+    Variable,
     visit_mut::{VisitContext, VisitMut},
 };
 
@@ -91,6 +92,7 @@ impl TypeRuleOperand {
 }
 
 pub type TypeRule = fn(&[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError>;
+pub type SeqTypeRule = fn(&Range<()>, &TypeRuleOperand) -> Result<TypeExpr<()>, TypeError>;
 
 #[derive(Clone, Default)]
 pub struct OperatorTypeRules {
@@ -98,7 +100,7 @@ pub struct OperatorTypeRules {
     binops: HashMap<Binop, TypeRule>,
     triops: HashMap<Triop, TypeRule>,
     finops: HashMap<Finop, TypeRule>,
-    seqops: HashMap<SeqOp, TypeRule>,
+    seqops: HashMap<SeqOp, SeqTypeRule>,
 }
 
 impl OperatorTypeRules {
@@ -130,7 +132,7 @@ impl OperatorTypeRules {
             "duplicate finite type rule"
         );
     }
-    pub fn register_seqop(&mut self, op: SeqOp, rule: TypeRule) {
+    pub fn register_seqop(&mut self, op: SeqOp, rule: SeqTypeRule) {
         assert!(
             self.seqops.insert(op, rule).is_none(),
             "duplicate sequence type rule"
@@ -167,8 +169,9 @@ impl OperatorTypeRules {
         rules.register_finop(Finop::Exists, bool_result_rule);
         rules.register_finop(Finop::Max, scalar_fold_rule);
         rules.register_finop(Finop::Min, scalar_fold_rule);
-        rules.register_seqop(SeqOp::Sum, first_value_rule);
-        rules.register_seqop(SeqOp::Prod, first_value_rule);
+        rules.register_seqop(SeqOp::Sum, sequence_fold_rule);
+        rules.register_seqop(SeqOp::Prod, sequence_fold_rule);
+        rules.register_seqop(SeqOp::Map, map_rule);
         rules
     }
 
@@ -223,9 +226,10 @@ impl OperatorTypeRules {
     fn infer_seqop(
         &self,
         op: SeqOp,
-        operands: &[TypeRuleOperand],
+        range: &Range<()>,
+        operand: &TypeRuleOperand,
     ) -> Option<Result<TypeExpr<()>, TypeError>> {
-        self.seqops.get(&op).map(|rule| rule(operands))
+        self.seqops.get(&op).map(|rule| rule(range, operand))
     }
 }
 
@@ -243,7 +247,6 @@ impl TypeLookup for SymbolicTypeEnvironment {
 pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
     rules: &'a OperatorTypeRules,
-    lexical_types: HashMap<Variable, TypeExpr<()>>,
     in_dimension_expression: bool,
     error: Option<TypeError>,
 }
@@ -253,7 +256,6 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
         Self {
             types,
             rules,
-            lexical_types: HashMap::new(),
             in_dimension_expression: false,
             error: None,
         }
@@ -270,6 +272,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
 
     fn infer<Metadata: MaybeTyped>(
         &self,
+        context: &VisitContext,
         expression: &Expr<Metadata>,
     ) -> Result<Option<TypeExpr<()>>, TypeError> {
         let ty = match &expression.raw {
@@ -285,10 +288,12 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             RawExpr::ZeroMatrix { rows, cols } => {
                 TypeExpr::Matrix(implicit_dimension(*rows), implicit_dimension(*cols))
             }
-            RawExpr::Variable(variable) => self
-                .lexical_types
-                .get(variable)
-                .cloned()
+            RawExpr::Variable(variable) => context
+                .active_ranges
+                .iter()
+                .rev()
+                .find(|range| range.index_variable == *variable)
+                .map(|_| TypeExpr::Nat)
                 .or_else(|| self.types.type_of(variable))
                 .unwrap_or_else(|| {
                     if self.in_dimension_expression {
@@ -336,8 +341,14 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                 });
             }
             RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => TypeExpr::Bool,
-            RawExpr::Seqop(op, _, body) => {
-                return infer_operator([body], |operands| self.rules.infer_seqop(*op, operands));
+            RawExpr::Seqop(op, range, body) => {
+                let Some(operand) = operand(body) else {
+                    return Ok(None);
+                };
+                return self
+                    .rules
+                    .infer_seqop(*op, &range_without_metadata(range), &operand)
+                    .transpose();
             }
         };
         Ok(Some(ty))
@@ -362,54 +373,57 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 | RawExpr::ZeroMatrix { .. }
                 | RawExpr::Variable(_)
                 | RawExpr::NatLiteral(_) => {}
-                RawExpr::StandardBasis { index, .. } => self.visit_expr_mut(context, index),
-                RawExpr::Type(ty) => self.visit_type_expr_mut(context, ty),
+                RawExpr::StandardBasis { index, .. } => self.visit_expr_mut(context.clone(), index),
+                RawExpr::Type(ty) => self.visit_type_expr_mut(context.clone(), ty),
                 RawExpr::Matrix(matrix) => {
                     for element in &mut matrix.elements {
-                        self.visit_expr_mut(context, element);
+                        self.visit_expr_mut(context.clone(), element);
                     }
                 }
-                RawExpr::Monop(_, inner) => self.visit_expr_mut(context, inner),
+                RawExpr::Monop(_, inner) => self.visit_expr_mut(context.clone(), inner),
                 RawExpr::Binop(Binop::ElementOf, left, right) => {
-                    self.visit_expr_mut(context, left);
-                    self.visit_expr_mut(context, right);
+                    self.visit_expr_mut(context.clone(), left);
+                    self.visit_expr_mut(context.clone(), right);
                 }
                 RawExpr::Binop(Binop::Cast, target, value) => {
                     if matches!(target.raw, RawExpr::Type(_)) {
-                        self.visit_expr_mut(context, target);
+                        self.visit_expr_mut(context.clone(), target);
                     }
-                    self.visit_expr_mut(context, value);
+                    self.visit_expr_mut(context.clone(), value);
                 }
                 RawExpr::Binop(_, left, right) => {
-                    self.visit_expr_mut(context, left);
-                    self.visit_expr_mut(context, right);
+                    self.visit_expr_mut(context.clone(), left);
+                    self.visit_expr_mut(context.clone(), right);
                 }
                 RawExpr::Triop(_, a, b, c) => {
-                    self.visit_expr_mut(context, a);
-                    self.visit_expr_mut(context, b);
-                    self.visit_expr_mut(context, c);
+                    self.visit_expr_mut(context.clone(), a);
+                    self.visit_expr_mut(context.clone(), b);
+                    self.visit_expr_mut(context.clone(), c);
                 }
                 RawExpr::Finop(_, expressions) => {
                     for expression in expressions {
-                        self.visit_expr_mut(context, expression);
+                        self.visit_expr_mut(context.clone(), expression);
                     }
                 }
                 RawExpr::CmpChain(chain) => {
-                    self.visit_expr_mut(context, &mut chain.start);
+                    self.visit_expr_mut(context.clone(), &mut chain.start);
                     for (_, expression) in &mut chain.assertions {
-                        self.visit_expr_mut(context, expression);
+                        self.visit_expr_mut(context.clone(), expression);
                     }
                 }
                 RawExpr::LogicChain(LogicChain { start, assertions }) => {
-                    self.visit_expr_mut(context, start);
+                    self.visit_expr_mut(context.clone(), start);
                     for (_, expression) in assertions {
-                        self.visit_expr_mut(context, expression);
+                        self.visit_expr_mut(context.clone(), expression);
                     }
                 }
                 RawExpr::Seqop(_, range, body) => {
-                    self.visit_expr_mut(context, &mut range.from);
-                    self.visit_expr_mut(context, &mut range.to);
-                    if self.lexical_types.contains_key(&range.index_variable)
+                    self.visit_expr_mut(context.clone(), &mut range.from);
+                    self.visit_expr_mut(context.clone(), &mut range.to);
+                    if context
+                        .active_ranges
+                        .iter()
+                        .any(|active| active.index_variable == range.index_variable)
                         || self.types.type_of(&range.index_variable).is_some()
                     {
                         self.error = Some(TypeError::Invalid(
@@ -417,19 +431,14 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                         ));
                         return;
                     }
-                    let previous = self
-                        .lexical_types
-                        .insert(range.index_variable.clone(), TypeExpr::Nat);
-                    self.visit_expr_mut(context, body);
-                    assert!(previous.is_none());
-                    self.lexical_types.remove(&range.index_variable);
+                    self.visit_expr_mut(context.with_range(range), body);
                 }
             }
         }
         if self.error.is_some() {
             return;
         }
-        match self.infer(node) {
+        match self.infer(&context, node) {
             Ok(Some(ty)) => node.get_mut().unwrap().meta.put_type(ty),
             Ok(None) => {}
             Err(error) => self.error = Some(error),
@@ -442,12 +451,12 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
             TypeExpr::Matrix(rows, cols) => {
                 let previous = self.in_dimension_expression;
                 self.in_dimension_expression = true;
-                self.visit_expr_mut(context, rows);
+                self.visit_expr_mut(context.clone(), rows);
                 self.visit_expr_mut(context, cols);
                 self.in_dimension_expression = previous;
             }
             TypeExpr::Seq(element, size) => {
-                self.visit_expr_mut(context, element);
+                self.visit_expr_mut(context.clone(), element);
                 let previous = self.in_dimension_expression;
                 self.in_dimension_expression = true;
                 self.visit_expr_mut(context, size);
@@ -501,6 +510,56 @@ fn first_value_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeEr
         .first()
         .ok_or(TypeError::Invalid("operator is missing an operand"))?
         .value()
+}
+
+fn sequence_fold_rule(
+    range: &Range<()>,
+    operand: &TypeRuleOperand,
+) -> Result<TypeExpr<()>, TypeError> {
+    uniform_sequence_body_type(range, operand.value()?)
+}
+
+fn map_rule(range: &Range<()>, operand: &TypeRuleOperand) -> Result<TypeExpr<()>, TypeError> {
+    let element_type = uniform_sequence_body_type(range, operand.value()?)?;
+    Ok(TypeExpr::Seq(
+        Expr::new(RawExpr::Type(element_type)),
+        range_length(range),
+    ))
+}
+
+fn uniform_sequence_body_type(
+    range: &Range<()>,
+    ty: TypeExpr<()>,
+) -> Result<TypeExpr<()>, TypeError> {
+    let type_expression = Expr::new(RawExpr::Type(ty.clone()));
+    if crate::formula::free_variables(std::iter::once(&type_expression))
+        .contains(&range.index_variable)
+    {
+        Err(TypeError::Invalid(
+            "sequence operation body type depends on its index",
+        ))
+    } else {
+        Ok(ty)
+    }
+}
+
+fn range_length(range: &Range<()>) -> Expr<()> {
+    Expr::new(RawExpr::Finop(
+        Finop::Plus,
+        vec![
+            range.to.clone(),
+            Expr::new(RawExpr::Monop(Monop::Neg, range.from.clone())),
+            Expr::new(RawExpr::NatLiteral(1)),
+        ],
+    ))
+}
+
+fn range_without_metadata<Metadata>(range: &Range<Metadata>) -> Range<()> {
+    Range {
+        index_variable: range.index_variable.clone(),
+        from: range.from.with_default_metadata(),
+        to: range.to.with_default_metadata(),
+    }
 }
 
 fn numeric_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
@@ -790,6 +849,7 @@ mod tests {
                 &mut expression,
                 VisitContext {
                     logical_polarity: true,
+                    active_ranges: Vec::new(),
                 },
             )
             .unwrap();
@@ -821,6 +881,7 @@ mod tests {
                 &mut expression,
                 VisitContext {
                     logical_polarity: true,
+                    active_ranges: Vec::new(),
                 },
             );
             (result, expression)
@@ -852,6 +913,30 @@ mod tests {
     }
 
     #[test]
+    fn map_wraps_the_body_type_and_uses_the_inclusive_range_length() {
+        let parsed: Expr<()> =
+            from_tex::expr(&parse(r"\operatorname{map}_{i=0}^{2}\left(i + 1\right)").unwrap())
+                .unwrap();
+        let mut expression: Expr<TypedMetadata> = parsed.with_default_metadata();
+        TypeResolver::new(
+            &SymbolicTypeEnvironment::default(),
+            &OperatorTypeRules::core(),
+        )
+        .resolve(&mut expression, VisitContext::positive())
+        .unwrap();
+        let TypeExpr::Seq(element, length) = expression.meta.get_type().unwrap() else {
+            panic!("map should produce a sequence")
+        };
+        assert!(matches!(element.raw, RawExpr::Type(TypeExpr::Nat)));
+        assert_eq!(
+            crate::Environment::default()
+                .evaluate_natural(&length)
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
     fn resolves_symbolic_block_matrix_dimensions() {
         let m = Expr::new(RawExpr::Variable(Variable::new("m")));
         let n = Expr::new(RawExpr::Variable(Variable::new("n")));
@@ -878,6 +963,7 @@ mod tests {
                 &mut expression,
                 VisitContext {
                     logical_polarity: true,
+                    active_ranges: Vec::new(),
                 },
             )
             .unwrap();
@@ -909,6 +995,7 @@ mod tests {
                 &mut expression,
                 VisitContext {
                     logical_polarity: true,
+                    active_ranges: Vec::new(),
                 },
             )
             .unwrap();
@@ -943,6 +1030,7 @@ mod tests {
                 &mut expression,
                 VisitContext {
                     logical_polarity: true,
+                    active_ranges: Vec::new(),
                 },
             )
             .unwrap();
@@ -973,6 +1061,7 @@ mod tests {
                         &mut expression,
                         VisitContext {
                             logical_polarity: true,
+                            active_ranges: Vec::new(),
                         },
                     )
                     .unwrap();

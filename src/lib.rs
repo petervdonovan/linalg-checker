@@ -305,6 +305,7 @@ pub enum Finop {
 pub enum SeqOp {
     Sum,
     Prod,
+    Map,
 }
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Expr<Metadata>(Rc<MetaExpr<Metadata>>);
@@ -421,7 +422,7 @@ pub struct MetaExpr<Metadata> {
     pub meta: Metadata,
     pub raw: RawExpr<Metadata>,
 }
-#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Range<Metadata> {
     pub index_variable: Variable,
     pub from: Expr<Metadata>,

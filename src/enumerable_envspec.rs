@@ -152,17 +152,20 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
     let types = infer_symbolic_type_environment(&assumptions)?;
     let positive = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
     let assumptions = assumptions
         .iter()
         .map(|expression| {
-            prepare_expression(&types, expression, positive).map_err(type_error_to_shape_error)
+            prepare_expression(&types, expression, positive.clone())
+                .map_err(type_error_to_shape_error)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let contextual_expressions = contextual_expressions
         .iter()
         .map(|expression| {
-            prepare_expression(&types, expression, positive).map_err(type_error_to_shape_error)
+            prepare_expression(&types, expression, positive.clone())
+                .map_err(type_error_to_shape_error)
         })
         .collect::<Result<Vec<_>, _>>()?;
     extract_prepared_environment_iterator(
@@ -1113,9 +1116,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         "subscripted expression is not a sequence".to_owned(),
                     ));
                 }
-                if !matches!(index.raw, RawExpr::Variable(_) | RawExpr::NatLiteral(_))
-                    && self.builder.lower_nat(index)?.is_none()
-                {
+                if !matches!(self.builder.type_of(index)?, TypeExpr::Nat) {
                     return Err(ShapeError::InvalidTyping(
                         "sequence index must be natural-number arithmetic".to_owned(),
                     ));
@@ -1313,15 +1314,12 @@ impl<Metadata: MaybeTyped> Visit<Metadata> for SequenceCompatibilityVisitor<'_, 
         };
         let result = (|| {
             self.builder
-                .assert_natural_comparison(&range.from, crate::Cmp::Ge, &natural(1))?;
-            self.builder
                 .assert_natural_comparison(&range.from, crate::Cmp::Le, &range.to)?;
             let lengths =
                 indexed_sequence_lengths(body, &range.index_variable, self.builder.variable_types)?;
-            if lengths.is_empty() {
-                return Err(ShapeError::InvalidTyping(
-                    "sequence operation body does not index a sequence".to_owned(),
-                ));
+            if !lengths.is_empty() {
+                self.builder
+                    .assert_natural_comparison(&range.from, crate::Cmp::Ge, &natural(1))?;
             }
             for length in lengths {
                 self.builder
@@ -1481,17 +1479,6 @@ fn indexed_sequence_lengths<Metadata>(
                 self.lengths.insert(variable.clone(), length.clone());
             }
             visit::visit_raw_expr_binop(self, op, base, subscript);
-        }
-
-        fn visit_raw_expr_seqop(
-            &mut self,
-            _op: &SeqOp,
-            _range: &crate::Range<Metadata>,
-            _body: &Expr<Metadata>,
-        ) {
-            self.error = Some(ShapeError::Unsupported(
-                "nested sequence operations are not supported".to_owned(),
-            ));
         }
     }
 
@@ -1696,10 +1683,11 @@ mod tests {
         let types = SymbolicTypeEnvironment::default();
         let positive = VisitContext {
             logical_polarity: true,
+            active_ranges: Vec::new(),
         };
         let unconstrained = [left.clone(), right.clone()]
             .iter()
-            .map(|expression| prepare_expression(&types, expression, positive).unwrap())
+            .map(|expression| prepare_expression(&types, expression, positive.clone()).unwrap())
             .collect::<Vec<_>>();
         let mut query = dimension_equivalence_query(&types, &[], &unconstrained).unwrap();
         assert_eq!(
@@ -1720,7 +1708,7 @@ mod tests {
                 }))
             })
             .iter()
-            .map(|expression| prepare_expression(&types, expression, positive).unwrap())
+            .map(|expression| prepare_expression(&types, expression, positive.clone()).unwrap())
             .collect::<Vec<_>>();
         let mut query = dimension_equivalence_query(&types, &[], &constrained).unwrap();
         assert_eq!(
@@ -1840,6 +1828,7 @@ mod tests {
                     expression,
                     VisitContext {
                         logical_polarity: true,
+                        active_ranges: Vec::new(),
                     },
                 )
                 .unwrap()
@@ -1853,6 +1842,32 @@ mod tests {
         assert!(environments.iter().all(|environment| {
             matches!(concrete_type(environment, &types, &Variable::new("A")), Type::Matrix(rows, cols) if rows == cols)
         }));
+    }
+
+    #[test]
+    fn pointwise_generated_definitions_preserve_sequence_binders() {
+        let assumptions = vec![
+            expression(r"\lambda \in \operatorname{Seq}_{n}(\mathbb{R})"),
+            expression(r"\sum_{i=1}^{n}\lambda_i^{\frac{1}{2}} \ge 0"),
+        ];
+        let types = infer_symbolic_type_environment(&assumptions).unwrap();
+        let prepared = assumptions
+            .iter()
+            .map(|expression| {
+                prepare_expression(&types, expression, VisitContext::positive()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            environments
+                .iter()
+                .map(|environment| natural(environment, "n"))
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
     }
 
     #[test]
@@ -1871,6 +1886,7 @@ mod tests {
                         expression,
                         VisitContext {
                             logical_polarity: true,
+                            active_ranges: Vec::new(),
                         },
                     )
                     .unwrap()
@@ -2343,7 +2359,7 @@ mod tests {
         ));
         assert!(matches!(
             extract_environment_iterator([expression(r"A \in \mathbb{R}^{-n}")].into_iter(), 10),
-            Err(ShapeError::Unsupported(_))
+            Err(ShapeError::Unsat(_))
         ));
     }
 

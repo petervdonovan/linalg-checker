@@ -271,3 +271,24 @@ Given:
 - $z \in \operatorname{Seq}_{n}(\mathbb{R})$
 
 WTS $\det(\operatorname{diag}(z)) = \prod_{i=1}^{n}z_{i}$
+
+# Sum of the first naturals by induction
+
+WTS $2 \sum_{i=1}^{n}i = n \left(n + 1\right)$ by induction on $n$
+
+1. WTS $2 \sum_{i=1}^{1}i = 1 \left(1 + 1\right)$
+2. Given:
+
+   - $2 \sum_{i=1}^{n}i = n \left(n + 1\right)$
+
+   WTS $2 \sum_{i=1}^{n + 1}i = \left(n + 1\right) \left(n + 1 + 1\right)$
+
+# Diagonal mapped square roots
+
+Given:
+
+- $\lambda \in \operatorname{Seq}_{2}(\mathbb{R})$
+- $\lambda_{1} \ge 0$
+- $\lambda_{2} \ge 0$
+
+WTS $\operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) \operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) = \operatorname{diag}(\lambda)$

@@ -4,6 +4,7 @@ use crate::{
     Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
     type_resolver::{MaybeTyped, TypeError},
+    visit::Visit,
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
 
@@ -27,7 +28,7 @@ where
         if self.error.is_some() {
             return;
         }
-        visit_mut::visit_expr_mut(self, context, node);
+        visit_mut::visit_expr_mut(self, context.clone(), node);
         let Some(operand) = norm2_squared_operand(node) else {
             return;
         };
@@ -87,7 +88,7 @@ where
         if self.error.is_some() {
             return;
         }
-        visit_mut::visit_expr_mut(self, context, node);
+        visit_mut::visit_expr_mut(self, context.clone(), node);
         let RawExpr::Monop(Monop::Norm2, operand) = &node.raw else {
             return;
         };
@@ -98,12 +99,20 @@ where
             return;
         }
         let radicand = norm2_squared(operand);
-        let introduced =
-            self.roots
-                .lower(node, radicand, TypeExpr::Real, RootExistence::Guaranteed);
-        node.get_mut()
-            .expect("2-norm lowering requires uniquely owned expressions")
-            .raw = RawExpr::Variable(introduced);
+        let introduced = match self.roots.lower(
+            &context,
+            node,
+            radicand,
+            TypeExpr::Real,
+            RootExistence::Guaranteed,
+        ) {
+            Ok(introduced) => introduced,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        *node = introduced;
         self.rewrites += 1;
     }
 }
@@ -143,7 +152,7 @@ where
         if self.error.is_some() {
             return;
         }
-        visit_mut::visit_expr_mut(self, context, node);
+        visit_mut::visit_expr_mut(self, context.clone(), node);
         if !is_square_root(node) {
             return;
         }
@@ -166,10 +175,17 @@ where
             TypeExpr::Matrix(_, _) => RootExistence::Assumed,
             _ => unreachable!(),
         };
-        let introduced = self.roots.lower(node, deep_clone(base), ty, existence);
-        node.get_mut()
-            .expect("square-root lowering requires uniquely owned expressions")
-            .raw = RawExpr::Variable(introduced);
+        let introduced = match self
+            .roots
+            .lower(&context, node, deep_clone(base), ty, existence)
+        {
+            Ok(introduced) => introduced,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        *node = introduced;
         self.rewrites += 1;
     }
 }
@@ -201,18 +217,20 @@ where
 {
     fn lower(
         &mut self,
+        context: &VisitContext,
         source: &Expr<Metadata>,
         radicand: Expr<Metadata>,
         ty: TypeExpr<()>,
         existence: RootExistence,
-    ) -> Variable {
-        let introduced_variable = Variable::new(source.as_latex_verbose().to_string());
+    ) -> Result<Expr<Metadata>, TypeError> {
+        validate_lifted_ranges(&ty, &context.active_ranges)?;
+        let mapped_source = wrap_in_maps(source, &context.active_ranges);
+        let introduced_variable = Variable::new(mapped_source.as_latex_verbose().to_string());
+        let introduced_type = lift_type(ty.clone(), &context.active_ranges);
         // These wrappers are new syntax nodes, so the source node's metadata
         // does not describe them. Type resolution fills their default metadata.
-        let introduced = Expr::with_metadata(
-            Metadata::default(),
-            RawExpr::Variable(introduced_variable.clone()),
-        );
+        let introduced =
+            indexed_introduced_variable(introduced_variable.clone(), &context.active_ranges);
         let square = Expr::with_metadata(
             Metadata::default(),
             RawExpr::Finop(
@@ -234,7 +252,8 @@ where
         let condition = SideCondition {
             introduced_variable: introduced_variable.clone(),
             display_name: source.as_latex().to_string(),
-            introduced_type: ty,
+            introduced_type,
+            active_ranges: context.active_ranges.clone(),
             defining_assertions,
             existence,
         };
@@ -245,8 +264,139 @@ where
                 .insert(introduced_variable.clone(), self.side_conditions.len());
             self.side_conditions.push(condition);
         }
-        introduced_variable
+        Ok(introduced)
     }
+}
+
+fn validate_lifted_ranges(ty: &TypeExpr<()>, ranges: &[crate::Range<()>]) -> Result<(), TypeError> {
+    for range in ranges {
+        if type_contains_variable(ty, &range.index_variable) {
+            return Err(TypeError::Invalid(
+                "binder-dependent generated value types are unsupported",
+            ));
+        }
+    }
+    for (index, range) in ranges.iter().enumerate() {
+        for outer in &ranges[..index] {
+            if expression_contains_variable(&range.from, &outer.index_variable)
+                || expression_contains_variable(&range.to, &outer.index_variable)
+            {
+                return Err(TypeError::Invalid(
+                    "ragged generated sequences are unsupported",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn type_contains_variable(ty: &TypeExpr<()>, variable: &Variable) -> bool {
+    match ty {
+        TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => false,
+        TypeExpr::Matrix(rows, cols) => {
+            expression_contains_variable(rows, variable)
+                || expression_contains_variable(cols, variable)
+        }
+        TypeExpr::Seq(element, length) => {
+            expression_contains_variable(element, variable)
+                || expression_contains_variable(length, variable)
+        }
+    }
+}
+
+fn expression_contains_variable<Metadata>(
+    expression: &Expr<Metadata>,
+    variable: &Variable,
+) -> bool {
+    struct Finder<'a> {
+        variable: &'a Variable,
+        found: bool,
+    }
+    impl<Metadata> Visit<Metadata> for Finder<'_> {
+        fn visit_variable(&mut self, variable: &Variable) {
+            self.found |= variable == self.variable;
+        }
+    }
+    let mut finder = Finder {
+        variable,
+        found: false,
+    };
+    finder.visit_expr(expression);
+    finder.found
+}
+
+fn lift_type(mut ty: TypeExpr<()>, ranges: &[crate::Range<()>]) -> TypeExpr<()> {
+    for range in ranges.iter().rev() {
+        ty = TypeExpr::Seq(Expr::new(RawExpr::Type(ty)), range_length(range));
+    }
+    ty
+}
+
+fn indexed_introduced_variable<Metadata: Default>(
+    variable: Variable,
+    ranges: &[crate::Range<()>],
+) -> Expr<Metadata> {
+    let mut expression = Expr::with_metadata(Metadata::default(), RawExpr::Variable(variable));
+    for range in ranges {
+        expression = Expr::with_metadata(
+            Metadata::default(),
+            RawExpr::Binop(Binop::SingleSubscript, expression, range_position(range)),
+        );
+    }
+    expression
+}
+
+fn wrap_in_maps<Metadata>(source: &Expr<Metadata>, ranges: &[crate::Range<()>]) -> Expr<Metadata>
+where
+    Metadata: Clone + Default,
+{
+    let mut expression = deep_clone(source);
+    for range in ranges.iter().rev() {
+        expression = Expr::with_metadata(
+            Metadata::default(),
+            RawExpr::Seqop(
+                crate::SeqOp::Map,
+                crate::Range {
+                    index_variable: range.index_variable.clone(),
+                    from: range.from.with_default_metadata(),
+                    to: range.to.with_default_metadata(),
+                },
+                expression,
+            ),
+        );
+    }
+    expression
+}
+
+fn range_length<Metadata: Default>(range: &crate::Range<()>) -> Expr<Metadata> {
+    plus_with_difference(&range.to, &range.from)
+}
+
+fn range_position<Metadata: Default>(range: &crate::Range<()>) -> Expr<Metadata> {
+    plus_with_difference(
+        &Expr::new(RawExpr::Variable(range.index_variable.clone())),
+        &range.from,
+    )
+}
+
+fn plus_with_difference<Metadata: Default>(
+    positive: &Expr<()>,
+    negative: &Expr<()>,
+) -> Expr<Metadata> {
+    Expr::with_metadata(
+        Metadata::default(),
+        RawExpr::Finop(
+            Finop::Plus,
+            vec![
+                positive.with_default_metadata(),
+                Expr::with_metadata(
+                    Metadata::default(),
+                    RawExpr::Monop(Monop::Neg, negative.with_default_metadata()),
+                ),
+                natural(1),
+            ],
+        ),
+    )
 }
 
 fn norm2_squared_operand<Metadata>(expression: &Expr<Metadata>) -> Option<&Expr<Metadata>> {
@@ -316,6 +466,7 @@ pub(crate) fn assert_compatible<Metadata>(
     current: &SideCondition<Metadata>,
 ) {
     assert_eq!(previous.introduced_type, current.introduced_type);
+    assert_eq!(previous.active_ranges, current.active_ranges);
     assert_eq!(previous.display_name, current.display_name);
     let render = |assertions: &[Expr<Metadata>]| {
         assertions

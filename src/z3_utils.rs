@@ -45,9 +45,7 @@ pub(crate) fn lower_natural_with<Metadata>(
                 Ok(product * lower_natural_with(factor, resolve)?)
             })
         }
-        RawExpr::Monop(Monop::Neg, _) => Err(NaturalEvaluationError::UnsupportedSyntax(
-            "natural expressions do not support negation",
-        )),
+        RawExpr::Monop(Monop::Neg, inner) => Ok(-lower_natural_with(inner, resolve)?),
         _ => Err(NaturalEvaluationError::UnsupportedSyntax(
             "unsupported natural expression",
         )),
@@ -118,12 +116,7 @@ fn classify_node<Metadata>(
             PresburgerClassification::Valid
         }
         RawExpr::Variable(_) => PresburgerClassification::NotNatural,
-        RawExpr::Monop(Monop::Neg, inner) => match classify_node(inner, natural_symbols) {
-            PresburgerClassification::Valid => {
-                PresburgerClassification::Unsupported("natural expressions do not support negation")
-            }
-            classification => classification,
-        },
+        RawExpr::Monop(Monop::Neg, inner) => classify_node(inner, natural_symbols),
         RawExpr::Finop(Finop::Plus, terms) => {
             classify_terms(terms, natural_symbols, "natural addition cannot be empty")
         }
@@ -236,10 +229,10 @@ mod tests {
         ));
 
         let negated = Expr::new(RawExpr::Monop(Monop::Neg, variable("n")));
-        assert!(matches!(
+        assert_eq!(
             classify_presburger(&negated, &symbols),
-            PresburgerClassification::Unsupported(_)
-        ));
+            PresburgerClassification::Valid
+        );
 
         let divided = Expr::new(RawExpr::Binop(
             Binop::Div,

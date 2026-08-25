@@ -9,6 +9,7 @@ use crate::{
 
 const POSITIVE: VisitContext = VisitContext {
     logical_polarity: true,
+    active_ranges: Vec::new(),
 };
 
 pub(crate) fn is_quantifier<Metadata>(expression: &Expr<Metadata>) -> bool {
@@ -143,7 +144,7 @@ pub(crate) fn substitute_free_variable(
             expressions: &mut Vec<Expr<()>>,
         ) {
             for expression in expressions.iter_mut() {
-                self.visit_expr_mut(context, expression);
+                self.visit_expr_mut(context.clone(), expression);
             }
             let mut flattened = Vec::new();
             for expression in expressions.drain(..) {
@@ -163,9 +164,9 @@ pub(crate) fn substitute_free_variable(
             context: VisitContext,
             chain: &mut LogicChain<()>,
         ) {
-            self.visit_expr_mut(context, &mut chain.start);
+            self.visit_expr_mut(context.clone(), &mut chain.start);
             for (_, expression) in &mut chain.assertions {
-                self.visit_expr_mut(context, expression);
+                self.visit_expr_mut(context.clone(), expression);
             }
         }
 
@@ -176,10 +177,10 @@ pub(crate) fn substitute_free_variable(
             range: &mut crate::Range<()>,
             body: &mut Expr<()>,
         ) {
-            self.visit_expr_mut(context, &mut range.from);
-            self.visit_expr_mut(context, &mut range.to);
+            self.visit_expr_mut(context.clone(), &mut range.from);
+            self.visit_expr_mut(context.clone(), &mut range.to);
             if range.index_variable != *self.variable {
-                self.visit_expr_mut(context, body);
+                self.visit_expr_mut(context.with_range(range), body);
             }
         }
     }

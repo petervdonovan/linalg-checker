@@ -21,12 +21,14 @@ pub struct SideCondition<Metadata, IntroducedType = TypeExpr<()>> {
     pub introduced_variable: Variable,
     pub display_name: String,
     pub introduced_type: IntroducedType,
+    /// Lexical sequence ranges under which these assertion templates hold.
+    pub active_ranges: Vec<Range<()>>,
     pub defining_assertions: Vec<Expr<Metadata>>,
     pub existence: Existence<Metadata>,
 }
 
 /// Context inherited while traversing an expression tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisitContext {
     /// Whether the surrounding Boolean expression is monotone increasing in
     /// the truth of the atomic sentence currently being visited.
@@ -35,13 +37,45 @@ pub struct VisitContext {
     /// truth value. Negation and the antecedent of an implication reverse this
     /// polarity.
     pub logical_polarity: bool,
+    /// Sequence-operation ranges whose binders are in scope at the current
+    /// node, ordered from outermost to innermost.
+    pub active_ranges: Vec<Range<()>>,
 }
 
 impl VisitContext {
-    fn flipped(self) -> Self {
+    pub fn positive() -> Self {
         Self {
-            logical_polarity: !self.logical_polarity,
+            logical_polarity: true,
+            active_ranges: Vec::new(),
         }
+    }
+
+    pub fn negative() -> Self {
+        Self {
+            logical_polarity: false,
+            active_ranges: Vec::new(),
+        }
+    }
+
+    fn flipped(mut self) -> Self {
+        self.logical_polarity = !self.logical_polarity;
+        self
+    }
+
+    pub(crate) fn with_range<Metadata>(&self, range: &Range<Metadata>) -> Self {
+        let mut context = self.clone();
+        context.active_ranges.push(Range {
+            index_variable: range.index_variable.clone(),
+            from: range.from.with_default_metadata(),
+            to: range.to.with_default_metadata(),
+        });
+        context
+    }
+
+    pub(crate) fn with_active_ranges(&self, ranges: &[Range<()>]) -> Self {
+        let mut context = self.clone();
+        context.active_ranges.extend_from_slice(ranges);
+        context
     }
 }
 
@@ -239,7 +273,7 @@ pub fn visit_meta_expr_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_metadata_mut(context, &mut node.meta);
+    visitor.visit_metadata_mut(context.clone(), &mut node.meta);
     visitor.visit_raw_expr_mut(context, &mut node.raw);
 }
 
@@ -305,7 +339,7 @@ pub fn visit_type_expr_mut<V, Metadata>(
     match node {
         TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
         TypeExpr::Matrix(rows, cols) | TypeExpr::Seq(rows, cols) => {
-            visitor.visit_expr_mut(context, rows);
+            visitor.visit_expr_mut(context.clone(), rows);
             visitor.visit_expr_mut(context, cols);
         }
     }
@@ -319,7 +353,7 @@ pub fn visit_matrix_mut<V, Metadata>(
     V: VisitMut<Metadata> + ?Sized,
 {
     for element in &mut node.elements {
-        visitor.visit_expr_mut(context, element);
+        visitor.visit_expr_mut(context.clone(), element);
     }
 }
 
@@ -330,8 +364,8 @@ pub fn visit_range_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_variable_mut(context, &mut node.index_variable);
-    visitor.visit_expr_mut(context, &mut node.from);
+    visitor.visit_variable_mut(context.clone(), &mut node.index_variable);
+    visitor.visit_expr_mut(context.clone(), &mut node.from);
     visitor.visit_expr_mut(context, &mut node.to);
 }
 
@@ -342,9 +376,9 @@ pub fn visit_cmp_chain_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_expr_mut(context, &mut node.start);
+    visitor.visit_expr_mut(context.clone(), &mut node.start);
     for (_, expression) in &mut node.assertions {
-        visitor.visit_expr_mut(context, expression);
+        visitor.visit_expr_mut(context.clone(), expression);
     }
 }
 
@@ -378,7 +412,7 @@ pub fn visit_logic_chain_mut<V, Metadata>(
         visitor.visit_expr_mut(context, &mut node.start);
         return;
     };
-    visitor.visit_expr_mut(context.flipped(), &mut node.start);
+    visitor.visit_expr_mut(context.clone().flipped(), &mut node.start);
     visitor.visit_expr_mut(context, consequent);
 }
 
@@ -500,7 +534,7 @@ pub fn visit_raw_expr_binop_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_expr_mut(context, left);
+    visitor.visit_expr_mut(context.clone(), left);
     visitor.visit_expr_mut(context, right);
 }
 
@@ -514,8 +548,8 @@ pub fn visit_raw_expr_triop_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_expr_mut(context, first);
-    visitor.visit_expr_mut(context, second);
+    visitor.visit_expr_mut(context.clone(), first);
+    visitor.visit_expr_mut(context.clone(), second);
     visitor.visit_expr_mut(context, third);
 }
 
@@ -528,7 +562,7 @@ pub fn visit_raw_expr_finop_mut<V, Metadata>(
     V: VisitMut<Metadata> + ?Sized,
 {
     for expression in expressions {
-        visitor.visit_expr_mut(context, expression);
+        visitor.visit_expr_mut(context.clone(), expression);
     }
 }
 
@@ -561,8 +595,8 @@ pub fn visit_raw_expr_seqop_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    visitor.visit_range_mut(context, range);
-    visitor.visit_expr_mut(context, body);
+    visitor.visit_range_mut(context.clone(), range);
+    visitor.visit_expr_mut(context.with_range(range), body);
 }
 
 #[cfg(test)]
@@ -580,6 +614,7 @@ mod tests {
 
     const POSITIVE: VisitContext = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
 
     fn variable(name: &str) -> Expr<()> {
@@ -625,6 +660,7 @@ mod tests {
         visitor.visit_expr_mut(
             VisitContext {
                 logical_polarity: false,
+                active_ranges: Vec::new(),
             },
             &mut expression,
         );
@@ -663,6 +699,35 @@ mod tests {
         let mut visitor = PolarityRecorder { visits: Vec::new() };
         visitor.visit_expr_mut(POSITIVE, &mut expression);
         assert_eq!(visitor.visits, [("P".into(), false), ("Q".into(), true)]);
+    }
+
+    #[test]
+    fn sequence_ranges_are_propagated_through_context() {
+        struct Recorder(Vec<(String, Vec<String>)>);
+        impl VisitMut<()> for Recorder {
+            fn visit_variable_mut(&mut self, context: VisitContext, variable: &mut Variable) {
+                self.0.push((
+                    variable.name.clone(),
+                    context
+                        .active_ranges
+                        .iter()
+                        .map(|range| range.index_variable.name.clone())
+                        .collect(),
+                ));
+            }
+        }
+        let mut expression = Expr::new(RawExpr::Seqop(
+            SeqOp::Sum,
+            Range {
+                index_variable: Variable::new("i"),
+                from: Expr::new(RawExpr::NatLiteral(0)),
+                to: Expr::new(RawExpr::NatLiteral(1)),
+            },
+            variable("x"),
+        ));
+        let mut recorder = Recorder(Vec::new());
+        recorder.visit_expr_mut(VisitContext::positive(), &mut expression);
+        assert!(recorder.0.contains(&("x".to_owned(), vec!["i".to_owned()])));
     }
 
     #[test]

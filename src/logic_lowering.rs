@@ -94,9 +94,10 @@ mod tests {
                 .unwrap();
         let context = VisitContext {
             logical_polarity: true,
+            active_ranges: Vec::new(),
         };
         let mut lowering = LogicLowering::default();
-        lowering.visit_expr_mut(context, &mut expression);
+        lowering.visit_expr_mut(context.clone(), &mut expression);
         assert_eq!(lowering.rewrites(), 1);
 
         assert_eq!(

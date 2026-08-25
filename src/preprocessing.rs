@@ -46,27 +46,37 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
         resolve_forest(
             &extended_types,
             &core_rules,
-            context,
+            context.clone(),
             &mut expression,
             &mut side_conditions,
         )?;
 
         let mut rewrites = 0;
         let mut logic = LogicLowering::default();
-        visit_forest(&mut logic, context, &mut expression, &mut side_conditions);
+        visit_forest(
+            &mut logic,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
         rewrites += logic.rewrites();
 
         let mut norm2_squared = Norm2SquaredVisitor::default();
         visit_forest(
             &mut norm2_squared,
-            context,
+            context.clone(),
             &mut expression,
             &mut side_conditions,
         );
         rewrites += norm2_squared.finish()?;
 
         let mut norm2 = Norm2Visitor::default();
-        visit_forest(&mut norm2, context, &mut expression, &mut side_conditions);
+        visit_forest(
+            &mut norm2,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
         let (norm_rewrites, conditions) = norm2.finish()?;
         rewrites += norm_rewrites;
         merge_side_conditions(&mut side_conditions, conditions);
@@ -74,7 +84,7 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
         let mut square_roots = SquareRootVisitor::default();
         visit_forest(
             &mut square_roots,
-            context,
+            context.clone(),
             &mut expression,
             &mut side_conditions,
         );
@@ -101,14 +111,15 @@ fn visit_forest<V: VisitMut<TypedMetadata>>(
     expression: &mut Expr<TypedMetadata>,
     side_conditions: &mut [SideCondition<TypedMetadata>],
 ) {
-    visitor.visit_expr_mut(context, expression);
+    visitor.visit_expr_mut(context.clone(), expression);
     for condition in side_conditions {
+        let condition_context = context.with_active_ranges(&condition.active_ranges);
         for assertion in &mut condition.defining_assertions {
-            visitor.visit_expr_mut(context, assertion);
+            visitor.visit_expr_mut(condition_context.clone(), assertion);
         }
         if let Existence::Checkable(assertions) = &mut condition.existence {
             for assertion in assertions {
-                visitor.visit_expr_mut(context, assertion);
+                visitor.visit_expr_mut(condition_context.clone(), assertion);
             }
         }
     }
@@ -121,14 +132,15 @@ fn resolve_forest<Lookup: TypeLookup>(
     expression: &mut Expr<TypedMetadata>,
     side_conditions: &mut [SideCondition<TypedMetadata>],
 ) -> Result<(), TypeError> {
-    TypeResolver::new(types, rules).resolve(expression, context)?;
+    TypeResolver::new(types, rules).resolve(expression, context.clone())?;
     for condition in side_conditions {
+        let condition_context = context.with_active_ranges(&condition.active_ranges);
         for assertion in &mut condition.defining_assertions {
-            TypeResolver::new(types, rules).resolve(assertion, context)?;
+            TypeResolver::new(types, rules).resolve(assertion, condition_context.clone())?;
         }
         if let Existence::Checkable(assertions) = &mut condition.existence {
             for assertion in assertions {
-                TypeResolver::new(types, rules).resolve(assertion, context)?;
+                TypeResolver::new(types, rules).resolve(assertion, condition_context.clone())?;
             }
         }
     }
@@ -285,6 +297,7 @@ mod tests {
 
     const POSITIVE: VisitContext = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
 
     fn expression(tex: &str) -> Expr<()> {
@@ -452,6 +465,51 @@ mod tests {
                 .iter()
                 .all(|assertion| assertion.meta.get_type() == Ok(TypeExpr::Bool))
         }));
+    }
+
+    #[test]
+    fn roots_under_sequence_operations_are_lifted_pointwise() {
+        let prepared = prepare(
+            r"\sum_{i=1}^{n}\lambda_i^{\frac{1}{2}}",
+            &[r"\lambda \in \operatorname{Seq}_{n}(\mathbb{R})"],
+        )
+        .unwrap();
+
+        let [condition] = prepared.side_conditions.as_slice() else {
+            panic!("expected one lifted root condition")
+        };
+        assert_eq!(condition.active_ranges.len(), 1);
+        assert!(matches!(condition.introduced_type, TypeExpr::Seq(_, _)));
+        assert!(
+            condition
+                .introduced_variable
+                .name
+                .contains("operatorname{map}")
+        );
+        let RawExpr::Seqop(crate::SeqOp::Sum, _, body) = &prepared.expression.raw else {
+            panic!("expected the original sum")
+        };
+        assert!(matches!(
+            body.raw,
+            RawExpr::Binop(Binop::SingleSubscript, _, _)
+        ));
+    }
+
+    #[test]
+    fn generated_values_under_nested_ranges_use_nested_sequences() {
+        let prepared = prepare(
+            r"\sum_{i=1}^{2}\sum_{j=1}^{3}\left(x + i + j\right)^{\frac{1}{2}}",
+            &[r"x \in \mathbb{R}"],
+        )
+        .unwrap();
+        let [condition] = prepared.side_conditions.as_slice() else {
+            panic!("expected one nested pointwise condition")
+        };
+        assert_eq!(condition.active_ranges.len(), 2);
+        let TypeExpr::Seq(outer, _) = &condition.introduced_type else {
+            panic!("expected an outer sequence")
+        };
+        assert!(matches!(outer.raw, RawExpr::Type(TypeExpr::Seq(_, _))));
     }
 
     #[test]

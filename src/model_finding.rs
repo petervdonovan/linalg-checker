@@ -262,11 +262,12 @@ pub(crate) fn solve_given_environment(
     let symbolic_types = infer_symbolic_type_environment(declarations)?;
     let context = VisitContext {
         logical_polarity: true,
+        active_ranges: Vec::new(),
     };
     let prepared = declarations
         .iter()
         .chain(assertions)
-        .map(|expression| prepare_expression(&symbolic_types, expression, context))
+        .map(|expression| prepare_expression(&symbolic_types, expression, context.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ToZ3Error::from)?;
     let environment = assignment_from_declarations(declarations)?;
@@ -478,6 +479,7 @@ fn extract_variable(
                         &left,
                         VisitContext {
                             logical_polarity: true,
+                            active_ranges: Vec::new(),
                         },
                     )
                     .map_err(ToZ3Error::from)?;
@@ -501,6 +503,7 @@ fn extract_variable(
                         &left,
                         VisitContext {
                             logical_polarity: true,
+                            active_ranges: Vec::new(),
                         },
                     )
                     .map_err(ToZ3Error::from)?,
