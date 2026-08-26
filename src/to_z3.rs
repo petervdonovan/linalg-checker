@@ -19,6 +19,8 @@ use crate::{
 #[derive(Clone)]
 pub enum Z3Object {
     Matrix(Matrix<Z3Object>),
+    /// A host-side sequence whose leaves are Z3 scalar ASTs, not a Z3 sequence sort.
+    Sequence(Vec<Z3Object>),
     Z3(z3::ast::Dynamic),
 }
 
@@ -114,6 +116,9 @@ impl Neg for Z3Object {
             Self::Matrix(_) => Err(ToZ3Error::InvalidOperands(
                 "matrix negation must be elaborated before Z3 lowering",
             )),
+            Self::Sequence(_) => Err(ToZ3Error::InvalidOperands(
+                "sequence values do not support scalar negation",
+            )),
         }
     }
 }
@@ -141,6 +146,9 @@ impl Add for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix addition must be elaborated before Z3 lowering",
             )),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
+                ToZ3Error::InvalidOperands("sequence values do not support scalar addition"),
+            ),
         }
     }
 }
@@ -168,6 +176,9 @@ impl Mul for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix multiplication must be elaborated before Z3 lowering",
             )),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
+                ToZ3Error::InvalidOperands("sequence values do not support scalar multiplication"),
+            ),
         }
     }
 }
@@ -195,6 +206,9 @@ impl Div for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix division must be elaborated before Z3 lowering",
             )),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
+                ToZ3Error::InvalidOperands("sequence values do not support scalar division"),
+            ),
         }
     }
 }
@@ -220,10 +234,50 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ
                 ))
             }
         }
-        (Z3Object::Matrix(_), _) | (_, Z3Object::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
-            "matrix comparison must be elaborated before Z3 lowering",
-        )),
+        (Z3Object::Matrix(left), Z3Object::Matrix(right)) => {
+            if left.rows != right.rows || left.cols != right.cols {
+                return Err(ToZ3Error::Shape(
+                    "matrix comparison requires equal dimensions",
+                ));
+            }
+            compare_aggregate(left.elements, comparison, right.elements)
+        }
+        (Z3Object::Sequence(left), Z3Object::Sequence(right)) => {
+            compare_aggregate(left, comparison, right)
+        }
+        (Z3Object::Matrix(_) | Z3Object::Sequence(_), _)
+        | (_, Z3Object::Matrix(_) | Z3Object::Sequence(_)) => Err(
+            ToZ3Error::InvalidOperands("aggregate comparison requires matching value kinds"),
+        ),
     }
+}
+
+fn compare_aggregate(
+    left: Vec<Z3Object>,
+    comparison: Cmp,
+    right: Vec<Z3Object>,
+) -> Result<Bool, ToZ3Error> {
+    if left.len() != right.len() {
+        return Err(ToZ3Error::Shape(
+            "sequence comparison requires equal lengths",
+        ));
+    }
+    if !matches!(comparison, Cmp::Eq | Cmp::Ne) {
+        return Err(ToZ3Error::InvalidOperands(
+            "aggregate ordering comparisons are unsupported",
+        ));
+    }
+    let equalities = left
+        .into_iter()
+        .zip(right)
+        .map(|(left, right)| compare(left, Cmp::Eq, right))
+        .collect::<Result<Vec<_>, _>>()?;
+    let equality = Bool::and(&equalities);
+    Ok(if matches!(comparison, Cmp::Eq) {
+        equality
+    } else {
+        equality.not()
+    })
 }
 
 fn compare_real(left: Real, comparison: Cmp, right: Real) -> Bool {
@@ -329,6 +383,12 @@ fn lower<Metadata: MaybeTyped + Clone>(
         }
         RawExpr::Finop(Finop::And, expressions) => lower_boolean_finite(γ, expressions, Finop::And),
         RawExpr::Finop(Finop::Or, expressions) => lower_boolean_finite(γ, expressions, Finop::Or),
+        RawExpr::Finop(Finop::SeqLiteral, expressions) => Ok(Z3Object::Sequence(
+            expressions
+                .iter()
+                .map(|expression| lower(γ, expression))
+                .collect::<Result<_, _>>()?,
+        )),
         RawExpr::Matrix(matrix) => lower_flat_matrix(γ, matrix),
         RawExpr::CmpChain(chain) => lower_cmp_chain(γ, chain),
         RawExpr::LogicChain(chain) => lower_logic_chain(γ, chain),
@@ -492,6 +552,16 @@ impl Display for Z3Object {
             Z3Object::Matrix(_matrix) => {
                 todo!("s-expression representing list of rows of fmt'ed z3 objects")
             }
+            Z3Object::Sequence(elements) => {
+                write!(f, "[")?;
+                for (index, element) in elements.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    element.fmt(f)?;
+                }
+                write!(f, "]")
+            }
             Z3Object::Z3(dynamic) => dynamic.fmt(f),
         }
     }
@@ -630,6 +700,7 @@ mod tests {
         match to_z3(environment, expression) {
             Z3Object::Z3(expression) => expression,
             Z3Object::Matrix(_) => panic!("expected a scalar Z3 expression"),
+            Z3Object::Sequence(_) => panic!("expected a scalar Z3 expression"),
         }
     }
 
@@ -637,6 +708,15 @@ mod tests {
         match to_z3(environment, expression) {
             Z3Object::Matrix(matrix) => matrix,
             Z3Object::Z3(_) => panic!("expected a matrix Z3 expression"),
+            Z3Object::Sequence(_) => panic!("expected a matrix Z3 expression"),
+        }
+    }
+
+    fn sequence(environment: Environment, expression: Expr<()>) -> Vec<Z3Object> {
+        match to_z3(environment, expression) {
+            Z3Object::Sequence(elements) => elements,
+            Z3Object::Z3(_) => panic!("expected a sequence Z3 value"),
+            Z3Object::Matrix(_) => panic!("expected a sequence Z3 value"),
         }
     }
 
@@ -775,6 +855,59 @@ mod tests {
             scalar(environment(), expression(r"\sum_{i=2}^{n} z_i")),
             scalar(environment(), expression(r"\prod_{i=2}^{n} z_i")),
         ));
+    }
+
+    #[test]
+    fn test_sequence_literals_lower_to_first_class_values() {
+        let values = sequence(Environment::default(), expression("1, 2, 3"));
+        assert_eq!(
+            values
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+
+        let mapped = sequence(
+            Environment::default(),
+            expression(r"\operatorname{map}_{i=1}^{3}i"),
+        );
+        assert_eq!(
+            mapped
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+
+        let matrices = sequence(
+            Environment::default(),
+            expression(
+                r"\begin{bmatrix}1\end{bmatrix}, \begin{bmatrix}2\end{bmatrix}",
+            ),
+        );
+        assert!(matrices
+            .iter()
+            .all(|value| matches!(value, Z3Object::Matrix(matrix) if matrix.rows == 1 && matrix.cols == 1)));
+    }
+
+    #[test]
+    fn test_sequence_comparisons_are_recursive() {
+        expect!["(and (= 1 1) (= 2 2))\n(not (and (= 1 1) (= 2 3)))"].assert_eq(&format!(
+            "{}\n{}",
+            scalar(Environment::default(), expression("(1, 2) = (1, 2)")),
+            scalar(Environment::default(), expression("(1, 2) \\ne (1, 3)")),
+        ));
+        assert_lowering_error(
+            Environment::default(),
+            expression("(1, 2) < (2, 3)"),
+            ToZ3Error::InvalidOperands("aggregate ordering comparisons are unsupported"),
+        );
+        assert_lowering_error(
+            Environment::default(),
+            expression("(1, 2) = (1, 2, 3)"),
+            ToZ3Error::Shape("sequence comparison requires equal lengths"),
+        );
     }
 
     #[test]

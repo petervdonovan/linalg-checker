@@ -648,9 +648,7 @@ impl<'a> SequenceVisitor<'a> {
             SeqOp::Sum => Finop::Plus,
             SeqOp::Prod => Finop::Times,
             SeqOp::Map => {
-                return Err(ElaborationError::Unsupported(
-                    "standalone map sequence cannot be lowered to a scalar value",
-                ));
+                return Ok(typed(result_type, RawExpr::Finop(Finop::SeqLiteral, terms)));
             }
         };
         Ok(if terms.len() == 1 {
@@ -667,9 +665,9 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
             return;
         }
         if let RawExpr::Binop(Binop::SingleSubscript, base, index) = &node.raw
-            && matches!(base.raw, RawExpr::Seqop(SeqOp::Map, _, _))
+            && matches!(base.raw, RawExpr::Variable(_))
         {
-            match self.materialized_subscript(base, index) {
+            match self.subscript(base, index) {
                 Ok(replacement) => {
                     *node = replacement;
                     self.rewrites += 1;
@@ -696,13 +694,12 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
             return;
         }
         visit_mut::visit_expr_mut(self, context, node);
-        let replacement = match &node.raw {
-            RawExpr::Binop(Binop::SingleSubscript, base, index) => {
-                Some(self.subscript(base, index))
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
+        if let RawExpr::Binop(Binop::SingleSubscript, base, index) = &node.raw {
+            let replacement = if matches!(base.raw, RawExpr::Variable(_)) {
+                self.subscript(base, index)
+            } else {
+                self.materialized_subscript(base, index)
+            };
             match replacement {
                 Ok(replacement) => {
                     *node = replacement;
@@ -710,6 +707,24 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
                 }
                 Err(error) => self.error = Some(error),
             }
+            return;
+        }
+        if matches!(node.raw, RawExpr::Variable(_))
+            && matches!(node.meta.get_type(), Ok(TypeExpr::Seq(_, _)))
+        {
+            match materialize_sequence(self.environment, node).map(|elements| {
+                typed(
+                    node.meta.get_type().unwrap(),
+                    RawExpr::Finop(Finop::SeqLiteral, elements),
+                )
+            }) {
+                Ok(replacement) => {
+                    *node = replacement;
+                    self.rewrites += 1;
+                }
+                Err(error) => self.error = Some(error),
+            }
+            return;
         }
     }
 }
@@ -756,6 +771,16 @@ fn materialize_sequence(
                 ));
             }
             Ok(elements)
+        }
+        RawExpr::Finop(Finop::SeqLiteral, elements) => {
+            if elements.len()
+                != usize::try_from(length).map_err(|_| ElaborationError::DimensionOverflow)?
+            {
+                return Err(ElaborationError::InvalidOperands(
+                    "sequence literal length does not match its type",
+                ));
+            }
+            Ok(elements.iter().map(deep_clone).collect())
         }
         _ => Err(ElaborationError::Unsupported(
             "sequence expression cannot be materialized",
@@ -1790,7 +1815,14 @@ impl Visit<TypedMetadata> for CoreValidator {
                 ElaborationError::Unsupported("binary operator remains after concrete elaboration"),
             ),
             RawExpr::Finop(op, _)
-                if !matches!(op, Finop::Plus | Finop::Times | Finop::And | Finop::Or) =>
+                if !matches!(
+                    op,
+                    Finop::Plus
+                        | Finop::Times
+                        | Finop::And
+                        | Finop::Or
+                        | Finop::SeqLiteral
+                ) =>
             {
                 Some(ElaborationError::Unsupported(
                     "finite operator remains after concrete elaboration",
@@ -2031,13 +2063,42 @@ mod tests {
     }
 
     #[test]
-    fn standalone_map_remains_a_structured_elaboration_error() {
+    fn standalone_map_elaborates_to_a_sequence_literal() {
         let (prepared, _) = prepare(r"\operatorname{map}_{i=0}^{2}i", &[]);
+        let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+        let RawExpr::Finop(Finop::SeqLiteral, elements) = &elaborated.expression.raw else {
+            panic!("standalone map should elaborate to a sequence literal")
+        };
         assert_eq!(
-            elaborate(&Environment::default(), &prepared).unwrap_err(),
-            ElaborationError::Unsupported(
-                "standalone map sequence cannot be lowered to a scalar value"
-            )
+            elements
+                .iter()
+                .map(|element| element.as_latex().to_string())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+    }
+
+    #[test]
+    fn sequence_literals_support_subscripts_and_diagonalization() {
+        let (prepared, _) = prepare(r"\left(1, 2, 3\right)_2", &[]);
+        let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+        assert_eq!(elaborated.expression.as_latex().to_string(), "2");
+
+        let (prepared, _) = prepare(
+            r"\operatorname{diag}(a, b)",
+            &[r"a \in \mathbb{R}", r"b \in \mathbb{R}"],
+        );
+        let elaborated = elaborate(&Environment::default(), &prepared).unwrap();
+        let RawExpr::Matrix(matrix) = &elaborated.expression.raw else {
+            panic!("diag of a sequence literal should elaborate to a matrix")
+        };
+        assert_eq!(
+            matrix
+                .elements
+                .iter()
+                .map(|element| element.as_latex().to_string())
+                .collect::<Vec<_>>(),
+            ["a", "0", "0", "b"]
         );
     }
 

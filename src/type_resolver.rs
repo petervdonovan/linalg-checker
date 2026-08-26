@@ -167,6 +167,7 @@ impl OperatorTypeRules {
         rules.register_finop(Finop::Exists, bool_result_rule);
         rules.register_finop(Finop::Max, scalar_fold_rule);
         rules.register_finop(Finop::Min, scalar_fold_rule);
+        rules.register_finop(Finop::SeqLiteral, sequence_literal_rule);
         rules.register_seqop(SeqOp::Sum, sequence_fold_rule);
         rules.register_seqop(SeqOp::Prod, sequence_fold_rule);
         rules.register_seqop(SeqOp::Map, map_rule);
@@ -246,6 +247,7 @@ pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
     rules: &'a OperatorTypeRules,
     in_dimension_expression: bool,
+    allow_missing_variables: bool,
     error: Option<TypeError>,
 }
 
@@ -255,6 +257,17 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             types,
             rules,
             in_dimension_expression: false,
+            allow_missing_variables: false,
+            error: None,
+        }
+    }
+
+    pub(crate) fn new_partial(types: &'a Lookup, rules: &'a OperatorTypeRules) -> Self {
+        Self {
+            types,
+            rules,
+            in_dimension_expression: false,
+            allow_missing_variables: true,
             error: None,
         }
     }
@@ -286,22 +299,27 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             RawExpr::ZeroMatrix { rows, cols } => {
                 TypeExpr::Matrix(implicit_dimension(*rows), implicit_dimension(*cols))
             }
-            RawExpr::Variable(variable) => context
-                .active_ranges
-                .iter()
-                .rev()
-                .find(|range| range.index_variable == *variable)
-                .map(|_| TypeExpr::Nat)
-                .or_else(|| self.types.type_of(variable))
-                .unwrap_or_else(|| {
-                    if self.in_dimension_expression {
-                        return TypeExpr::Nat;
-                    }
+            RawExpr::Variable(variable) => {
+                let ty = context
+                    .active_ranges
+                    .iter()
+                    .rev()
+                    .find(|range| range.index_variable == *variable)
+                    .map(|_| TypeExpr::Nat)
+                    .or_else(|| self.types.type_of(variable));
+                if let Some(ty) = ty {
+                    ty
+                } else if self.in_dimension_expression {
+                    TypeExpr::Nat
+                } else if self.allow_missing_variables {
+                    return Ok(None);
+                } else {
                     panic!(
                         "variable {} has no symbolically inferred type",
                         variable.z3_name()
                     )
-                }),
+                }
+            }
             RawExpr::NatLiteral(_) => TypeExpr::Nat,
             RawExpr::Matrix(matrix) => return infer_matrix_type(matrix),
             RawExpr::Monop(op, inner) => {
@@ -693,6 +711,52 @@ fn multiplication_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, Typ
 }
 fn scalar_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
     fold_operand_types(operands, scalar_lub)
+}
+
+fn sequence_literal_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    if operands.len() < 2 {
+        return Err(TypeError::Invalid(
+            "sequence literals require at least two expressions",
+        ));
+    }
+    let element_type = operands[0].value()?;
+    for operand in &operands[1..] {
+        if !same_type_structure(&element_type, &operand.value()?)? {
+            return Err(TypeError::Invalid(
+                "sequence literal elements must have the same type",
+            ));
+        }
+    }
+    let length = u64::try_from(operands.len())
+        .map_err(|_| TypeError::Invalid("sequence literal length overflows u64"))?;
+    Ok(TypeExpr::Seq(
+        Expr::new(RawExpr::Type(element_type)),
+        natural(length),
+    ))
+}
+
+pub(crate) fn same_type_structure(
+    left: &TypeExpr<()>,
+    right: &TypeExpr<()>,
+) -> Result<bool, TypeError> {
+    Ok(match (left, right) {
+        (TypeExpr::Bool, TypeExpr::Bool)
+        | (TypeExpr::Nat, TypeExpr::Nat)
+        | (TypeExpr::Int, TypeExpr::Int)
+        | (TypeExpr::Real, TypeExpr::Real)
+        | (TypeExpr::Matrix(_, _), TypeExpr::Matrix(_, _)) => true,
+        (TypeExpr::Seq(left_element, _), TypeExpr::Seq(right_element, _)) => {
+            let (RawExpr::Type(left_element), RawExpr::Type(right_element)) =
+                (&left_element.raw, &right_element.raw)
+            else {
+                return Err(TypeError::Invalid(
+                    "sequence element must be a type expression",
+                ));
+            };
+            same_type_structure(left_element, right_element)?
+        }
+        _ => false,
+    })
 }
 
 fn natural(value: u64) -> Expr<()> {

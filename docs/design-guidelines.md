@@ -65,6 +65,9 @@ Lexically bound natural values belong in type expressions as bound leaves, not
 in the environment assignment. Opening and abstraction must preserve their
 scope rather than recovering it from variable names.
 
+Use newtypes or descriptive field names to distinguish nonce identifiers,
+de Bruijn indices, interpreted natural values, and collection positions.
+
 Hidden nonce dimensions identify occurrences; they are internal implementation
 details and must not leak into user-facing TeX, Markdown, or models.
 

@@ -163,12 +163,12 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr<()>, FromTexError> {
-        let start = self.parse_addition()?;
+        let start = self.parse_sequence_literal()?;
         self.skip_ignorable();
         if self.current_atom_text() == Some(r"\in") {
             self.position += 1;
             self.skip_ignorable();
-            let right = self.parse_addition()?;
+            let right = self.parse_sequence_literal()?;
             self.skip_ignorable();
             if self.current_comparison_operator().is_some()
                 || self.current_atom_text() == Some(r"\in")
@@ -184,7 +184,7 @@ impl<'a> Cursor<'a> {
 
         while let Some(op) = self.current_comparison_operator() {
             self.position += 1;
-            assertions.push((op, self.parse_addition()?));
+            assertions.push((op, self.parse_sequence_literal()?));
         }
 
         if assertions.is_empty() {
@@ -192,6 +192,29 @@ impl<'a> Cursor<'a> {
         } else {
             Ok(Expr::new(RawExpr::CmpChain(CmpChain { start, assertions })))
         }
+    }
+
+    fn parse_sequence_literal(&mut self) -> Result<Expr<()>, FromTexError> {
+        let first = self.parse_addition()?;
+        self.skip_ignorable();
+        if self.current_atom_text() != Some(",") {
+            return Ok(first);
+        }
+
+        let mut elements = vec![first];
+        while self.current_atom_text() == Some(",") {
+            self.position += 1;
+            self.skip_ignorable();
+            if self.position == self.nodes.len() {
+                return Err(FromTexError::Malformed {
+                    index: self.position,
+                    message: "sequence literals require at least two expressions".to_owned(),
+                });
+            }
+            elements.push(self.parse_addition()?);
+            self.skip_ignorable();
+        }
+        Ok(Expr::new(RawExpr::Finop(Finop::SeqLiteral, elements)))
     }
 
     fn parse_addition(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -1379,6 +1402,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_finite_sequence_literals_at_comparison_precedence() {
+        expect![r"1, 2, 3
+s = 1, 2, 3, 4
+\left(1, 2\right) + 3
+\left(1, 2\right), \left(3, 4\right)"]
+        .assert_eq(&format!(
+            "{}\n{}\n{}\n{}",
+            round_trip("1, 2, 3").unwrap(),
+            round_trip("s = 1, 2, 3, 4").unwrap(),
+            round_trip("(1, 2) + 3").unwrap(),
+            round_trip("(1, 2), (3, 4)").unwrap(),
+        ));
+        let parsed = super::expr(&parse("s = 1, 2, 3, 4").unwrap()).unwrap();
+        assert!(matches!(
+            &parsed.raw,
+            RawExpr::CmpChain(chain)
+                if matches!(&chain.assertions[0].1.raw, RawExpr::Finop(Finop::SeqLiteral, elements) if elements.len() == 4)
+        ));
+        assert!(matches!(
+            super::expr(&parse("x,").unwrap()),
+            Err(FromTexError::Malformed { .. })
+        ));
+    }
+
+    #[test]
     fn reports_empty_malformed_and_unsupported_input() {
         assert!(matches!(
             super::expr(&[]),
@@ -1395,12 +1443,6 @@ mod tests {
         assert!(matches!(
             super::expr(&unsupported),
             Err(FromTexError::Unsupported { .. })
-        ));
-
-        let trailing = parse("x, y").unwrap();
-        assert!(matches!(
-            super::expr(&trailing),
-            Err(FromTexError::TrailingNodes { .. })
         ));
 
         let ragged = parse(r"\begin{bmatrix}1 & 2 \\ 3\end{bmatrix}").unwrap();

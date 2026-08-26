@@ -15,8 +15,9 @@ use crate::{
     preprocessing::PreparedExpression,
     preprocessing::prepare_expression,
     type_resolver::{
-        MaybeTyped, SymbolicTypeEnvironment, TypeError, TypedMetadata, add_type, block_dimensions,
-        multiply_type, require_numeric_scalar, scalar_lub,
+        MaybeTyped, OperatorTypeRules, SymbolicTypeEnvironment, TypeError, TypeResolver,
+        TypedMetadata, add_type, block_dimensions, multiply_type, require_numeric_scalar,
+        same_type_structure, scalar_lub,
     },
     visit::{self, Visit},
     visit_mut::VisitContext,
@@ -32,23 +33,31 @@ pub fn infer_symbolic_type_environment(
         .iter()
         .map(variable_z3_name)
         .collect::<BTreeSet<_>>();
-    let mut generated_dimensions = BTreeSet::new();
     let mut types = HashMap::new();
-    for variable in specification.variables {
-        let ty = if specification.dimension_variables.contains(&variable) {
-            TypeExpr::Nat
-        } else if let Some(ty) = specification
-            .explicit_types
-            .get(&variable)
-            .and_then(|types| types.first())
-        {
-            ty.clone()
+    for variable in &specification.variables {
+        let ty = if specification.dimension_variables.contains(variable) {
+            Some(TypeExpr::Nat)
         } else {
+            specification
+            .explicit_types
+            .get(variable)
+            .and_then(|types| types.first())
+            .cloned()
+        };
+        if let Some(ty) = ty {
+            types.insert(variable.clone(), ty);
+        }
+    }
+
+    infer_types_from_equalities(assumptions, &mut types)?;
+
+    let mut generated_dimensions = BTreeSet::new();
+    for variable in specification.variables {
+        if !types.contains_key(&variable) {
             let ty = guessed_type_expr(&variable);
             collect_type_dimension_variables(&ty, &mut generated_dimensions);
-            ty
-        };
-        types.insert(variable, ty);
+            types.insert(variable, ty);
+        }
     }
     if let Some(collision) = generated_dimensions
         .iter()
@@ -60,6 +69,81 @@ pub fn infer_symbolic_type_environment(
         )));
     }
     Ok(SymbolicTypeEnvironment { types })
+}
+
+fn infer_types_from_equalities(
+    assumptions: &[Expr<()>],
+    types: &mut HashMap<Variable, TypeExpr<()>>,
+) -> Result<(), ShapeError> {
+    loop {
+        let lookup = SymbolicTypeEnvironment {
+            types: types.clone(),
+        };
+        let mut typed = assumptions
+            .iter()
+            .map(Expr::with_default_metadata)
+            .collect::<Vec<Expr<TypedMetadata>>>();
+        for expression in &mut typed {
+            TypeResolver::new_partial(&lookup, &OperatorTypeRules::core())
+                .resolve(expression, VisitContext::positive())
+                .map_err(type_error_to_shape_error)?;
+        }
+
+        let mut candidates = Vec::new();
+        for expression in &typed {
+            collect_equality_type_candidates(expression, &mut candidates);
+        }
+        let mut changed = false;
+        for (variable, inferred) in candidates {
+            if let Some(previous) = types.get(&variable) {
+                if !same_type_structure(previous, &inferred).map_err(type_error_to_shape_error)? {
+                    return Err(ShapeError::InvalidTyping(format!(
+                        "equality gives {} incompatible types",
+                        variable_z3_name(&variable)
+                    )));
+                }
+            } else {
+                types.insert(variable, inferred);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+    }
+}
+
+fn collect_equality_type_candidates(
+    expression: &Expr<TypedMetadata>,
+    candidates: &mut Vec<(Variable, TypeExpr<()>)>,
+) {
+    struct Collector<'a>(&'a mut Vec<(Variable, TypeExpr<()>)>);
+    impl Visit<TypedMetadata> for Collector<'_> {
+        fn visit_cmp_chain(&mut self, chain: &CmpChain<TypedMetadata>) {
+            let mut previous = &chain.start;
+            for (comparison, current) in &chain.assertions {
+                if matches!(comparison, crate::Cmp::Eq) {
+                    collect_candidate(previous, current, self.0);
+                    collect_candidate(current, previous, self.0);
+                }
+                previous = current;
+            }
+            visit::visit_cmp_chain(self, chain);
+        }
+    }
+    fn collect_candidate(
+        variable_expression: &Expr<TypedMetadata>,
+        typed_expression: &Expr<TypedMetadata>,
+        candidates: &mut Vec<(Variable, TypeExpr<()>)>,
+    ) {
+        let RawExpr::Variable(variable) = &variable_expression.raw else {
+            return;
+        };
+        if let Ok(ty) = typed_expression.meta.get_type() {
+            candidates.push((variable.clone(), ty));
+        }
+    }
+    Collector(candidates).visit_expr(expression);
 }
 
 fn guessed_type_expr(variable: &Variable) -> TypeExpr<()> {
@@ -1088,6 +1172,35 @@ impl DimensionConstraintBuilder<'_> {
         }
         Ok(())
     }
+
+    fn constrain_identical_types(
+        &mut self,
+        left: &TypeExpr<()>,
+        right: &TypeExpr<()>,
+    ) -> Result<(), ShapeError> {
+        if !same_type_structure(left, right).map_err(type_error_to_shape_error)? {
+            self.assert_typing_failure(&[left, right]);
+            return Ok(());
+        }
+        match (left, right) {
+            (TypeExpr::Matrix(left_rows, left_cols), TypeExpr::Matrix(right_rows, right_cols)) => {
+                self.assert_dimensions_equal(left_rows, right_rows)?;
+                self.assert_dimensions_equal(left_cols, right_cols)
+            }
+            (TypeExpr::Seq(left_element, left_length), TypeExpr::Seq(right_element, right_length)) => {
+                let (RawExpr::Type(left_element), RawExpr::Type(right_element)) =
+                    (&left_element.raw, &right_element.raw)
+                else {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence element must be a type expression".to_owned(),
+                    ));
+                };
+                self.assert_dimensions_equal(left_length, right_length)?;
+                self.constrain_identical_types(left_element, right_element)
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 struct OperatorCompatibilityVisitor<'a, 'builder> {
@@ -1229,6 +1342,23 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ty = self
                         .builder
                         .multiply_types(ty, self.builder.type_of(expression)?)?;
+                }
+            }
+            RawExpr::Finop(Finop::SeqLiteral, expressions) => {
+                let (first, rest) = expressions.split_first().ok_or_else(|| {
+                    ShapeError::InvalidTyping("empty sequence literal".to_owned())
+                })?;
+                if rest.is_empty() {
+                    return Err(ShapeError::InvalidTyping(
+                        "sequence literals require at least two expressions".to_owned(),
+                    ));
+                }
+                let first = self.builder.type_of(first)?;
+                for expression in rest {
+                    self.builder.constrain_identical_types(
+                        &first,
+                        &self.builder.type_of(expression)?,
+                    )?;
                 }
             }
             RawExpr::Finop(Finop::And | Finop::Or, expressions) => {
@@ -2147,6 +2277,26 @@ mod tests {
             concrete_type(&environment, &types, &Variable::new("x")),
             TypeExpr::Real
         );
+    }
+
+    #[test]
+    fn equalities_infer_sequence_variable_types_before_name_guesses() {
+        let types = inferred_types(&[r"s = 1, 2, 3, 4", r"t = s", r"u = t = 1, 2, 3, 4"]);
+        for variable in ["s", "t", "u"] {
+            let TypeExpr::Seq(element, length) = &types.types[&Variable::new(variable)] else {
+                panic!("{variable} should be inferred as a sequence")
+            };
+            assert!(matches!(element.raw, RawExpr::Type(TypeExpr::Nat)));
+            assert!(matches!(length.raw, RawExpr::NatLiteral(4)));
+        }
+
+        assert!(matches!(
+            infer_symbolic_type_environment(&[
+                expression(r"s \in \mathbb{R}"),
+                expression(r"s = 1, 2"),
+            ]),
+            Err(ShapeError::InvalidTyping(_))
+        ));
     }
 
     #[test]

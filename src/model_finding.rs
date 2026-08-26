@@ -472,24 +472,41 @@ fn extract_variable(
             let length = environment
                 .evaluate_natural(length)
                 .map_err(ToZ3Error::from)?;
-            (1..=length)
-                .map(|index| {
+            let sequence: Expr<()> = Expr::new(RawExpr::Variable(variable.clone()));
+            let prepared = prepare_expression(
+                variable_types,
+                &sequence,
+                VisitContext {
+                    logical_polarity: true,
+                    active_ranges: Vec::new(),
+                },
+            )
+            .map_err(ToZ3Error::from)?;
+            let Z3Object::Sequence(values) = to_z3(environment, &prepared)?.expression else {
+                return Err(ModelFindingError::UnsupportedModel(
+                    "sequence variable did not lower to a sequence value",
+                ));
+            };
+            if values.len()
+                != usize::try_from(length).map_err(|_| ToZ3Error::DimensionOverflow)?
+            {
+                return Err(ModelFindingError::UnsupportedModel(
+                    "lowered sequence length does not match its symbolic type",
+                ));
+            }
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(position, value)| {
+                    let index = u64::try_from(position)
+                        .map_err(|_| ToZ3Error::DimensionOverflow)?
+                        + 1;
                     let left = Expr::new(RawExpr::Binop(
                         Binop::SingleSubscript,
                         Expr::new(RawExpr::Variable(variable.clone())),
                         Expr::new(RawExpr::NatLiteral(index)),
                     ));
-                    let prepared = prepare_expression(
-                        variable_types,
-                        &left,
-                        VisitContext {
-                            logical_polarity: true,
-                            active_ranges: Vec::new(),
-                        },
-                    )
-                    .map_err(ToZ3Error::from)?;
-                    let right =
-                        z3_object_model_value(model, to_z3(environment, &prepared)?.expression)?;
+                    let right = z3_object_model_value(model, value)?;
                     Ok(model_equality(left, right))
                 })
                 .collect()
@@ -534,9 +551,15 @@ fn z3_object_model_value(model: &Z3Model, value: Z3Object) -> Result<Expr<()>, M
                     Z3Object::Matrix(_) => Err(ModelFindingError::UnsupportedModel(
                         "nested matrices are not supported in Z3 models",
                     )),
+                    Z3Object::Sequence(_) => Err(ModelFindingError::UnsupportedModel(
+                        "sequences nested in matrices are not supported in Z3 models",
+                    )),
                 })
                 .collect::<Result<_, _>>()?,
         }))),
+        Z3Object::Sequence(_) => Err(ModelFindingError::UnsupportedModel(
+            "nested sequence extraction is not supported",
+        )),
     }
 }
 

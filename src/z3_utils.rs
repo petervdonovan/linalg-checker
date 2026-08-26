@@ -248,7 +248,10 @@ mod tests {
     use z3::ast::Int;
 
     use super::{PresburgerClassification, classify_presburger};
-    use crate::{Binop, Expr, Finop, Monop, NaturalParameter, RawExpr, Variable};
+    use crate::{
+        Binop, DeBruijnIndex, Environment, Expr, Finop, Monop, NaturalEvaluationError,
+        NaturalParameter, RawExpr, Variable,
+    };
 
     fn variable(name: &str) -> Expr<()> {
         Expr::new(RawExpr::Variable(Variable::new(name)))
@@ -304,6 +307,19 @@ mod tests {
         assert_eq!(
             classify_presburger(&variable("x"), &symbols),
             PresburgerClassification::NotNatural
+        );
+    }
+
+    #[test]
+    fn evaluates_de_bruijn_indices_only_from_lexical_values() {
+        let expression = Expr::<()>::new(RawExpr::BoundNatural(DeBruijnIndex::new(0)));
+        assert_eq!(
+            Environment::default().evaluate_natural_with_context(&expression, &[], &[7]),
+            Ok(7)
+        );
+        assert_eq!(
+            Environment::default().evaluate_natural(&expression),
+            Err(NaturalEvaluationError::UnboundNatural(DeBruijnIndex::new(0)))
         );
     }
 }

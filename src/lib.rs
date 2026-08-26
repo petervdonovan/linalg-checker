@@ -272,6 +272,7 @@ pub enum Finop {
     Exists,
     Max,
     Min,
+    SeqLiteral,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 #[non_exhaustive]

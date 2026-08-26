@@ -186,6 +186,7 @@ enum Precedence {
     Or,
     And,
     Comparison,
+    Sequence,
     Addition,
     Multiplication,
     Prefix,
@@ -202,6 +203,7 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf, _, _) => {
             Precedence::Comparison
         }
+        crate::RawExpr::Finop(Finop::SeqLiteral, _) => Precedence::Sequence,
         crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
         crate::RawExpr::Finop(Finop::Times, _) | crate::RawExpr::Binop(Binop::Div, _, _) => {
             Precedence::Multiplication
@@ -384,6 +386,12 @@ where
     I: IntoIterator<Item = &'a Expr<Metadata>>,
 {
     let exprs = exprs.into_iter().collect::<Vec<_>>();
+    if matches!(op, Finop::SeqLiteral) {
+        assert!(
+            exprs.len() >= 2,
+            "sequence literals require at least two expressions"
+        );
+    }
     if matches!(op, Finop::Forall | Finop::Exists) {
         write!(
             f,
@@ -421,12 +429,14 @@ where
             write!(f, "{}", finop_separator(op))?;
         }
         let grouped = match op {
+            Finop::Plus => precedence(expression) < Precedence::Addition,
             Finop::Times => {
                 precedence(expression) < Precedence::Multiplication
                     || matches!(&expression.raw, crate::RawExpr::Monop(Monop::Neg, _))
             }
             Finop::And => precedence(expression) < Precedence::And,
             Finop::Or => precedence(expression) < Precedence::Or,
+            Finop::SeqLiteral => precedence(expression) <= Precedence::Sequence,
             Finop::Forall | Finop::Exists => unreachable!(),
             _ => false,
         };
@@ -544,6 +554,7 @@ fn finop_separator(op: &Finop) -> &'static str {
         Finop::Or => r" \lor ",
         Finop::Forall | Finop::Exists => ", ",
         Finop::Max | Finop::Min => ", ",
+        Finop::SeqLiteral => ", ",
     }
 }
 
@@ -843,12 +854,13 @@ mod tests {
         ];
         let factors = vec![variable_expr("x"), variable_expr("y")];
 
-        expect!["1 + 2\nx y\n\\max(1, 2)\n\\min(1, 2)"].assert_eq(&format!(
-            "{}\n{}\n{}\n{}",
+        expect!["1 + 2\nx y\n\\max(1, 2)\n\\min(1, 2)\n1, 2"].assert_eq(&format!(
+            "{}\n{}\n{}\n{}\n{}",
             as_latex(RawExpr::Finop(Finop::Plus, values.clone())),
             as_latex(RawExpr::Finop(Finop::Times, factors)),
             as_latex(RawExpr::Finop(Finop::Max, values.clone())),
-            as_latex(RawExpr::Finop(Finop::Min, values)),
+            as_latex(RawExpr::Finop(Finop::Min, values.clone())),
+            as_latex(RawExpr::Finop(Finop::SeqLiteral, values)),
         ));
     }
 
