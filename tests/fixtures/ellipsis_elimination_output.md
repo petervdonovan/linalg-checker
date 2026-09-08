@@ -1,14 +1,25 @@
 # Elided sequence
 
-## Environment
-
-- $n \in \mathbb{N}$
-- $n = 4$
-
 ## Input
 
-$1, 2, \ldots, n$
+- $n \in \mathbb{N}$
+- $1, 2, \ldots, n$
 
 ## Output
 
-$1, 2, \ldots, n$
+- $n \in \mathbb{N}$
+- $1, 2, \ldots, n$
+
+# Indexed elided sequence
+
+## Input
+
+- $n \in \mathbb{N}$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $c_{1}, \ldots, c_{n}$
+
+## Output
+
+- $n \in \mathbb{N}$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $c_{1}, \ldots, c_{n}$

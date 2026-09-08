@@ -5,6 +5,7 @@ use linalg_sandbox::{
 
 const INPUT: &str = include_str!("fixtures/ellipsis_elimination_input.md");
 const EXPECTED: &str = include_str!("fixtures/ellipsis_elimination_output.md");
+const MAX_DIMENSION: u64 = 2;
 
 fn without_final_newline(value: &str) -> &str {
     value.strip_suffix('\n').unwrap_or(value)
@@ -24,7 +25,7 @@ fn ellipsis_elimination_fixtures_are_canonical_markdown() {
 #[test]
 fn rewrites_ellipsis_fixtures() {
     let actual = RewriteCases::parse_str(INPUT)
-        .rewrite(eliminate_ellipses)
+        .try_rewrite(|expressions| eliminate_ellipses(expressions, MAX_DIMENSION))
         .unwrap()
         .to_string();
     if std::env::var_os("UPDATE_EXPECT").is_some() {

@@ -2,39 +2,56 @@
 //!
 //! The visitor intentionally preserves ellipses until synthesis is implemented.
 
+use std::{error::Error, fmt};
+
 use crate::{
-    Environment, Expr,
+    Expr,
     deep_clone::deep_clone,
     visit_mut::{VisitContext, VisitMut},
 };
 
-/// Environment-backed ellipsis rewrite pass.
-///
-/// This currently performs only the default recursive traversal. Keeping the
-/// environment in the visitor establishes the interface needed by the future
-/// synthesis implementation without assigning placeholder semantics to an
-/// ellipsis.
-pub struct EllipsisElimination<'a> {
-    _environment: &'a Environment,
-}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EllipsisEliminationError {}
 
-impl<'a> EllipsisElimination<'a> {
-    pub fn new(environment: &'a Environment) -> Self {
-        Self {
-            _environment: environment,
-        }
+impl fmt::Display for EllipsisEliminationError {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
     }
 }
 
-impl<Metadata> VisitMut<Metadata> for EllipsisElimination<'_> {}
+impl Error for EllipsisEliminationError {}
+
+/// Collection-level ellipsis rewrite pass.
+///
+/// This currently performs only the default recursive traversal. The public
+/// collection-level entry point establishes the interface needed by future
+/// synthesis without assigning placeholder semantics to an ellipsis.
+#[derive(Default)]
+pub struct EllipsisElimination;
+
+impl EllipsisElimination {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<Metadata> VisitMut<Metadata> for EllipsisElimination {}
 
 pub fn eliminate_ellipses<Metadata: Clone>(
-    environment: &Environment,
-    expression: &Expr<Metadata>,
-) -> Expr<Metadata> {
-    let mut rewritten = deep_clone(expression);
-    EllipsisElimination::new(environment).visit_expr_mut(VisitContext::positive(), &mut rewritten);
-    rewritten
+    expressions: &[Expr<Metadata>],
+    _max_dimension: u64,
+) -> Result<Vec<Expr<Metadata>>, EllipsisEliminationError> {
+    // Candidate synthesis will precede environment extraction. Once ellipses
+    // are gone, the complete candidate forest can be checked against every
+    // environment through the supplied dimension bound.
+    Ok(expressions
+        .iter()
+        .map(|expression| {
+            let mut rewritten = deep_clone(expression);
+            EllipsisElimination::new().visit_expr_mut(VisitContext::positive(), &mut rewritten);
+            rewritten
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -55,7 +72,10 @@ mod tests {
     #[test]
     fn identity_elimination_preserves_ellipses_in_a_unique_tree() {
         let original: Expr<()> = from_tex::expr(&parse(r"1, \ldots, n").unwrap()).unwrap();
-        let mut rewritten = eliminate_ellipses(&Environment::default(), &original);
+        let mut rewritten = eliminate_ellipses(std::slice::from_ref(&original), 2)
+            .unwrap()
+            .pop()
+            .unwrap();
         let rewritten_node = rewritten
             .get_mut()
             .expect("rewritten root should be uniquely owned");

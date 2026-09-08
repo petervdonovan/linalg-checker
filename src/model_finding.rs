@@ -302,7 +302,7 @@ pub(crate) fn solve_prepared_environment(
     }
 }
 
-pub(crate) fn assignment_from_declarations(
+fn assignment_from_declarations(
     declarations: &[Expr<()>],
 ) -> Result<Environment, ModelFindingError> {
     let mut environment = Environment::default();
@@ -820,7 +820,7 @@ pub(crate) fn parse_expression_section(nodes: &[Node], name: &str) -> Vec<Expr<(
     }
 }
 
-pub(crate) fn validate_environment_entries(expressions: &[Expr<()>]) {
+fn validate_environment_entries(expressions: &[Expr<()>]) {
     for expression in expressions {
         match &expression.raw {
             RawExpr::Binop(Binop::ElementOf, left, right) => {
