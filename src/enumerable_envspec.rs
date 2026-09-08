@@ -1408,6 +1408,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 }
             }
             RawExpr::Hole
+            | RawExpr::Ellipsis
             | RawExpr::ImplicitDimension(_)
             | RawExpr::BoundNatural(_)
             | RawExpr::IdentityMatrix { .. }

@@ -2,6 +2,7 @@
 
 mod deep_clone;
 pub mod elaboration;
+pub mod ellipsis_elimination;
 pub mod enumerable_envspec;
 pub mod find_model;
 pub mod find_model_given_environment;
@@ -11,6 +12,7 @@ pub mod logic_lowering;
 mod model_finding;
 pub mod operator_visitors;
 pub mod preprocessing;
+pub mod rewriting_test_utils;
 pub mod to_tex;
 pub mod to_z3;
 mod type_expr;
@@ -314,6 +316,7 @@ impl<Metadata> Expr<Metadata> {
     pub fn with_default_metadata<NewMetadata: Default>(&self) -> Expr<NewMetadata> {
         let raw = match &self.raw {
             RawExpr::Hole => RawExpr::Hole,
+            RawExpr::Ellipsis => RawExpr::Ellipsis,
             RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
             RawExpr::BoundNatural(index) => RawExpr::BoundNatural(*index),
             RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
@@ -462,6 +465,7 @@ where
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
     Hole,
+    Ellipsis,
     /// An internal natural-valued leaf used to preserve a context-dependent
     /// matrix constant's dimension through symbolic typing.
     ImplicitDimension(ImplicitDimension),
@@ -512,6 +516,13 @@ mod tests {
     fn default_metadata_preserves_holes() {
         let expression: Expr<()> = Expr::with_metadata(1, RawExpr::Hole).with_default_metadata();
         assert!(matches!(expression.raw, RawExpr::Hole));
+    }
+
+    #[test]
+    fn default_metadata_preserves_ellipses() {
+        let expression: Expr<()> =
+            Expr::with_metadata(1, RawExpr::Ellipsis).with_default_metadata();
+        assert!(matches!(expression.raw, RawExpr::Ellipsis));
     }
 
     #[test]

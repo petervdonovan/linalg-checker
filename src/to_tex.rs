@@ -43,6 +43,7 @@ fn expr_with_mode<Metadata>(
 ) -> fmt::Result {
     match &e.raw {
         crate::RawExpr::Hole => write!(f, r"\square"),
+        crate::RawExpr::Ellipsis => write!(f, r"\ldots"),
         crate::RawExpr::ImplicitDimension(dimension) if verbose => {
             write!(f, "@{}", dimension.nonce_id())
         }
@@ -629,6 +630,11 @@ mod tests {
     #[test]
     fn test_hole() {
         expect![r"\square"].assert_eq(&as_latex(RawExpr::Hole));
+    }
+
+    #[test]
+    fn test_ellipsis() {
+        expect![r"\ldots"].assert_eq(&as_latex(RawExpr::Ellipsis));
     }
 
     #[test]

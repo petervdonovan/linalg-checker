@@ -343,6 +343,7 @@ fn lower<Metadata: MaybeTyped + Clone>(
 ) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
         RawExpr::Hole
+        | RawExpr::Ellipsis
         | RawExpr::ImplicitDimension(_)
         | RawExpr::BoundNatural(_)
         | RawExpr::IdentityMatrix { .. }
@@ -585,7 +586,9 @@ mod tests {
         from_tex,
         preprocessing::prepare_expression,
         to_z3::{ToZ3Error, ToZ3Result, Z3Object, to_z3 as prepared_to_z3},
-        type_resolver::{OperatorTypeRules, SymbolicTypeEnvironment, TypeResolver, TypedMetadata},
+        type_resolver::{
+            OperatorTypeRules, SymbolicTypeEnvironment, TypeError, TypeResolver, TypedMetadata,
+        },
         visit_mut::VisitContext,
     };
 
@@ -979,6 +982,17 @@ mod tests {
             Environment::default(),
             Expr::<()>::new(RawExpr::Hole),
             ToZ3Error::Unsupported("holes are not supported by to_z3"),
+        );
+    }
+
+    #[test]
+    fn test_ellipsis_is_not_lowered() {
+        assert_lowering_error(
+            Environment::default(),
+            Expr::<()>::new(RawExpr::Ellipsis),
+            ToZ3Error::Type(TypeError::Unsupported(
+                "ellipses must be eliminated before preprocessing completes",
+            )),
         );
     }
 

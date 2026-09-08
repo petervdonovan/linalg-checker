@@ -275,6 +275,14 @@ impl<'a> Cursor<'a> {
                 context: "an operand",
             })?;
 
+        if matches!(
+            current.symbol_text(),
+            Some(r"\ldots" | r"\cdots" | r"\@cdots")
+        ) {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::Ellipsis));
+        }
+
         if let Some(size) = parse_sequence_type_head(current)? {
             self.position += 1;
             let argument = self.take_parenthesized()?;
@@ -1425,6 +1433,25 @@ s = 1, 2, 3, 4
         assert!(matches!(
             super::expr(&parse("x,").unwrap()),
             Err(FromTexError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_ellipsis_spellings_canonically() {
+        expect![
+            r"\ldots
+1, 2, \ldots, n
+1, 2, \ldots, n"
+        ]
+        .assert_eq(&format!(
+            "{}\n{}\n{}",
+            round_trip(r"\ldots").unwrap(),
+            round_trip(r"1, 2, \ldots, n").unwrap(),
+            round_trip(r"1, 2, \cdots, n").unwrap(),
+        ));
+        assert!(matches!(
+            super::expr(&parse(r"\ldots").unwrap()).unwrap().raw,
+            RawExpr::Ellipsis
         ));
     }
 

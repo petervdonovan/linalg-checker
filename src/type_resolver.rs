@@ -287,7 +287,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
         expression: &Expr<Metadata>,
     ) -> Result<Option<TypeExpr<()>>, TypeError> {
         let ty = match &expression.raw {
-            RawExpr::Hole | RawExpr::Type(_) => return Ok(None),
+            RawExpr::Hole | RawExpr::Ellipsis | RawExpr::Type(_) => return Ok(None),
             RawExpr::ImplicitDimension(_) | RawExpr::BoundNatural(_) => TypeExpr::Nat,
             RawExpr::IdentityMatrix { dimension } => {
                 let dimension = implicit_dimension(*dimension);
@@ -403,6 +403,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 .raw;
             match raw {
                 RawExpr::Hole
+                | RawExpr::Ellipsis
                 | RawExpr::ImplicitDimension(_)
                 | RawExpr::BoundNatural(_)
                 | RawExpr::IdentityMatrix { .. }

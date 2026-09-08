@@ -132,6 +132,10 @@ pub trait VisitMut<Metadata> {
         visit_raw_expr_hole_mut(self, context);
     }
 
+    fn visit_raw_expr_ellipsis_mut(&mut self, context: VisitContext) {
+        visit_raw_expr_ellipsis_mut(self, context);
+    }
+
     fn visit_raw_expr_implicit_dimension_mut(
         &mut self,
         context: VisitContext,
@@ -303,6 +307,7 @@ pub fn visit_raw_expr_mut<V, Metadata>(
 {
     match node {
         RawExpr::Hole => visitor.visit_raw_expr_hole_mut(context),
+        RawExpr::Ellipsis => visitor.visit_raw_expr_ellipsis_mut(context),
         RawExpr::ImplicitDimension(dimension) => {
             visitor.visit_raw_expr_implicit_dimension_mut(context, dimension)
         }
@@ -435,6 +440,12 @@ pub fn visit_variable_mut<V, Metadata>(
 }
 
 pub fn visit_raw_expr_hole_mut<V, Metadata>(_visitor: &mut V, _context: VisitContext)
+where
+    V: VisitMut<Metadata> + ?Sized,
+{
+}
+
+pub fn visit_raw_expr_ellipsis_mut<V, Metadata>(_visitor: &mut V, _context: VisitContext)
 where
     V: VisitMut<Metadata> + ?Sized,
 {
@@ -831,6 +842,7 @@ mod tests {
             fn visit_raw_expr_mut(&mut self, context: VisitContext, node: &mut RawExpr<()>) {
                 self.variants.insert(match node {
                     RawExpr::Hole => "hole",
+                    RawExpr::Ellipsis => "ellipsis",
                     RawExpr::ImplicitDimension(_) => "implicit dimension",
                     RawExpr::BoundNatural(_) => "bound natural",
                     RawExpr::IdentityMatrix { .. } => "identity",
@@ -855,6 +867,7 @@ mod tests {
         let dimension = ImplicitDimension::fresh();
         let mut expressions = vec![
             Expr::new(RawExpr::Hole),
+            Expr::new(RawExpr::Ellipsis),
             Expr::new(RawExpr::ImplicitDimension(dimension)),
             Expr::new(RawExpr::BoundNatural(DeBruijnIndex::new(0))),
             Expr::new(RawExpr::IdentityMatrix { dimension }),
@@ -916,6 +929,6 @@ mod tests {
         for expression in &mut expressions {
             visitor.visit_expr_mut(POSITIVE, expression);
         }
-        assert_eq!(visitor.variants.len(), 17);
+        assert_eq!(visitor.variants.len(), 18);
     }
 }

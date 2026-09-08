@@ -42,6 +42,7 @@ impl Unifier<'_> {
         }
         match (&pattern.raw, &candidate.raw) {
             (RawExpr::Hole, RawExpr::Hole) => true,
+            (RawExpr::Ellipsis, RawExpr::Ellipsis) => true,
             (RawExpr::ImplicitDimension(a), RawExpr::ImplicitDimension(b)) => self.nonce(*a, *b),
             (
                 RawExpr::IdentityMatrix { dimension: a },
@@ -283,5 +284,14 @@ mod tests {
         };
         let mut sequence_unifier = unifier(&empty);
         assert!(sequence_unifier.expression(&sequence("i"), &sequence("j")));
+    }
+
+    #[test]
+    fn ellipses_match_only_ellipses() {
+        let empty = BTreeSet::new();
+        let mut matching = unifier(&empty);
+        assert!(matching.expression(&Expr::new(RawExpr::Ellipsis), &Expr::new(RawExpr::Ellipsis),));
+        let mut mismatching = unifier(&empty);
+        assert!(!mismatching.expression(&Expr::new(RawExpr::Ellipsis), &Expr::new(RawExpr::Hole),));
     }
 }

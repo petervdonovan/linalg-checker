@@ -233,6 +233,9 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
                 Some(TypeError::Unsupported("unregistered sequence operator"))
             }
             RawExpr::Hole | RawExpr::Type(_) => None,
+            RawExpr::Ellipsis => Some(TypeError::Unsupported(
+                "ellipses must be eliminated before preprocessing completes",
+            )),
             _ if node.meta.get_type().is_err() => Some(TypeError::Unsupported(
                 "expression remains untyped after preprocessing",
             )),

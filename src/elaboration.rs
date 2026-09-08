@@ -1655,6 +1655,7 @@ fn substitute_index(
     let raw = match &expression.raw {
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
+        RawExpr::Ellipsis => RawExpr::Ellipsis,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
         RawExpr::BoundNatural(index) => RawExpr::BoundNatural(*index),
         RawExpr::IdentityMatrix { dimension } => RawExpr::IdentityMatrix {
@@ -1794,6 +1795,9 @@ impl Visit<TypedMetadata> for CoreValidator {
         self.error = match &node.raw {
             RawExpr::Hole => Some(ElaborationError::Unsupported(
                 "holes are not supported by to_z3",
+            )),
+            RawExpr::Ellipsis => Some(ElaborationError::Unsupported(
+                "ellipses must be eliminated before Z3 lowering",
             )),
             RawExpr::ImplicitDimension(_)
             | RawExpr::BoundNatural(_)
