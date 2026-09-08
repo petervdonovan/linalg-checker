@@ -1403,10 +1403,12 @@ mod tests {
 
     #[test]
     fn parses_finite_sequence_literals_at_comparison_precedence() {
-        expect![r"1, 2, 3
+        expect![
+            r"1, 2, 3
 s = 1, 2, 3, 4
 \left(1, 2\right) + 3
-\left(1, 2\right), \left(3, 4\right)"]
+\left(1, 2\right), \left(3, 4\right)"
+        ]
         .assert_eq(&format!(
             "{}\n{}\n{}\n{}",
             round_trip("1, 2, 3").unwrap(),

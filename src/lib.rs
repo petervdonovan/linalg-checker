@@ -100,7 +100,11 @@ impl fmt::Display for NaturalEvaluationError {
             Self::NotANumeral => f.write_str("natural expression did not simplify to a numeral"),
             Self::Overflow => f.write_str("natural expression is outside the u64 range"),
             Self::UnboundNatural(index) => {
-                write!(f, "unbound natural type index at de Bruijn index #{}", index.get())
+                write!(
+                    f,
+                    "unbound natural type index at de Bruijn index #{}",
+                    index.get()
+                )
             }
         }
     }

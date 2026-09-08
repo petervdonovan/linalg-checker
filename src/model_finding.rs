@@ -487,9 +487,7 @@ fn extract_variable(
                     "sequence variable did not lower to a sequence value",
                 ));
             };
-            if values.len()
-                != usize::try_from(length).map_err(|_| ToZ3Error::DimensionOverflow)?
-            {
+            if values.len() != usize::try_from(length).map_err(|_| ToZ3Error::DimensionOverflow)? {
                 return Err(ModelFindingError::UnsupportedModel(
                     "lowered sequence length does not match its symbolic type",
                 ));
@@ -498,9 +496,8 @@ fn extract_variable(
                 .into_iter()
                 .enumerate()
                 .map(|(position, value)| {
-                    let index = u64::try_from(position)
-                        .map_err(|_| ToZ3Error::DimensionOverflow)?
-                        + 1;
+                    let index =
+                        u64::try_from(position).map_err(|_| ToZ3Error::DimensionOverflow)? + 1;
                     let left = Expr::new(RawExpr::Binop(
                         Binop::SingleSubscript,
                         Expr::new(RawExpr::Variable(variable.clone())),

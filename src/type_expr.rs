@@ -255,12 +255,11 @@ mod tests {
             ))),
             Expr::new(RawExpr::NatLiteral(2)),
         );
-        let abstracted =
-            abstract_type_variable(
-                &inner,
-                &outer,
-                &Expr::new(RawExpr::BoundNatural(DeBruijnIndex::new(0))),
-            );
+        let abstracted = abstract_type_variable(
+            &inner,
+            &outer,
+            &Expr::new(RawExpr::BoundNatural(DeBruijnIndex::new(0))),
+        );
         assert!(!contains_unbound_natural(&TypeExpr::Seq(
             Expr::new(RawExpr::Type(abstracted)),
             Expr::new(RawExpr::NatLiteral(3)),

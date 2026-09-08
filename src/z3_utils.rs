@@ -319,7 +319,9 @@ mod tests {
         );
         assert_eq!(
             Environment::default().evaluate_natural(&expression),
-            Err(NaturalEvaluationError::UnboundNatural(DeBruijnIndex::new(0)))
+            Err(NaturalEvaluationError::UnboundNatural(DeBruijnIndex::new(
+                0
+            )))
         );
     }
 }

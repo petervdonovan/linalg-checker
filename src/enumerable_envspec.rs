@@ -39,10 +39,10 @@ pub fn infer_symbolic_type_environment(
             Some(TypeExpr::Nat)
         } else {
             specification
-            .explicit_types
-            .get(variable)
-            .and_then(|types| types.first())
-            .cloned()
+                .explicit_types
+                .get(variable)
+                .and_then(|types| types.first())
+                .cloned()
         };
         if let Some(ty) = ty {
             types.insert(variable.clone(), ty);
@@ -53,11 +53,11 @@ pub fn infer_symbolic_type_environment(
 
     let mut generated_dimensions = BTreeSet::new();
     for variable in specification.variables {
-        if !types.contains_key(&variable) {
+        types.entry(variable.clone()).or_insert_with(|| {
             let ty = guessed_type_expr(&variable);
             collect_type_dimension_variables(&ty, &mut generated_dimensions);
-            types.insert(variable, ty);
-        }
+            ty
+        });
     }
     if let Some(collision) = generated_dimensions
         .iter()
@@ -1055,9 +1055,7 @@ impl DimensionConstraintBuilder<'_> {
                     .cloned()
                     .ok_or_else(|| NaturalEvaluationError::MissingAssignment(parameter.clone()))
             },
-            &mut |de_bruijn_index| {
-                Err(NaturalEvaluationError::UnboundNatural(de_bruijn_index))
-            },
+            &mut |de_bruijn_index| Err(NaturalEvaluationError::UnboundNatural(de_bruijn_index)),
         ) {
             Ok(value) => Ok(Some(value)),
             Err(NaturalEvaluationError::MissingAssignment(_)) => Ok(None),
@@ -1187,7 +1185,10 @@ impl DimensionConstraintBuilder<'_> {
                 self.assert_dimensions_equal(left_rows, right_rows)?;
                 self.assert_dimensions_equal(left_cols, right_cols)
             }
-            (TypeExpr::Seq(left_element, left_length), TypeExpr::Seq(right_element, right_length)) => {
+            (
+                TypeExpr::Seq(left_element, left_length),
+                TypeExpr::Seq(right_element, right_length),
+            ) => {
                 let (RawExpr::Type(left_element), RawExpr::Type(right_element)) =
                     (&left_element.raw, &right_element.raw)
                 else {
@@ -1355,10 +1356,8 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 }
                 let first = self.builder.type_of(first)?;
                 for expression in rest {
-                    self.builder.constrain_identical_types(
-                        &first,
-                        &self.builder.type_of(expression)?,
-                    )?;
+                    self.builder
+                        .constrain_identical_types(&first, &self.builder.type_of(expression)?)?;
                 }
             }
             RawExpr::Finop(Finop::And | Finop::Or, expressions) => {

@@ -146,9 +146,9 @@ impl Add for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix addition must be elaborated before Z3 lowering",
             )),
-            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
-                ToZ3Error::InvalidOperands("sequence values do not support scalar addition"),
-            ),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(ToZ3Error::InvalidOperands(
+                "sequence values do not support scalar addition",
+            )),
         }
     }
 }
@@ -176,9 +176,9 @@ impl Mul for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix multiplication must be elaborated before Z3 lowering",
             )),
-            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
-                ToZ3Error::InvalidOperands("sequence values do not support scalar multiplication"),
-            ),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(ToZ3Error::InvalidOperands(
+                "sequence values do not support scalar multiplication",
+            )),
         }
     }
 }
@@ -206,9 +206,9 @@ impl Div for Z3Object {
             (Self::Matrix(_), _) | (_, Self::Matrix(_)) => Err(ToZ3Error::InvalidOperands(
                 "matrix division must be elaborated before Z3 lowering",
             )),
-            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(
-                ToZ3Error::InvalidOperands("sequence values do not support scalar division"),
-            ),
+            (Self::Sequence(_), _) | (_, Self::Sequence(_)) => Err(ToZ3Error::InvalidOperands(
+                "sequence values do not support scalar division",
+            )),
         }
     }
 }
@@ -246,9 +246,9 @@ fn compare(left: Z3Object, comparison: Cmp, right: Z3Object) -> Result<Bool, ToZ
             compare_aggregate(left, comparison, right)
         }
         (Z3Object::Matrix(_) | Z3Object::Sequence(_), _)
-        | (_, Z3Object::Matrix(_) | Z3Object::Sequence(_)) => Err(
-            ToZ3Error::InvalidOperands("aggregate comparison requires matching value kinds"),
-        ),
+        | (_, Z3Object::Matrix(_) | Z3Object::Sequence(_)) => Err(ToZ3Error::InvalidOperands(
+            "aggregate comparison requires matching value kinds",
+        )),
     }
 }
 
@@ -861,10 +861,7 @@ mod tests {
     fn test_sequence_literals_lower_to_first_class_values() {
         let values = sequence(Environment::default(), expression("1, 2, 3"));
         assert_eq!(
-            values
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            values.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["1", "2", "3"]
         );
 
@@ -873,18 +870,13 @@ mod tests {
             expression(r"\operatorname{map}_{i=1}^{3}i"),
         );
         assert_eq!(
-            mapped
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            mapped.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["1", "2", "3"]
         );
 
         let matrices = sequence(
             Environment::default(),
-            expression(
-                r"\begin{bmatrix}1\end{bmatrix}, \begin{bmatrix}2\end{bmatrix}",
-            ),
+            expression(r"\begin{bmatrix}1\end{bmatrix}, \begin{bmatrix}2\end{bmatrix}"),
         );
         assert!(matrices
             .iter()

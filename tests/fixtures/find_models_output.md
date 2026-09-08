@@ -265,3 +265,20 @@ Model
 - $b = \begin{bmatrix}3 \\ 6\end{bmatrix}$
 - $c = \begin{bmatrix}7 \\ 8\end{bmatrix}$
 - $d = 9$
+
+# Finite sequence literal
+
+## Assumptions
+
+- $s = 1, 2$
+
+## Sentences
+
+- $s_{2} = 2$
+
+## Conclusion
+
+Model
+
+- $s_{1} = 1$
+- $s_{2} = 2$

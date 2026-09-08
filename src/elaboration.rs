@@ -724,7 +724,6 @@ impl VisitMut<TypedMetadata> for SequenceVisitor<'_> {
                 }
                 Err(error) => self.error = Some(error),
             }
-            return;
         }
     }
 }
@@ -1817,11 +1816,7 @@ impl Visit<TypedMetadata> for CoreValidator {
             RawExpr::Finop(op, _)
                 if !matches!(
                     op,
-                    Finop::Plus
-                        | Finop::Times
-                        | Finop::And
-                        | Finop::Or
-                        | Finop::SeqLiteral
+                    Finop::Plus | Finop::Times | Finop::And | Finop::Or | Finop::SeqLiteral
                 ) =>
             {
                 Some(ElaborationError::Unsupported(

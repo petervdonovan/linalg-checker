@@ -228,3 +228,17 @@ Not solved yet
 ## Conclusion
 
 Not solved yet
+
+# Finite sequence literal
+
+## Assumptions
+
+- $s = 1, 2$
+
+## Sentences
+
+- $s_{2} = 2$
+
+## Conclusion
+
+Not solved yet
