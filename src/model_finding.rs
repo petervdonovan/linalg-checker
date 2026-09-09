@@ -9,16 +9,19 @@ use markdown::{
 };
 use z3::{
     Model as Z3Model, SatResult, Solver,
-    ast::{Algebraic, Dynamic, Real},
+    ast::{Algebraic, Bool, Dynamic, Real},
 };
 
 use crate::{
     Binop, Cmp, CmpChain, Environment, Expr, Matrix, Model, Monop, NaturalParameter, RawExpr,
     TypeExpr, Variable,
-    enumerable_envspec::{ShapeError, infer_symbolic_type_environment},
+    enumerable_envspec::{
+        ShapeError, extract_prepared_environment_iterator_with_required_context,
+        infer_symbolic_type_environment,
+    },
     preprocessing::{PreparedExpression, prepare_expression},
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error, Z3Object, to_z3},
-    type_resolver::SymbolicTypeEnvironment,
+    type_resolver::{MaybeTyped, SymbolicTypeEnvironment},
     visit_mut::VisitContext,
 };
 
@@ -299,6 +302,110 @@ pub(crate) fn solve_prepared_environment(
             )?,
             existence_warnings(environment, variable_types, &lowered_assertions)?,
         )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CounterexampleSearch {
+    Found,
+    NotFound,
+    Unknown,
+}
+
+pub(crate) struct CounterexampleProgram {
+    symbolic_types: SymbolicTypeEnvironment,
+    prepared_program: Vec<PreparedExpression>,
+    max_dimension: u64,
+}
+
+impl CounterexampleProgram {
+    pub(crate) fn new(program: &[Expr<()>], max_dimension: u64) -> Result<Self, ModelFindingError> {
+        let symbolic_types = infer_symbolic_type_environment(program)?;
+        let positive = VisitContext::positive();
+        let prepared_program = program
+            .iter()
+            .map(|expression| prepare_expression(&symbolic_types, expression, positive.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ToZ3Error::from)?;
+        Ok(Self {
+            symbolic_types,
+            prepared_program,
+            max_dimension,
+        })
+    }
+
+    pub(crate) fn environments(
+        &self,
+    ) -> Result<crate::enumerable_envspec::EnvironmentIterator, ModelFindingError> {
+        extract_prepared_environment_iterator_with_required_context(
+            &self.symbolic_types,
+            &self.prepared_program,
+            &[],
+            &[],
+            self.max_dimension,
+        )
+        .map_err(ModelFindingError::from)
+    }
+
+    pub(crate) fn checker<'a>(
+        &'a self,
+        environment: &'a Environment,
+    ) -> Result<FixedEnvironmentCounterexampleChecker<'a>, ModelFindingError> {
+        let solver = Solver::new();
+        assert_natural_assignment(&solver, environment);
+        for assertion in &self.prepared_program {
+            if !matches!(assertion.expression.meta.get_type(), Ok(TypeExpr::Bool)) {
+                continue;
+            }
+            let assertion = lower_prepared_boolean(environment, assertion)?;
+            assert_definitions(&solver, &assertion.side_conditions)?;
+            solver.assert(assertion.expression);
+        }
+        Ok(FixedEnvironmentCounterexampleChecker {
+            solver,
+            environment,
+            symbolic_types: &self.symbolic_types,
+        })
+    }
+}
+
+pub(crate) struct FixedEnvironmentCounterexampleChecker<'a> {
+    solver: Solver,
+    environment: &'a Environment,
+    symbolic_types: &'a SymbolicTypeEnvironment,
+}
+
+impl FixedEnvironmentCounterexampleChecker<'_> {
+    pub(crate) fn check(
+        &mut self,
+        claims: &[Expr<()>],
+    ) -> Result<CounterexampleSearch, ModelFindingError> {
+        let negative = VisitContext::negative();
+        let prepared_claims = claims
+            .iter()
+            .map(|expression| prepare_expression(self.symbolic_types, expression, negative.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ToZ3Error::from)?;
+        let lowered_claims = prepared_claims
+            .iter()
+            .map(|claim| lower_prepared_boolean(self.environment, claim))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.solver.push();
+        for claim in &lowered_claims {
+            assert_definitions(&self.solver, &claim.side_conditions)?;
+        }
+        let expressions = lowered_claims
+            .iter()
+            .map(|claim| claim.expression.clone())
+            .collect::<Vec<_>>();
+        self.solver.assert(Bool::and(&expressions).not());
+        let result = match self.solver.check() {
+            SatResult::Sat => CounterexampleSearch::Found,
+            SatResult::Unknown => CounterexampleSearch::Unknown,
+            SatResult::Unsat => CounterexampleSearch::NotFound,
+        };
+        self.solver.pop(1);
+        Ok(result)
     }
 }
 

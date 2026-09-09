@@ -5,7 +5,7 @@ use linalg_sandbox::{
 
 const INPUT: &str = include_str!("fixtures/ellipsis_elimination_input.md");
 const EXPECTED: &str = include_str!("fixtures/ellipsis_elimination_output.md");
-const MAX_DIMENSION: u64 = 2;
+const MAX_DIMENSION: u64 = 3;
 
 fn without_final_newline(value: &str) -> &str {
     value.strip_suffix('\n').unwrap_or(value)

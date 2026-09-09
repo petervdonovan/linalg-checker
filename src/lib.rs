@@ -4,6 +4,7 @@ mod deep_clone;
 pub mod elaboration;
 pub mod ellipsis_elimination;
 pub mod enumerable_envspec;
+mod expression_utils;
 pub mod find_model;
 pub mod find_model_given_environment;
 mod formula;

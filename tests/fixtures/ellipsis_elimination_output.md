@@ -8,7 +8,7 @@
 ## Output
 
 - $n \in \mathbb{N}$
-- $1, 2, \ldots, n$
+- $\operatorname{map}_{i=1}^{n}i$
 
 # Indexed elided sequence
 
@@ -22,4 +22,4 @@
 
 - $n \in \mathbb{N}$
 - $c \in \operatorname{Seq}_{n}(\mathbb{R})$
-- $c_{1}, \ldots, c_{n}$
+- $\operatorname{map}_{i=1}^{n}c_{i}$
