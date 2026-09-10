@@ -51,6 +51,12 @@ impl Display for ModelFindingError {
 
 impl Error for ModelFindingError {}
 
+impl ModelFindingError {
+    pub(crate) fn from_type(error: crate::type_resolver::TypeError) -> Self {
+        Self::from(ToZ3Error::from(error))
+    }
+}
+
 impl From<ToZ3Error> for ModelFindingError {
     fn from(error: ToZ3Error) -> Self {
         Self::Lowering(error)
@@ -315,32 +321,45 @@ pub(crate) enum CounterexampleSearch {
 pub(crate) struct CounterexampleProgram {
     symbolic_types: SymbolicTypeEnvironment,
     prepared_program: Vec<PreparedExpression>,
+    required_context: Vec<PreparedExpression>,
+    dimension_assumptions: Vec<PreparedExpression>,
     max_dimension: u64,
 }
 
 impl CounterexampleProgram {
-    pub(crate) fn new(program: &[Expr<()>], max_dimension: u64) -> Result<Self, ModelFindingError> {
-        let symbolic_types = infer_symbolic_type_environment(program)?;
-        let positive = VisitContext::positive();
-        let prepared_program = program
-            .iter()
-            .map(|expression| prepare_expression(&symbolic_types, expression, positive.clone()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ToZ3Error::from)?;
-        Ok(Self {
-            symbolic_types,
-            prepared_program,
+    /// Premises have already completed preparation. Candidate expressions are
+    /// dimensional requirements only, never value-level assumptions.
+    pub(crate) fn new(
+        symbolic_types: &SymbolicTypeEnvironment,
+        premises: &[PreparedExpression],
+        required_context: Vec<PreparedExpression>,
+        dimension_assumptions: Vec<PreparedExpression>,
+        max_dimension: u64,
+    ) -> Self {
+        Self {
+            symbolic_types: symbolic_types.clone(),
+            prepared_program: premises.to_vec(),
+            required_context,
+            dimension_assumptions,
             max_dimension,
-        })
+        }
     }
 
     pub(crate) fn environments(
         &self,
     ) -> Result<crate::enumerable_envspec::EnvironmentIterator, ModelFindingError> {
+        let mut assumptions = self.prepared_program.clone();
+        assumptions.extend(self.dimension_assumptions.iter().cloned());
+        let mut types = self.symbolic_types.clone();
+        for prepared in assumptions.iter().chain(&self.required_context) {
+            for condition in &prepared.side_conditions {
+                types.types.remove(&condition.introduced_variable);
+            }
+        }
         extract_prepared_environment_iterator_with_required_context(
-            &self.symbolic_types,
-            &self.prepared_program,
-            &[],
+            &types,
+            &assumptions,
+            &self.required_context,
             &[],
             self.max_dimension,
         )

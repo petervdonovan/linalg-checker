@@ -25,6 +25,9 @@ where
     Metadata: Clone + Default + MaybeTyped,
 {
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
+        if crate::ellipsis_elimination::is_ellipsis_sequence(node) {
+            return;
+        }
         if self.error.is_some() {
             return;
         }
@@ -85,6 +88,9 @@ where
     }
 
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
+        if crate::ellipsis_elimination::is_ellipsis_sequence(node) {
+            return;
+        }
         if self.error.is_some() {
             return;
         }
@@ -149,6 +155,9 @@ where
     }
 
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
+        if crate::ellipsis_elimination::is_ellipsis_sequence(node) {
+            return;
+        }
         if self.error.is_some() {
             return;
         }

@@ -188,6 +188,7 @@ impl Error for ShapeError {}
 
 fn type_error_to_shape_error(error: TypeError) -> ShapeError {
     match error {
+        TypeError::Ellipsis(error) => ShapeError::InvalidTyping(error.to_string()),
         TypeError::Unsupported(message) => ShapeError::Unsupported(message.to_owned()),
         TypeError::Invalid(message) => ShapeError::InvalidTyping(message.to_owned()),
         TypeError::MissingType(variable) => ShapeError::InvalidTyping(format!(

@@ -22,7 +22,9 @@ use crate::{
         heading_text, lower_prepared_boolean, parse_expression_item, render_md, root,
         root_children, z3_boolean,
     },
-    preprocessing::{PreparedExpression, prepare_expression},
+    preprocessing::{
+        PreparedExpression, prepare_expression, prepare_expression_with_premises, prepare_givens,
+    },
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error},
     type_resolver::{SymbolicTypeEnvironment, TypeError},
     unification::Unifier,
@@ -222,6 +224,7 @@ impl Argument {
             let mut run = ValidationRun {
                 max_dimension,
                 next_tracker: 0,
+                givens: Vec::new(),
             };
             validate_goal_contents(
                 &mut self.root,
@@ -258,10 +261,7 @@ impl Argument {
         let symbolic_types = analyzed.symbolic_types;
         let ordinary_givens = analyzed.ordinary;
         let retained_givens = analyzed.retained;
-        let prepared_givens = ordinary_givens
-            .iter()
-            .map(|expression| prepare_expression(&symbolic_types, expression, POSITIVE))
-            .collect::<Result<Vec<_>, _>>()
+        let prepared_givens = prepare_givens(&symbolic_types, &ordinary_givens, &[], max_dimension)
             .map_err(crate::to_z3::ToZ3Error::from)
             .map_err(ModelFindingError::from)?;
 
@@ -299,6 +299,7 @@ impl Argument {
         let mut run = ValidationRun {
             max_dimension,
             next_tracker: 0,
+            givens: prepared_givens.clone(),
         };
         for environment in environments {
             let environment = match environment {
@@ -383,6 +384,8 @@ struct GoalExport {
 }
 
 struct ValidationRun {
+    /// Prepared lexical givens only; accepted proof steps never enter this scope.
+    givens: Vec<PreparedExpression>,
     max_dimension: u64,
     next_tracker: usize,
 }
@@ -504,6 +507,7 @@ fn validate_goal_contents(
                     variable,
                     &environment,
                     symbolic_types,
+                    &run.givens,
                     run.max_dimension,
                 )? {
                     Some(start) => Some((start, InductionObligations::new(goal, variable, start))),
@@ -736,12 +740,14 @@ fn validate_nested_goal(
     let symbolic_types = analyzed.symbolic_types;
     let introduced_variables = analyzed.introduced;
     let retained_givens = analyzed.retained;
-    let prepared_givens = match ordinary_givens
-        .iter()
-        .map(|given| prepare_expression(&symbolic_types, given, POSITIVE))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ToZ3Error::from)
-        .map_err(ModelFindingError::from)
+    let prepared_givens = match prepare_givens(
+        &symbolic_types,
+        &ordinary_givens,
+        &run.givens,
+        run.max_dimension,
+    )
+    .map_err(ToZ3Error::from)
+    .map_err(ModelFindingError::from)
     {
         Ok(givens) => givens,
         Err(error) => {
@@ -780,14 +786,25 @@ fn validate_nested_goal(
         return Ok(None);
     }
 
-    let implication = (introduced_variables.is_empty() && !goal.givens.iter().any(is_quantifier))
-        .then(|| scoped_statement_expression(&goal.givens, &goal.conclusion));
-    let prepared_implication = implication
-        .as_ref()
-        .map(|expression| prepare_expression(&symbolic_types, expression, POSITIVE))
-        .transpose()
-        .map_err(ToZ3Error::from)
-        .map_err(ModelFindingError::from)?;
+    let prepared_implication =
+        if introduced_variables.is_empty() && !goal.givens.iter().any(is_quantifier) {
+            let mut scope = run.givens.clone();
+            scope.extend(prepared_givens.iter().cloned());
+            let conclusion = prepare_expression_with_premises(
+                &symbolic_types,
+                &goal.conclusion,
+                POSITIVE,
+                &scope,
+                run.max_dimension,
+            )
+            .map_err(ModelFindingError::from_type);
+            // The normal claim check records preparation failures locally.
+            conclusion
+                .ok()
+                .map(|conclusion| conclusion.under_givens(&prepared_givens))
+        } else {
+            None
+        };
 
     let mut feasible = 0;
     let mut all_validated = true;
@@ -814,6 +831,8 @@ fn validate_nested_goal(
         match solver.check() {
             SatResult::Sat => {
                 feasible += 1;
+                let scope_len = run.givens.len();
+                run.givens.extend(prepared_givens.iter().cloned());
                 let result = validate_goal_contents(
                     goal,
                     solver,
@@ -822,7 +841,9 @@ fn validate_nested_goal(
                     &mut tracked,
                     &mut scoped_statements,
                     run,
-                )?;
+                );
+                run.givens.truncate(scope_len);
+                let result = result?;
                 all_validated &= result.validated;
                 if result.validated
                     && let Some(prepared) = &prepared_implication
@@ -929,7 +950,13 @@ fn validate_ordinary_claim(
             .push(StepCheck::Error { environment, error });
         return Ok(ClaimResult::default());
     }
-    let positive = match prepare_expression(symbolic_types, sentence, POSITIVE) {
+    let positive = match prepare_expression_with_premises(
+        symbolic_types,
+        sentence,
+        POSITIVE,
+        &run.givens,
+        run.max_dimension,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => {
             validation.checks.push(StepCheck::Error {
@@ -939,7 +966,13 @@ fn validate_ordinary_claim(
             return Ok(ClaimResult::default());
         }
     };
-    let negative = match prepare_expression(symbolic_types, sentence, NEGATIVE) {
+    let negative = match prepare_expression_with_premises(
+        symbolic_types,
+        sentence,
+        NEGATIVE,
+        &run.givens,
+        run.max_dimension,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => {
             validation.checks.push(StepCheck::Error {

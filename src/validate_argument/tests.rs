@@ -207,6 +207,7 @@ fn induction_start_uses_structural_and_given_constraints_not_truth() {
             variable,
             &Environment::default(),
             &SymbolicTypeEnvironment::default(),
+            &[],
             max_dimension,
         )
         .unwrap()
@@ -765,4 +766,79 @@ WTS $A = A$"#,
     assert!(arguments.0[0].error.is_some());
     assert!(arguments.0[1].error.is_none());
     assert!(!arguments.0[1].root.validation.checks.is_empty());
+}
+
+#[test]
+fn ellipsis_local_givens_do_not_escape_to_siblings() {
+    let mut argument = Argument::parse_str(
+        r"# Local interpretation
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $d \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $0 = 0$
+
+1. Given:
+
+   - $\operatorname{diag}(c) = \operatorname{diag}(d)$
+
+   WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$",
+    );
+    argument.validate(2).unwrap();
+    let ArgumentItem::Goal(child) = &argument.root.steps[0] else {
+        panic!("expected goal")
+    };
+    assert!(
+        child
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Unsat { .. }))
+    );
+    assert!(
+        sentence(&argument, 1)
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Error { .. }))
+    );
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Unsat { .. }))
+    );
+}
+
+#[test]
+fn synthesis_minimum_endpoint_does_not_filter_validation_environments() {
+    let mut argument = Argument::parse_str(
+        r"# Private candidate bound
+
+Given:
+
+- $n \in \mathbb{N}$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$",
+    );
+    argument.validate(2).unwrap();
+    // Synthesis needs two anchor positions, but the interpreted map also has a
+    // perfectly meaningful one-element instance in the main validation loop.
+    assert_eq!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .filter(|check| matches!(check, StepCheck::Unsat { .. }))
+            .count(),
+        2
+    );
 }

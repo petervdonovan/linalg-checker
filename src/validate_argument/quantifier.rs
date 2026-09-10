@@ -87,19 +87,29 @@ fn validate_universal_claim(
         .filter(|premise| is_quantifier(premise))
         .cloned()
         .collect::<Vec<_>>();
-    let prepared_premises = ordinary_premises
-        .iter()
-        .map(|premise| prepare_expression(&spec.types, premise, POSITIVE))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ToZ3Error::from)
-        .map_err(ModelFindingError::from)?;
+    let prepared_premises = prepare_givens(
+        &spec.types,
+        &ordinary_premises,
+        &run.givens,
+        run.max_dimension,
+    )
+    .map_err(ToZ3Error::from)
+    .map_err(ModelFindingError::from)?;
+    let mut scope = run.givens.clone();
+    scope.extend(prepared_premises.iter().cloned());
     let prepared_body = if is_quantifier(&spec.body) {
         None
     } else {
         Some(
-            prepare_expression(&spec.types, &spec.body, POSITIVE)
-                .map_err(ToZ3Error::from)
-                .map_err(ModelFindingError::from)?,
+            prepare_expression_with_premises(
+                &spec.types,
+                &spec.body,
+                POSITIVE,
+                &scope,
+                run.max_dimension,
+            )
+            .map_err(ToZ3Error::from)
+            .map_err(ModelFindingError::from)?,
         )
     };
     let extensions = quantifier_environment_extensions(
@@ -143,6 +153,8 @@ fn validate_universal_claim(
                         all_validated = false;
                     }
                 } else {
+                    let scope_len = run.givens.len();
+                    run.givens.extend(prepared_premises.iter().cloned());
                     let result = validate_ordinary_claim(
                         &spec.body,
                         validation,
@@ -151,7 +163,9 @@ fn validate_universal_claim(
                         &spec.types,
                         &local_tracked,
                         run,
-                    )?;
+                    );
+                    run.givens.truncate(scope_len);
+                    let result = result?;
                     all_validated &= result.validated;
                 }
             }
@@ -275,6 +289,16 @@ pub(super) fn analyze_quantifier(
             analyze_quantifier(child, &types)?;
         } else if contains_quantifier(child) {
             return Err("quantifiers embedded beneath another operator are unsupported".to_owned());
+        } else if crate::ellipsis_elimination::contains_ellipses(child) {
+            // Analysis establishes scope; interpretation needs the prepared
+            // preceding givens available during validation.
+            let mut typed = child.with_default_metadata::<crate::type_resolver::TypedMetadata>();
+            crate::type_resolver::TypeResolver::new(
+                &types,
+                &crate::type_resolver::OperatorTypeRules::core(),
+            )
+            .resolve(&mut typed, POSITIVE)
+            .map_err(|error| error.to_string())?;
         } else {
             prepare_expression(&types, child, POSITIVE).map_err(|error| error.to_string())?;
         }

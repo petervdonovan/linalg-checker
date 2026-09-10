@@ -57,6 +57,7 @@ pub(super) fn infer_induction_start(
     variable: &Variable,
     base: &Environment,
     parent_types: &SymbolicTypeEnvironment,
+    enclosing: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<Option<u64>, ArgumentValidationError> {
     for value in 0..=max_dimension {
@@ -73,16 +74,20 @@ pub(super) fn infer_induction_start(
             Err(ArgumentValidationError::Shape(ShapeError::InvalidTyping(_))) => continue,
             Err(error) => return Err(error),
         };
-        let prepared_givens = match givens
-            .iter()
-            .map(|given| prepare_expression(&types, given, POSITIVE))
-            .collect::<Result<Vec<_>, _>>()
-        {
+        let prepared_givens = match prepare_givens(&types, &givens, enclosing, max_dimension) {
             Ok(prepared) => prepared,
             Err(TypeError::Invalid(_)) => continue,
             Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
         };
-        let prepared_conclusion = match prepare_expression(&types, &conclusion, POSITIVE) {
+        let mut scope = enclosing.to_vec();
+        scope.extend(prepared_givens.iter().cloned());
+        let prepared_conclusion = match prepare_expression_with_premises(
+            &types,
+            &conclusion,
+            POSITIVE,
+            &scope,
+            max_dimension,
+        ) {
             Ok(prepared) => prepared,
             Err(TypeError::Invalid(_)) => continue,
             Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
@@ -125,10 +130,7 @@ pub(super) fn validate_tactic_fallback(
     let (mut types, _) = extend_symbolic_types(parent_types, &ordinary_givens)?;
     let Tactic::Induction { variable } = goal.tactic.as_ref().unwrap();
     types.types.insert(variable.clone(), TypeExpr::Nat);
-    let prepared_givens = ordinary_givens
-        .iter()
-        .map(|given| prepare_expression(&types, given, POSITIVE))
-        .collect::<Result<Vec<_>, _>>()
+    let prepared_givens = prepare_givens(&types, &ordinary_givens, &run.givens, run.max_dimension)
         .map_err(ToZ3Error::from)
         .map_err(ModelFindingError::from)?;
     let extensions =
@@ -158,6 +160,8 @@ pub(super) fn validate_tactic_fallback(
             local_tracked.push((tracker, given.clone()));
         }
         if matches!(solver.check(), SatResult::Sat) {
+            let scope_len = run.givens.len();
+            run.givens.extend(prepared_givens.iter().cloned());
             let result = validate_claim(
                 &goal.conclusion,
                 &mut goal.validation,
@@ -169,7 +173,9 @@ pub(super) fn validate_tactic_fallback(
                     retained: scoped_statements,
                 },
                 run,
-            )?;
+            );
+            run.givens.truncate(scope_len);
+            let result = result?;
             all_validated &= result.validated;
         }
         solver.pop(1);

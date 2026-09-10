@@ -772,3 +772,90 @@ WTS $\operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) 
 
 No premises seemed necessary to show this.
 </details>
+
+# Ellipsis in a given
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $A = \operatorname{diag}(c_{1}, \ldots, c_{n})$
+
+WTS $A = \operatorname{diag}(c)$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $A = \operatorname{diag}(c_{1}, \ldots, c_{n})$
+</details>
+
+# Ellipsis using enclosing givens
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $d \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $\operatorname{diag}(c) = \operatorname{diag}(d)$
+
+WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+1. WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Ellipsis error localization
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $d \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $\operatorname{diag}(c) = \operatorname{diag}(c)$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+1. $\operatorname{diag}(c) = \operatorname{diag}(d)$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $\operatorname{diag}(c) = \operatorname{diag}(d)$ is satisfied by:
+
+   - $c_{1} = 2$
+   - $c_{2} = \square$
+   - $d_{1} = 3$
+   - $d_{2} = \square$
+   - $n = 2$
+   </details>
+2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   no candidate range expression matched the visible sequence elements
+   </details>
+3. $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>

@@ -292,3 +292,40 @@ Given:
 - $\lambda_{2} \ge 0$
 
 WTS $\operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) \operatorname{diag}(\operatorname{map}_{i=1}^{2}\lambda_{i}^{\frac{1}{2}}) = \operatorname{diag}(\lambda)$
+
+# Ellipsis in a given
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $A = \operatorname{diag}(c_{1}, \ldots, c_{n})$
+
+WTS $A = \operatorname{diag}(c)$
+
+# Ellipsis using enclosing givens
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $d \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $\operatorname{diag}(c) = \operatorname{diag}(d)$
+
+WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+
+1. WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+
+# Ellipsis error localization
+
+Given:
+
+- $n = 2$
+- $c \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $d \in \operatorname{Seq}_{n}(\mathbb{R})$
+
+WTS $\operatorname{diag}(c) = \operatorname{diag}(c)$
+
+1. $\operatorname{diag}(c) = \operatorname{diag}(d)$
+2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+3. $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$

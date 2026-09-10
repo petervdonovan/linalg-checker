@@ -14,7 +14,7 @@ use crate::{
     expression_utils::{
         all_variables, compare_holeifications, contains_hole, fill_holes, holeifications,
     },
-    formula::{free_variables, substitute_free_variable},
+    formula::substitute_free_variable,
     model_finding::{
         CounterexampleProgram, CounterexampleSearch, FixedEnvironmentCounterexampleChecker,
         ModelFindingError,
@@ -35,9 +35,9 @@ pub enum EllipsisEliminationError {
 impl fmt::Display for EllipsisEliminationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedPattern => formatter.write_str(
-                "ellipsis elimination currently requires one sequence of the form `a, b, ..., z`",
-            ),
+            Self::UnsupportedPattern => {
+                formatter.write_str("ellipsis elimination requires an anchored sequence literal")
+            }
             Self::NoValidCandidate => formatter
                 .write_str("no candidate range expression matched the visible sequence elements"),
             Self::CounterexampleSearchUnknown => {
@@ -61,64 +61,279 @@ impl From<ModelFindingError> for EllipsisEliminationError {
     }
 }
 
-/// Mutable traversal used while constructing collection-level rewrites.
-#[derive(Default)]
-pub struct EllipsisElimination;
-
-impl EllipsisElimination {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl<Metadata> VisitMut<Metadata> for EllipsisElimination {}
-
+/// Compatibility entry point for ordered collection rewrite fixtures.
 pub fn eliminate_ellipses<Metadata: Clone + Default>(
     expressions: &[Expr<Metadata>],
     max_dimension: u64,
 ) -> Result<Vec<Expr<Metadata>>, EllipsisEliminationError> {
+    if !expressions.iter().any(contains_ellipses) {
+        return Ok(clone_forest(expressions));
+    }
     let untyped = expressions
         .iter()
         .map(Expr::with_default_metadata)
         .collect::<Vec<Expr<()>>>();
-    let target = match supported_target(&untyped) {
-        Ok(target) => target,
-        Err(EllipsisEliminationError::UnsupportedPattern) => {
-            return Ok(clone_forest(expressions));
+    // Preserve the historical standalone behavior for unanchored syntax.
+    if untyped.iter().all(|expression| {
+        matches!(
+            &expression.raw,
+            RawExpr::Ellipsis | RawExpr::Finop(Finop::SeqLiteral, _)
+        )
+    }) && untyped.iter().all(|expression| !has_anchor(expression))
+    {
+        return Ok(clone_forest(expressions));
+    }
+    let types = infer_symbolic_type_environment(&untyped).map_err(ModelFindingError::from)?;
+    let mut premises = Vec::new();
+    let mut output = Vec::new();
+    for (original, expression) in expressions.iter().zip(&untyped) {
+        let mut rewritten =
+            expression.with_default_metadata::<crate::type_resolver::TypedMetadata>();
+        crate::type_resolver::TypeResolver::new(
+            &types,
+            &crate::type_resolver::OperatorTypeRules::core(),
+        )
+        .resolve(&mut rewritten, VisitContext::positive())
+        .map_err(ModelFindingError::from_type)?;
+        let mut pass = EllipsisElimination::new(&types, &premises, max_dimension);
+        pass.visit_expr_mut(VisitContext::positive(), &mut rewritten);
+        pass.finish()?;
+        output.push(if contains_ellipses(expression) {
+            rewritten.with_default_metadata()
+        } else {
+            deep_clone(original)
+        });
+        // The standalone API returns surface syntax, so it must not discard
+        // generated definitions by returning a fully lowered expression alone.
+        // Only the internal premise copy undergoes complete preparation.
+        if matches!(
+            crate::type_resolver::MaybeTyped::get_type(&rewritten.meta),
+            Ok(TypeExpr::Bool)
+        ) {
+            premises.push(
+                crate::preprocessing::prepare_expression(
+                    &types,
+                    &rewritten,
+                    VisitContext::positive(),
+                )
+                .map_err(ModelFindingError::from_type)?,
+            );
         }
-        Err(error) => return Err(error),
-    };
-    let symbolic_types =
-        infer_symbolic_type_environment(&untyped).map_err(ModelFindingError::from)?;
-    let variables = free_variables(untyped.iter());
-    let endpoints = variables
-        .iter()
-        .filter(|variable| matches!(symbolic_types.types.get(*variable), Some(TypeExpr::Nat)))
-        .cloned()
-        .collect::<Vec<_>>();
-    let index = fresh_index_variable(&all_variables(untyped.iter()));
-    let bodies = candidate_bodies(&target, &index);
+    }
+    Ok(output)
+}
 
+pub(crate) fn contains_ellipses<Metadata>(expression: &Expr<Metadata>) -> bool {
+    struct Finder(bool);
+    impl<Metadata> crate::visit::Visit<Metadata> for Finder {
+        fn visit_raw_expr_ellipsis(&mut self) {
+            self.0 = true;
+        }
+    }
+    let mut finder = Finder(false);
+    crate::visit::Visit::visit_expr(&mut finder, expression);
+    finder.0
+}
+
+/// Keep anchor syntax intact until synthesis; lowering a root to an opaque
+/// synthetic variable would erase the subterms used to infer its pattern.
+pub(crate) fn is_ellipsis_sequence<Metadata>(expression: &Expr<Metadata>) -> bool {
+    matches!(&expression.raw, RawExpr::Finop(Finop::SeqLiteral, elements)
+        if elements.iter().any(|element| matches!(element.raw, RawExpr::Ellipsis)))
+}
+
+fn has_anchor<Metadata>(expression: &Expr<Metadata>) -> bool {
+    match &expression.raw {
+        RawExpr::Ellipsis => false,
+        RawExpr::Finop(Finop::SeqLiteral, elements) => elements.iter().any(has_anchor),
+        _ => true,
+    }
+}
+
+/// Preconditions: premises are fully prepared and ellipsis-free; the target
+/// forest has run the preceding preparation passes. Only premises are asserted
+/// as evidence. Newly generated syntax is typed without re-entering synthesis.
+pub(crate) struct EllipsisElimination<'a> {
+    types: &'a crate::type_resolver::SymbolicTypeEnvironment,
+    premises: &'a [crate::preprocessing::PreparedExpression],
+    max_dimension: u64,
+    rewrites: usize,
+    error: Option<EllipsisEliminationError>,
+}
+
+impl<'a> EllipsisElimination<'a> {
+    pub(crate) fn new(
+        types: &'a crate::type_resolver::SymbolicTypeEnvironment,
+        premises: &'a [crate::preprocessing::PreparedExpression],
+        max_dimension: u64,
+    ) -> Self {
+        Self {
+            types,
+            premises,
+            max_dimension,
+            rewrites: 0,
+            error: None,
+        }
+    }
+    pub(crate) fn finish(self) -> Result<usize, EllipsisEliminationError> {
+        self.error.map_or(Ok(self.rewrites), Err)
+    }
+}
+
+impl VisitMut<crate::type_resolver::TypedMetadata> for EllipsisElimination<'_> {
+    fn visit_logic_chain_mut(
+        &mut self,
+        context: VisitContext,
+        chain: &mut crate::LogicChain<crate::type_resolver::TypedMetadata>,
+    ) {
+        self.visit_expr_mut(context.clone(), &mut chain.start);
+        for (_, assertion) in &mut chain.assertions {
+            self.visit_expr_mut(context.clone(), assertion);
+        }
+    }
+
+    fn visit_expr_mut(
+        &mut self,
+        context: VisitContext,
+        node: &mut Expr<crate::type_resolver::TypedMetadata>,
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+        // A literal owns its ellipsis markers; recurse into anchors only.
+        if let RawExpr::Finop(Finop::SeqLiteral, elements) = &mut node.get_mut().unwrap().raw {
+            for element in elements.iter_mut() {
+                if !matches!(element.raw, RawExpr::Ellipsis) {
+                    self.visit_expr_mut(context.clone(), element);
+                }
+            }
+        } else {
+            crate::visit_mut::visit_expr_mut(self, context.clone(), node);
+        }
+        if self.error.is_some() {
+            return;
+        }
+        if matches!(node.raw, RawExpr::Ellipsis) {
+            self.error = Some(EllipsisEliminationError::UnsupportedPattern);
+        } else if let RawExpr::Finop(Finop::SeqLiteral, elements) = &node.raw
+            && elements
+                .iter()
+                .any(|element| matches!(element.raw, RawExpr::Ellipsis))
+        {
+            let untyped = node.with_default_metadata();
+            match synthesize(
+                &untyped,
+                self.types,
+                self.premises,
+                &context,
+                self.max_dimension,
+            ) {
+                Ok(candidate) => {
+                    *node = candidate.with_default_metadata();
+                    self.rewrites += 1;
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+    }
+}
+
+fn synthesize(
+    expression: &Expr<()>,
+    types: &crate::type_resolver::SymbolicTypeEnvironment,
+    premises: &[crate::preprocessing::PreparedExpression],
+    context: &VisitContext,
+    max_dimension: u64,
+) -> Result<Expr<()>, EllipsisEliminationError> {
+    let target = supported_target(std::slice::from_ref(expression))?;
+    let mut symbolic_types = types.clone();
+    let mut range_assumptions = Vec::new();
+    // Enumerate lexical indices only in this private search. They never become
+    // global parameters of the prepared result or the validation environment.
+    for range in &context.active_ranges {
+        symbolic_types
+            .types
+            .insert(range.index_variable.clone(), TypeExpr::Nat);
+        let bound = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: range.from.clone(),
+            assertions: vec![
+                (
+                    Cmp::Le,
+                    Expr::new(RawExpr::Variable(range.index_variable.clone())),
+                ),
+                (Cmp::Le, range.to.clone()),
+            ],
+        }));
+        range_assumptions.push(
+            crate::preprocessing::prepare_expression(
+                &symbolic_types,
+                &bound,
+                VisitContext::positive(),
+            )
+            .map_err(ModelFindingError::from_type)?,
+        );
+    }
+    let endpoints = symbolic_types
+        .types
+        .iter()
+        .filter(|(_, ty)| matches!(ty, TypeExpr::Nat))
+        .map(|(variable, _)| variable.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut variables = all_variables(std::iter::once(expression));
+    variables.extend(symbolic_types.types.keys().cloned());
+    let index = fresh_index_variable(&variables);
+    let bodies = candidate_bodies(&target, &index);
     let mut saw_unknown = false;
     let mut saw_admissible_environment = false;
     for body in &bodies {
         for endpoint in &endpoints {
             let candidate = map_candidate(&index, endpoint, body);
-            let mut program = untyped.clone();
-            program[target.expression_index] = candidate;
-            program.push(minimum_endpoint(&target, endpoint));
-            let Ok(search) = CounterexampleProgram::new(&program, max_dimension) else {
-                continue;
+            let prepared_candidate = match crate::preprocessing::prepare_expression(
+                &symbolic_types,
+                &candidate,
+                VisitContext::positive(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(_) => continue,
             };
-            let Ok(environments) = search.environments() else {
-                continue;
+            let minimum = crate::preprocessing::prepare_expression(
+                &symbolic_types,
+                &minimum_endpoint(&target, endpoint),
+                VisitContext::positive(),
+            )
+            .map_err(ModelFindingError::from_type)?;
+            let mut dimension_assumptions = range_assumptions.clone();
+            dimension_assumptions.push(minimum);
+            // Solvers are private to synthesis and deliberately discarded. Reusing
+            // them during later validation is a potential optimization, not state
+            // owned by preparation. Anchor matching is bounded interpretation.
+            let search = CounterexampleProgram::new(
+                &symbolic_types,
+                premises,
+                vec![prepared_candidate],
+                dimension_assumptions,
+                max_dimension,
+            );
+            let environments = match search.environments() {
+                Ok(environments) => environments,
+                Err(ModelFindingError::Shape(crate::enumerable_envspec::ShapeError::Unknown(
+                    _,
+                ))) => {
+                    saw_unknown = true;
+                    continue;
+                }
+                Err(_) => continue,
             };
             let mut saw_environment = false;
             let mut candidate_valid = true;
             for environment in environments {
                 let environment = match environment {
                     Ok(environment) => environment,
-                    Err(_) => {
+                    Err(error) => {
+                        saw_unknown |=
+                            matches!(error, crate::enumerable_envspec::ShapeError::Unknown(_));
                         candidate_valid = false;
                         break;
                     }
@@ -150,20 +365,7 @@ pub fn eliminate_ellipses<Metadata: Clone + Default>(
                 }
             }
             if candidate_valid && saw_environment {
-                return Ok(expressions
-                    .iter()
-                    .enumerate()
-                    .map(|(expression_index, expression)| {
-                        if expression_index == target.expression_index {
-                            program[expression_index].with_default_metadata()
-                        } else {
-                            let mut rewritten = deep_clone(expression);
-                            EllipsisElimination::new()
-                                .visit_expr_mut(VisitContext::positive(), &mut rewritten);
-                            rewritten
-                        }
-                    })
-                    .collect());
+                return Ok(candidate);
             }
         }
     }
@@ -177,18 +379,10 @@ pub fn eliminate_ellipses<Metadata: Clone + Default>(
 }
 
 fn clone_forest<Metadata: Clone>(expressions: &[Expr<Metadata>]) -> Vec<Expr<Metadata>> {
-    expressions
-        .iter()
-        .map(|expression| {
-            let mut rewritten = deep_clone(expression);
-            EllipsisElimination::new().visit_expr_mut(VisitContext::positive(), &mut rewritten);
-            rewritten
-        })
-        .collect()
+    expressions.iter().map(deep_clone).collect()
 }
 
 struct Target<'a> {
-    expression_index: usize,
     elements: &'a [Expr<()>],
 }
 
@@ -203,21 +397,15 @@ impl Target<'_> {
 }
 
 fn supported_target(expressions: &[Expr<()>]) -> Result<Target<'_>, EllipsisEliminationError> {
-    let mut targets = expressions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, expression)| {
-            let RawExpr::Finop(Finop::SeqLiteral, elements) = &expression.raw else {
-                return None;
-            };
-            elements
-                .iter()
-                .any(|element| matches!(element.raw, RawExpr::Ellipsis))
-                .then_some(Target {
-                    expression_index: index,
-                    elements,
-                })
-        });
+    let mut targets = expressions.iter().filter_map(|expression| {
+        let RawExpr::Finop(Finop::SeqLiteral, elements) = &expression.raw else {
+            return None;
+        };
+        elements
+            .iter()
+            .any(|element| matches!(element.raw, RawExpr::Ellipsis))
+            .then_some(Target { elements })
+    });
     let target = targets
         .next()
         .ok_or(EllipsisEliminationError::UnsupportedPattern)?;
@@ -624,6 +812,33 @@ mod tests {
         let mut mutable = MutableCounter(0);
         mutable.visit_expr_mut(VisitContext::positive(), &mut expression);
         assert_eq!(mutable.0, 2);
+    }
+
+    #[test]
+    fn standalone_rewrites_keep_surface_roots_without_losing_definitions() {
+        let rewritten = rewrite_last(
+            &[
+                r"n = 2",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+                r"c_1^{\frac{1}{2}}, \ldots, c_n^{\frac{1}{2}}",
+            ],
+            2,
+        )
+        .unwrap();
+        assert!(rewritten.contains(r"\frac{1}{2}"));
+        assert!(rewritten.contains(r"\operatorname{map}"));
+    }
+
+    #[test]
+    fn reports_unknown_when_the_synthesis_solver_exhausts_its_budget() {
+        let mut config = z3::Config::new();
+        config.set_param_value("rlimit", "1");
+        z3::with_z3_config(&config, || {
+            assert!(matches!(
+                rewrite_last(&[r"n \in \mathbb{N}", r"1, 2, \ldots, n"], 3),
+                Err(EllipsisEliminationError::CounterexampleSearchUnknown)
+            ));
+        });
     }
 
     #[test]

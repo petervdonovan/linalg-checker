@@ -10,6 +10,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
     MissingType(Variable),
+    Ellipsis(Box<crate::ellipsis_elimination::EllipsisEliminationError>),
     Invalid(&'static str),
     Unsupported(&'static str),
 }
@@ -17,6 +18,7 @@ pub enum TypeError {
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Ellipsis(error) => error.fmt(f),
             Self::MissingType(variable) => write!(f, "missing type for {}", variable.z3_name()),
             Self::Invalid(message) | Self::Unsupported(message) => f.write_str(message),
         }

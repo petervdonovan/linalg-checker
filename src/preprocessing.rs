@@ -18,10 +18,96 @@ pub struct PreparedExpression {
     pub context: VisitContext,
 }
 
+impl PreparedExpression {
+    /// Compose an exported implication without erasing annotations or losing
+    /// definitions introduced while interpreting its givens and conclusion.
+    pub(crate) fn under_givens(mut self, givens: &[Self]) -> Self {
+        if givens.is_empty() {
+            return self;
+        }
+        let bool_meta = TypedMetadata::resolved(crate::TypeExpr::Bool);
+        let antecedent = if let [given] = givens {
+            given.expression.clone()
+        } else {
+            Expr::with_metadata(
+                bool_meta.clone(),
+                RawExpr::Finop(
+                    crate::Finop::And,
+                    givens
+                        .iter()
+                        .map(|given| given.expression.clone())
+                        .collect(),
+                ),
+            )
+        };
+        self.expression = Expr::with_metadata(
+            bool_meta,
+            RawExpr::LogicChain(crate::LogicChain {
+                start: antecedent,
+                assertions: vec![(Logic::Imp, self.expression)],
+            }),
+        );
+        for given in givens {
+            merge_side_conditions(&mut self.side_conditions, given.side_conditions.clone());
+        }
+        self
+    }
+}
+
 pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
     types: &Lookup,
     expression: &Expr<Metadata>,
     context: VisitContext,
+) -> Result<PreparedExpression, TypeError> {
+    prepare_expression_inner(types, expression, context, None)
+}
+
+/// Prepare using fully prepared, ellipsis-free givens as interpretation premises.
+pub fn prepare_expression_with_premises<Metadata>(
+    types: &crate::type_resolver::SymbolicTypeEnvironment,
+    expression: &Expr<Metadata>,
+    context: VisitContext,
+    premises: &[PreparedExpression],
+    max_dimension: u64,
+) -> Result<PreparedExpression, TypeError> {
+    prepare_expression_inner(
+        types,
+        expression,
+        context,
+        Some((types, premises, max_dimension)),
+    )
+}
+
+/// Givens are interpreted in order; a given never supplies its own evidence.
+pub fn prepare_givens(
+    types: &crate::type_resolver::SymbolicTypeEnvironment,
+    givens: &[Expr<()>],
+    enclosing: &[PreparedExpression],
+    max_dimension: u64,
+) -> Result<Vec<PreparedExpression>, TypeError> {
+    let mut scope = enclosing.to_vec();
+    for given in givens {
+        let prepared = prepare_expression_with_premises(
+            types,
+            given,
+            VisitContext::positive(),
+            &scope,
+            max_dimension,
+        )?;
+        scope.push(prepared);
+    }
+    Ok(scope.split_off(enclosing.len()))
+}
+
+fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
+    types: &Lookup,
+    expression: &Expr<Metadata>,
+    context: VisitContext,
+    synthesis: Option<(
+        &crate::type_resolver::SymbolicTypeEnvironment,
+        &[PreparedExpression],
+        u64,
+    )>,
 ) -> Result<PreparedExpression, TypeError> {
     let mut expression: Expr<TypedMetadata> = expression.with_default_metadata();
     let core_rules = OperatorTypeRules::core();
@@ -91,6 +177,34 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
         let (root_rewrites, conditions) = square_roots.finish()?;
         rewrites += root_rewrites;
         merge_side_conditions(&mut side_conditions, conditions);
+
+        if let Some((types, premises, max_dimension)) = synthesis {
+            let mut synthesis_types = types.clone();
+            for condition in premises
+                .iter()
+                .flat_map(|premise| &premise.side_conditions)
+                .chain(&side_conditions)
+            {
+                synthesis_types.types.insert(
+                    condition.introduced_variable.clone(),
+                    condition.introduced_type.clone(),
+                );
+            }
+            let mut ellipses = crate::ellipsis_elimination::EllipsisElimination::new(
+                &synthesis_types,
+                premises,
+                max_dimension,
+            );
+            visit_forest(
+                &mut ellipses,
+                context.clone(),
+                &mut expression,
+                &mut side_conditions,
+            );
+            rewrites += ellipses
+                .finish()
+                .map_err(|error| TypeError::Ellipsis(Box::new(error)))?;
+        }
 
         if rewrites == 0 {
             validate_forest(&core_rules, &expression, &side_conditions)?;
@@ -529,5 +643,190 @@ mod tests {
                 .unwrap_err(),
             crate::type_resolver::TypeError::Unsupported("square root remains after preprocessing")
         );
+    }
+    fn prepare_with_givens(
+        tex: &str,
+        givens: &[&str],
+    ) -> Result<super::PreparedExpression, crate::type_resolver::TypeError> {
+        let givens = givens.iter().map(|tex| expression(tex)).collect::<Vec<_>>();
+        let types = infer_symbolic_type_environment(&givens).unwrap();
+        let premises = super::prepare_givens(&types, &givens, &[], 3)?;
+        super::prepare_expression_with_premises(&types, &expression(tex), POSITIVE, &premises, 3)
+    }
+
+    #[test]
+    fn eliminates_multiple_nested_literals_and_finishes_typing() {
+        let prepared = prepare_with_givens(
+            r"\operatorname{diag}(c_1, \ldots, c_n) = \operatorname{diag}(c_1, \ldots, c_n)",
+            &[
+                r"n \in \mathbb{N}",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+            ],
+        )
+        .unwrap();
+        assert_eq!(prepared.expression.meta.get_type(), Ok(TypeExpr::Bool));
+        assert!(!prepared.expression.as_latex().to_string().contains("ldots"));
+    }
+
+    #[test]
+    fn synthesis_enables_root_lowering_in_the_same_fixpoint() {
+        let prepared = prepare_with_givens(
+            r"\left(\operatorname{diag}(c_1, \ldots, c_n)\right)^{\frac{1}{2}}",
+            &[
+                r"n \in \mathbb{N}",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(prepared.expression.raw, RawExpr::Variable(_)));
+        assert_eq!(prepared.side_conditions.len(), 1);
+        assert!(
+            !prepared.side_conditions[0].defining_assertions[0]
+                .as_latex()
+                .to_string()
+                .contains("ldots")
+        );
+    }
+
+    #[test]
+    fn synthesis_preserves_root_anchor_patterns_and_lifts_definitions() {
+        let prepared = prepare_with_givens(
+            r"\operatorname{diag}(c_1^{\frac{1}{2}}, \ldots, c_n^{\frac{1}{2}})",
+            &[
+                r"n \in \mathbb{N}",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+            ],
+        )
+        .unwrap();
+        assert_eq!(prepared.side_conditions.len(), 1);
+        assert_eq!(prepared.side_conditions[0].active_ranges.len(), 1);
+    }
+
+    #[test]
+    fn synthesis_checks_every_lexical_index_without_exporting_it() {
+        let prepared = prepare_with_givens(
+            r"\sum_{j=1}^{n}\det(\operatorname{diag}(c_1 + j, \ldots, c_n + j))",
+            &[
+                r"n \in \mathbb{N}",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+            ],
+        )
+        .unwrap();
+        assert!(!prepared.expression.as_latex().to_string().contains("ldots"));
+        assert!(prepared.context.active_ranges.is_empty());
+    }
+
+    #[test]
+    fn target_equality_cannot_justify_its_own_anchors() {
+        let result = prepare_with_givens(
+            r"\operatorname{diag}(c_1, \ldots, d_n) = \operatorname{diag}(c)",
+            &[
+                r"n \in \mathbb{N}",
+                r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+                r"d \in \operatorname{Seq}_{n}(\mathbb{R})",
+            ],
+        );
+        assert!(matches!(
+            result,
+            Err(crate::type_resolver::TypeError::Ellipsis(_))
+        ));
+    }
+
+    #[test]
+    fn ellipsis_in_generated_norm_definitions_is_eliminated() {
+        let prepared = prepare_with_givens(
+            r"\left\lVert \operatorname{diag}(c_1, \ldots, c_n)e_1 \right\rVert_{2}",
+            &[r"n = 2", r"c \in \operatorname{Seq}_{n}(\mathbb{R})"],
+        )
+        .unwrap();
+        assert_eq!(prepared.side_conditions.len(), 1);
+        for condition in &prepared.side_conditions {
+            for assertion in &condition.defining_assertions {
+                assert!(!crate::ellipsis_elimination::contains_ellipses(assertion));
+                assert_eq!(assertion.meta.get_type(), Ok(TypeExpr::Bool));
+            }
+        }
+    }
+
+    #[test]
+    fn given_interpretation_uses_preceding_but_not_later_givens() {
+        let declarations = [
+            r"n = 2",
+            r"c \in \operatorname{Seq}_{n}(\mathbb{R})",
+            r"d \in \operatorname{Seq}_{n}(\mathbb{R})",
+        ];
+        let mixed = r"A = \operatorname{diag}(c_1, \ldots, d_n)";
+        let evidence = r"\operatorname{diag}(c) = \operatorname{diag}(d)";
+        let before = declarations
+            .into_iter()
+            .chain([mixed, evidence])
+            .collect::<Vec<_>>();
+        assert!(prepare_with_givens("0 = 0", &before).is_err());
+        let after = declarations
+            .into_iter()
+            .chain([evidence, mixed])
+            .collect::<Vec<_>>();
+        assert!(prepare_with_givens("0 = 0", &after).is_ok());
+    }
+
+    #[test]
+    fn nested_ellipsis_anchors_are_interpreted_inside_out() {
+        let givens = [
+            expression(r"n = 2"),
+            expression(r"c \in \operatorname{Seq}_{n}(\mathbb{R})"),
+        ];
+        let types = infer_symbolic_type_environment(&givens).unwrap();
+        let premises = super::prepare_givens(&types, &givens, &[], 2).unwrap();
+        let inner = expression(r"c_1, \ldots, c_n");
+        let outer = Expr::new(RawExpr::Finop(
+            Finop::SeqLiteral,
+            vec![inner.clone(), Expr::new(RawExpr::Ellipsis), inner],
+        ));
+        let prepared =
+            super::prepare_expression_with_premises(&types, &outer, POSITIVE, &premises, 2)
+                .unwrap();
+        assert!(!crate::ellipsis_elimination::contains_ellipses(
+            &prepared.expression
+        ));
+        let TypeExpr::Seq(element, _) = prepared.expression.meta.get_type().unwrap() else {
+            panic!("expected sequence")
+        };
+        assert!(matches!(element.raw, RawExpr::Type(TypeExpr::Seq(_, _))));
+    }
+
+    #[test]
+    fn synthesis_visits_checkable_existence_assertions() {
+        let givens = [
+            expression(r"n = 2"),
+            expression(r"c \in \operatorname{Seq}_{n}(\mathbb{R})"),
+        ];
+        let types = infer_symbolic_type_environment(&givens).unwrap();
+        let premises = super::prepare_givens(&types, &givens, &[], 2).unwrap();
+        let mut main = expression("0 = 0").with_default_metadata();
+        let mut conditions = vec![crate::visit_mut::SideCondition {
+            introduced_variable: crate::Variable::new("root"),
+            display_name: "root".into(),
+            introduced_type: TypeExpr::Real,
+            active_ranges: Vec::new(),
+            defining_assertions: Vec::new(),
+            existence: Existence::Checkable(vec![
+                expression(r"\operatorname{diag}(c_1, \ldots, c_n) = \operatorname{diag}(c)")
+                    .with_default_metadata(),
+            ]),
+        }];
+        let rules = crate::type_resolver::OperatorTypeRules::core();
+        super::resolve_forest(&types, &rules, POSITIVE, &mut main, &mut conditions).unwrap();
+        let mut pass = crate::ellipsis_elimination::EllipsisElimination::new(&types, &premises, 2);
+        super::visit_forest(&mut pass, POSITIVE, &mut main, &mut conditions);
+        assert_eq!(pass.finish().unwrap(), 1);
+        super::resolve_forest(&types, &rules, POSITIVE, &mut main, &mut conditions).unwrap();
+        super::validate_forest(&rules, &main, &conditions).unwrap();
+    }
+
+    #[test]
+    fn unsupported_ellipsis_is_a_structured_preparation_error() {
+        assert!(matches!(prepare_with_givens(r"\ldots", &[]),
+            Err(crate::type_resolver::TypeError::Ellipsis(error))
+                if *error == crate::ellipsis_elimination::EllipsisEliminationError::UnsupportedPattern));
     }
 }

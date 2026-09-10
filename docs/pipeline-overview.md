@@ -91,7 +91,8 @@ flowchart TD
     N2SQ --> N2[Lower 2-norm]
     N2 --> SQRT[Lower square roots]
     SQRT --> MERGE[Merge side conditions and synthetic types]
-    MERGE --> CHANGED{Any rewrite?}
+    MERGE --> ELLIPSIS[Interpret anchored ellipses using prepared givens]
+    ELLIPSIS --> CHANGED{Any rewrite?}
     CHANGED -- yes --> TYPE
     CHANGED -- no --> CHECK[Validate complete typing and core surface syntax]
     CHECK --> PREP[PreparedExpression]
@@ -105,6 +106,38 @@ prepared forest.
 `OperatorTypeRules::core()` computes parent types from typed children. Structural
 forms such as literals, variables, matrices, chains, and sequence binders are
 handled directly by `TypeResolver`.
+
+### Ellipsis interpretation
+
+Argument validation uses `prepare_expression_with_premises`, which supplies the
+same preparation fixpoint with authoritative symbolic types, already-prepared
+givens, and `max_dimension`. The three-argument `prepare_expression` is the
+synthesis-free entry point used for generated candidates and equality queries;
+it rejects residual ellipses at completion. This avoids recursively invoking
+synthesis or re-preparing its premises.
+
+Ellipsis elimination runs after the other lowering visitors, throughout the main
+expression and the defining and checkable-existence assertions. It processes
+nested sequences inside out. Existing visitors leave anchored ellipsis literals
+intact so that, for example, root lowering does not erase an anchor's pattern.
+The inferred map is typed and lowered on subsequent fixpoint iterations. Anchors
+retain their types, while the complete sequence type waits for synthesis to
+choose its length; no provisional sequence length is assigned.
+
+Givens are prepared in order using preceding and enclosing prepared givens.
+Claims use all in-scope givens, excluding proof steps and the current claim.
+Only these premises are asserted during anchor-equality checking. Candidate
+shape constraints, minimum lengths, and lexical-index bounds belong to the
+private synthesis search. They are not exported into validation. Rewritten
+givens themselves do feed ordinary environment enumeration.
+
+Candidate selection retains its deterministic ordering and searches through
+`max_dimension`: this is bounded interpretation of notation, not an unbounded
+proof of the intended sequence. Unknown or unsuccessful searches produce
+structured preparation errors. Synthesis solvers are discarded; sharing them
+with later incremental validation is a potential optimization deliberately
+left unimplemented. Once ellipses are gone, later iterations construct no
+synthesis solvers.
 
 ### Logical polarity
 

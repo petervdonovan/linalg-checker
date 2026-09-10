@@ -19,6 +19,9 @@ impl LogicLowering {
 
 impl<Metadata: Clone> VisitMut<Metadata> for LogicLowering {
     fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
+        if crate::ellipsis_elimination::is_ellipsis_sequence(node) {
+            return;
+        }
         let replacement = {
             let MetaExpr { meta, raw } = node
                 .get_mut()
