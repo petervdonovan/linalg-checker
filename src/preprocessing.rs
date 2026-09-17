@@ -4,8 +4,8 @@ use crate::{
     Binop, Expr, Finop, Logic, Monop, RawExpr,
     logic_lowering::LogicLowering,
     operator_visitors::{
-        ExistsLowering, Norm2SquaredVisitor, Norm2Visitor, SetOperatorLowering, SquareRootVisitor,
-        assert_compatible,
+        Norm2SquaredVisitor, Norm2Visitor, QuantifierLowering, SetOperatorLowering,
+        SquareRootVisitor, assert_compatible,
     },
     type_resolver::{
         MaybeTyped, OperatorTypeRules, TypeError, TypeLookup, TypeResolver, TypedMetadata,
@@ -169,16 +169,16 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         let set_rewrites = sets.finish()?;
 
-        let mut exists = ExistsLowering::default();
+        let mut quantifiers = QuantifierLowering::default();
         visit_forest(
-            &mut exists,
+            &mut quantifiers,
             context.clone(),
             &mut expression,
             &mut side_conditions,
         );
-        let (exists_rewrites, conditions) = exists.finish()?;
+        let (quantifier_rewrites, conditions) = quantifiers.finish()?;
         merge_side_conditions(&mut side_conditions, conditions);
-        if set_rewrites > 0 || exists_rewrites > 0 {
+        if set_rewrites > 0 || quantifier_rewrites > 0 {
             // Resolve substituted syntax and newly introduced witnesses before
             // lowering other operators or running synthesis.
             continue;
@@ -349,6 +349,9 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
             }
             RawExpr::Finop(Finop::Exists, _) => Some(TypeError::Unsupported(
                 "existential expressions can only be lowered in positive logical contexts",
+            )),
+            RawExpr::Finop(Finop::Forall, _) => Some(TypeError::Unsupported(
+                "universal expressions can only be lowered in negative logical contexts",
             )),
             RawExpr::Binop(Binop::Power, _, exponent) if is_half(exponent) => Some(
                 TypeError::Unsupported("square root remains after preprocessing"),

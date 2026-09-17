@@ -967,18 +967,74 @@ This follows from the following facts:
 - $y \in \operatorname{Nul}(A)$
 </details>
 
-# Range membership witness
+# Invertible matrix has full range
 
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $b \in \mathbb{R}^{2}$
-- $b \in \operatorname{Range}(A)$
+- $x \in \mathbb{R}^{2}$
+- $\det(A) \ne 0$
 
-WTS $b = b$
+WTS $x \in \operatorname{Range}(A)$
 
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $\det(A) \ne 0$
+</details>
+
+# Nonzero left-null vector is outside the range
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $z \in \mathbb{R}^{2}$
+- $A^\top z = \mathbb{0}$
+- $z \ne \mathbb{0}$
+
+WTS $z \notin \operatorname{Range}(A)$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $A^\top z = \mathbb{0}$
+- $z \ne \mathbb{0}$
+</details>
+
+# Positive existential skolemization
+
+Given:
+
+- $c \in \mathbb{R}$
+- $c > 0 \land \left(\exists a, a > 0\right)$
+
+WTS $c > 0$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $c > 0 \land \left(\exists a, a > 0\right)$
+</details>
+
+# Negative universal skolemization
+
+Given:
+
+- $c \in \mathbb{R}$
+- $\left(\forall a, a = a\right) \implies c > 0$
+
+WTS $c > 0$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $\left(\forall a, a = a\right) \implies c > 0$
 </details>

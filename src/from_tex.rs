@@ -165,20 +165,31 @@ impl<'a> Cursor<'a> {
     fn parse_comparison(&mut self) -> Result<Expr<()>, FromTexError> {
         let start = self.parse_sequence_literal()?;
         self.skip_ignorable();
-        if self.current_atom_text() == Some(r"\in") {
+        let current = self.nodes.get(self.position);
+        if matches!(self.current_symbol_text(), Some(r"\in" | r"\notin"))
+            || current.is_some_and(is_not_in)
+        {
+            let negated =
+                self.current_symbol_text() == Some(r"\notin") || current.is_some_and(is_not_in);
             self.position += 1;
             self.skip_ignorable();
             let right = self.parse_sequence_literal()?;
             self.skip_ignorable();
             if self.current_comparison_operator().is_some()
-                || self.current_atom_text() == Some(r"\in")
+                || matches!(self.current_symbol_text(), Some(r"\in" | r"\notin"))
+                || self.nodes.get(self.position).is_some_and(is_not_in)
             {
                 return Err(FromTexError::Malformed {
                     index: self.position,
                     message: "membership cannot be chained".to_owned(),
                 });
             }
-            return Ok(Expr::new(RawExpr::Binop(Binop::ElementOf, start, right)));
+            let membership = Expr::new(RawExpr::Binop(Binop::ElementOf, start, right));
+            return Ok(if negated {
+                Expr::new(RawExpr::Monop(Monop::Not, membership))
+            } else {
+                membership
+            });
         }
         let mut assertions = Vec::new();
 
@@ -260,6 +271,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<Expr<()>, FromTexError> {
+        if matches!(self.current_symbol_text(), Some(r"\neg" | r"\lnot")) {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::Monop(Monop::Not, self.parse_prefix()?)));
+        }
         if self.current_atom_text() == Some("-") {
             self.position += 1;
             return Ok(Expr::new(RawExpr::Monop(Monop::Neg, self.parse_prefix()?)));
@@ -603,6 +618,10 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    fn current_symbol_text(&self) -> Option<&str> {
+        self.nodes.get(self.position)?.symbol_text()
+    }
+
     fn current_comparison_operator(&self) -> Option<Cmp> {
         match self.nodes.get(self.position)? {
             node if is_not_equal(node) => Some(Cmp::Ne),
@@ -679,6 +698,22 @@ fn is_not_equal(node: &ParseNode) -> bool {
                         && matches!(
                             body.as_slice(),
                             [ParseNode::TextOrd { text, .. }] if text == "≠"
+                        )
+            )
+    )
+}
+
+fn is_not_in(node: &ParseNode) -> bool {
+    matches!(
+        node,
+        ParseNode::HtmlMathMl { mathml, .. }
+            if matches!(
+                mathml.as_slice(),
+                [ParseNode::MClass { mclass, body, .. }]
+                    if mclass == "mrel"
+                        && matches!(
+                            body.as_slice(),
+                            [ParseNode::TextOrd { text, .. }] if text == "∉"
                         )
             )
     )
@@ -1386,6 +1421,18 @@ mod tests {
             round_trip(r"\max(1, 2)").unwrap(),
             round_trip(r"\min(1, 2)").unwrap(),
         ));
+    }
+
+    #[test]
+    fn parses_boolean_negation_and_not_membership_canonically() {
+        assert_eq!(round_trip(r"\neg P").unwrap(), r"\neg P");
+        assert_eq!(round_trip(r"\lnot P").unwrap(), r"\neg P");
+        assert_eq!(
+            round_trip(r"\neg(P \land Q)").unwrap(),
+            r"\neg \left(P \land Q\right)"
+        );
+        assert_eq!(round_trip(r"x \notin S").unwrap(), r"x \notin S");
+        assert_eq!(round_trip(r"\neg(x \in S)").unwrap(), r"x \notin S");
     }
 
     #[test]

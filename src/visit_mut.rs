@@ -561,7 +561,7 @@ pub fn visit_raw_expr_monop_mut<V, Metadata>(
 ) where
     V: VisitMut<Metadata> + ?Sized,
 {
-    let child_context = if matches!(op, Monop::Neg) {
+    let child_context = if matches!(op, Monop::Not) {
         context.flipped()
     } else {
         context
@@ -689,15 +689,15 @@ mod tests {
     }
 
     #[test]
-    fn negation_flips_logical_polarity() {
+    fn boolean_negation_flips_logical_polarity() {
         let mut expression = Expr::new(RawExpr::Finop(
             Finop::Plus,
             vec![
                 variable("x"),
-                Expr::new(RawExpr::Monop(Monop::Neg, variable("y"))),
+                Expr::new(RawExpr::Monop(Monop::Not, variable("y"))),
                 Expr::new(RawExpr::Monop(
-                    Monop::Neg,
-                    Expr::new(RawExpr::Monop(Monop::Neg, variable("z"))),
+                    Monop::Not,
+                    Expr::new(RawExpr::Monop(Monop::Not, variable("z"))),
                 )),
             ],
         ));
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn an_explicitly_negative_root_reverses_all_polarities() {
-        let mut expression = Expr::new(RawExpr::Monop(Monop::Neg, variable("x")));
+        let mut expression = Expr::new(RawExpr::Monop(Monop::Not, variable("x")));
         let mut visitor = PolarityRecorder { visits: Vec::new() };
         visitor.visit_expr_mut(
             VisitContext {
@@ -720,6 +720,14 @@ mod tests {
             },
             &mut expression,
         );
+        assert_eq!(visitor.visits, [("x".into(), true)]);
+    }
+
+    #[test]
+    fn arithmetic_negation_preserves_logical_polarity() {
+        let mut expression = Expr::new(RawExpr::Monop(Monop::Neg, variable("x")));
+        let mut visitor = PolarityRecorder { visits: Vec::new() };
+        visitor.visit_expr_mut(POSITIVE, &mut expression);
         assert_eq!(visitor.visits, [("x".into(), true)]);
     }
 
@@ -743,7 +751,7 @@ mod tests {
             ],
         ));
         RenameNegative.visit_expr_mut(POSITIVE, &mut expression);
-        assert_eq!(expression.as_latex().to_string(), "x - y_negative");
+        assert_eq!(expression.as_latex().to_string(), "x - y");
     }
 
     #[test]
@@ -809,18 +817,18 @@ mod tests {
 
     #[test]
     fn unary_hook_can_mutate_the_operator_and_delegate() {
-        struct ReplaceWithNeg {
+        struct ReplaceWithNot {
             visits: Vec<(String, bool)>,
         }
 
-        impl VisitMut<()> for ReplaceWithNeg {
+        impl VisitMut<()> for ReplaceWithNot {
             fn visit_raw_expr_monop_mut(
                 &mut self,
                 context: VisitContext,
                 op: &mut Monop,
                 expression: &mut Expr<()>,
             ) {
-                *op = Monop::Neg;
+                *op = Monop::Not;
                 super::visit_raw_expr_monop_mut(self, context, op, expression);
             }
 
@@ -831,9 +839,9 @@ mod tests {
         }
 
         let mut expression = Expr::new(RawExpr::Monop(Monop::Inverse, variable("x")));
-        let mut visitor = ReplaceWithNeg { visits: Vec::new() };
+        let mut visitor = ReplaceWithNot { visits: Vec::new() };
         visitor.visit_expr_mut(POSITIVE, &mut expression);
-        assert!(matches!(expression.raw, RawExpr::Monop(Monop::Neg, _)));
+        assert!(matches!(expression.raw, RawExpr::Monop(Monop::Not, _)));
         assert_eq!(visitor.visits, [("x".into(), false)]);
     }
 

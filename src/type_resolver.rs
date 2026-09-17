@@ -142,6 +142,7 @@ impl OperatorTypeRules {
     pub fn core() -> Self {
         let mut rules = Self::new();
         rules.register_monop(Monop::Neg, numeric_identity_rule);
+        rules.register_monop(Monop::Not, boolean_identity_rule);
         rules.register_monop(Monop::Transpose, transpose_rule);
         rules.register_monop(Monop::Diag, diagonal_rule);
         for op in [
@@ -484,16 +485,16 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     self.visit_expr_mut(context.clone(), b);
                     self.visit_expr_mut(context.clone(), c);
                 }
-                RawExpr::Finop(Finop::Exists, expressions) => {
+                RawExpr::Finop(Finop::Forall | Finop::Exists, expressions) => {
                     let Some((declaration, remaining)) = expressions.split_first() else {
                         self.error = Some(TypeError::Invalid(
-                            "exists requires one typed binder declaration and a body",
+                            "quantifier requires one binder declaration and a body",
                         ));
                         return;
                     };
                     if remaining.is_empty() {
                         self.error = Some(TypeError::Invalid(
-                            "exists requires one typed binder declaration and a body",
+                            "quantifier requires one binder declaration and a body",
                         ));
                         return;
                     }
@@ -504,7 +505,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                                 (&subject.raw, &target.raw)
                             else {
                                 self.error = Some(TypeError::Invalid(
-                                    "exists requires a direct variable binder",
+                                    "quantifier requires a direct variable binder",
                                 ));
                                 return;
                             };
@@ -512,7 +513,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                         }
                         _ => {
                             self.error = Some(TypeError::Invalid(
-                                "exists requires a direct variable binder",
+                                "quantifier requires a direct variable binder",
                             ));
                             return;
                         }
@@ -528,7 +529,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                         }
                     }) {
                         self.error = Some(TypeError::Unsupported(
-                            "exists lowering supports exactly one binder",
+                            "quantifier lowering supports exactly one binder",
                         ));
                         return;
                     }
@@ -542,7 +543,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                             .iter()
                             .any(|range| range.index_variable == binder)
                     {
-                        self.error = Some(TypeError::Invalid("exists binder must be fresh"));
+                        self.error = Some(TypeError::Invalid("quantifier binder must be fresh"));
                         return;
                     }
                     let ty = if let Some(ty) = explicit_type {
@@ -556,14 +557,14 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                                 Ok(inferred) => inferred,
                                 Err(_) => {
                                     self.error = Some(TypeError::Invalid(
-                                        "exists binder type could not be inferred",
+                                        "quantifier binder type could not be inferred",
                                     ));
                                     return;
                                 }
                             };
                         let Some(ty) = inferred.types.get(&binder).cloned() else {
                             self.error = Some(TypeError::Invalid(
-                                "exists binder type could not be inferred",
+                                "quantifier binder type could not be inferred",
                             ));
                             return;
                         };
@@ -756,6 +757,15 @@ fn range_without_metadata<Metadata>(range: &Range<Metadata>) -> Range<()> {
 
 fn numeric_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
     require_numeric(exactly(operands, 1)?[0].value()?)
+}
+
+fn boolean_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    match exactly(operands, 1)?[0].value()? {
+        TypeExpr::Bool => Ok(TypeExpr::Bool),
+        _ => Err(TypeError::Invalid(
+            "boolean negation requires a Boolean operand",
+        )),
+    }
 }
 
 fn matrix_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {

@@ -128,6 +128,15 @@ fn collect_equality_type_candidates(
             // Equalities under a set binder are predicates, not declarations.
         }
 
+        fn visit_raw_expr_finop(&mut self, op: &Finop, expressions: &[Expr<TypedMetadata>]) {
+            if matches!(op, Finop::Forall | Finop::Exists) {
+                // Equalities under a quantifier binder are predicates, not
+                // declarations in the enclosing symbolic environment.
+                return;
+            }
+            visit::visit_raw_expr_finop(self, op, expressions);
+        }
+
         fn visit_cmp_chain(&mut self, chain: &CmpChain<TypedMetadata>) {
             let mut previous = &chain.start;
             for (comparison, current) in &chain.assertions {
@@ -1260,6 +1269,12 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         ));
                     }
                     (Monop::Diag, _) => {}
+                    (Monop::Not, TypeExpr::Bool) => {}
+                    (Monop::Not, _) => {
+                        return Err(ShapeError::InvalidTyping(
+                            "boolean negation requires a Boolean operand".to_owned(),
+                        ));
+                    }
                     (
                         Monop::Neg
                         | Monop::Transpose
@@ -1972,6 +1987,27 @@ fn collect_variables<Metadata>(
                 if &free != variable {
                     <Self as Visit<Metadata>>::visit_variable(self, &free);
                 }
+            }
+        }
+
+        fn visit_raw_expr_finop(&mut self, op: &Finop, expressions: &[Expr<Metadata>]) {
+            if !matches!(op, Finop::Forall | Finop::Exists) {
+                visit::visit_raw_expr_finop(self, op, expressions);
+                return;
+            }
+            let accessible = self
+                .variables
+                .iter()
+                .chain(&self.active_binders)
+                .cloned()
+                .collect();
+            let binders = crate::formula::quantifier_binders(expressions, &accessible);
+            self.active_binders.extend(binders.iter().cloned());
+            for expression in expressions {
+                self.visit_expr(expression);
+            }
+            for binder in binders {
+                self.active_binders.remove(&binder);
             }
         }
 

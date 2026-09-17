@@ -1836,7 +1836,7 @@ impl Visit<TypedMetadata> for CoreValidator {
             RawExpr::Type(_) => Some(ElaborationError::Unsupported(
                 "type expressions are not supported by to_z3",
             )),
-            RawExpr::Monop(op, _) if !matches!(op, Monop::Neg) => Some(
+            RawExpr::Monop(op, _) if !matches!(op, Monop::Neg | Monop::Not) => Some(
                 ElaborationError::Unsupported("unary operator remains after concrete elaboration"),
             ),
             RawExpr::Binop(op, _, _) if !matches!(op, Binop::Div) => Some(

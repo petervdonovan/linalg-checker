@@ -378,6 +378,19 @@ fn lower<Metadata: MaybeTyped + Clone>(
             }
         })),
         RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
+        RawExpr::Monop(Monop::Not, inner) => {
+            let Z3Object::Z3(inner) = lower(γ, inner)? else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "boolean negation requires a Boolean operand",
+                ));
+            };
+            let Some(inner) = inner.as_bool() else {
+                return Err(ToZ3Error::InvalidOperands(
+                    "boolean negation requires a Boolean operand",
+                ));
+            };
+            Ok(Z3Object::Z3(inner.not().into()))
+        }
         RawExpr::Binop(Binop::Div, left, right) => lower(γ, left)? / lower(γ, right)?,
         RawExpr::Finop(Finop::Plus, expressions) => {
             lower_finite(γ, expressions, Add::add, "addition")
@@ -1190,14 +1203,12 @@ mod tests {
         assert_lowering_error(
             environment.clone(),
             expression(r"\forall p, p"),
-            ToZ3Error::Elaboration(ElaborationError::Unsupported(
-                "finite operator remains after concrete elaboration",
-            )),
+            ToZ3Error::Type(TypeError::Invalid("quantifier binder must be fresh")),
         );
         assert_lowering_error(
             environment,
             expression(r"\exists p, p"),
-            ToZ3Error::Type(TypeError::Invalid("exists binder must be fresh")),
+            ToZ3Error::Type(TypeError::Invalid("quantifier binder must be fresh")),
         );
     }
 
@@ -1363,6 +1374,29 @@ mod tests {
                 )),
             )
             .to_string(),
+        );
+    }
+
+    #[test]
+    fn test_boolean_negation() {
+        let environment = Environment {
+            types: [(Variable::new("P"), TypeExpr::Bool)].into_iter().collect(),
+            ..Environment::default()
+        };
+        let Z3Object::Z3(negated) = to_z3(environment, expression(r"\neg P")) else {
+            panic!("expected a Boolean expression")
+        };
+        assert!(negated.as_bool().is_some());
+
+        assert_lowering_error(
+            Environment {
+                types: [(Variable::new("x"), TypeExpr::Real)].into_iter().collect(),
+                ..Environment::default()
+            },
+            expression(r"\neg x"),
+            ToZ3Error::Type(TypeError::Invalid(
+                "boolean negation requires a Boolean operand",
+            )),
         );
     }
 

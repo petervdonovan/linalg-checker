@@ -262,6 +262,48 @@ mod tests {
     }
 
     #[test]
+    fn negative_range_membership_lowers_through_a_counterexample() {
+        let givens = [
+            parse(r"A \in \mathbb{R}^{m \times n}"),
+            parse(r"b \in \mathbb{R}^{m}"),
+        ];
+        let types = infer_symbolic_type_environment(&givens).unwrap();
+        let prepared = prepare_expression(
+            &types,
+            &parse(r"b \in \operatorname{Range}(A)"),
+            VisitContext::negative(),
+        )
+        .unwrap();
+        assert!(!crate::formula::contains_quantifier(&prepared.expression));
+        assert_eq!(prepared.side_conditions.len(), 1);
+        assert!(
+            prepared.side_conditions[0]
+                .introduced_variable
+                .name
+                .contains(r"\operatorname{counterexample}")
+        );
+        assert!(
+            prepared
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\implies")
+        );
+
+        let not_member = prepare(
+            r"b \notin \operatorname{Range}(A)",
+            &[r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"],
+        )
+        .unwrap();
+        assert!(!crate::formula::contains_quantifier(&not_member.expression));
+        assert_eq!(not_member.side_conditions.len(), 1);
+        assert!(matches!(
+            not_member.expression.raw,
+            RawExpr::Monop(crate::Monop::Not, _)
+        ));
+    }
+
+    #[test]
     fn positive_exists_lowers_and_negative_exists_is_rejected() {
         let tex = r"\exists w \in \mathbb{R}^{n}, A w = b";
         let givens = [r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"];
@@ -274,6 +316,13 @@ mod tests {
                 .contains(r"\exists")
         );
         assert_eq!(positive.side_conditions.len(), 1);
+        assert!(!crate::formula::contains_quantifier(&positive.expression));
+        assert!(
+            positive.side_conditions[0]
+                .introduced_variable
+                .name
+                .contains(r"\operatorname{witness}")
+        );
 
         for scalar in [r"\exists a, a > 0", r"\exists a \in \mathbb{R}, a > 0"] {
             let prepared = prepare(scalar, &[]).unwrap();
@@ -301,13 +350,13 @@ mod tests {
             assert!(matches!(
                 prepare(tex, &[]),
                 Err(TypeError::Unsupported(
-                    "exists lowering supports exactly one binder"
+                    "quantifier lowering supports exactly one binder"
                 ))
             ));
         }
         assert!(matches!(
             prepare(r"\exists w, w > 0", &[r"w \in \mathbb{R}"]),
-            Err(TypeError::Invalid("exists binder must be fresh"))
+            Err(TypeError::Invalid("quantifier binder must be fresh"))
         ));
     }
 
@@ -334,6 +383,54 @@ mod tests {
             antecedent,
             Err(TypeError::Unsupported(
                 "existential expressions can only be lowered in positive logical contexts"
+            ))
+        ));
+    }
+
+    #[test]
+    fn negative_forall_lowers_bare_and_explicit_binders() {
+        for tex in [r"\forall a, a = a", r"\forall a \in \mathbb{R}, a = a"] {
+            let parsed = parse(tex);
+            let types = infer_symbolic_type_environment(&[]).unwrap();
+            let prepared = prepare_expression(&types, &parsed, VisitContext::negative()).unwrap();
+            assert!(!crate::formula::contains_quantifier(&prepared.expression));
+            assert_eq!(prepared.side_conditions.len(), 1);
+            assert_eq!(prepared.side_conditions[0].introduced_type, TypeExpr::Real);
+            assert!(
+                prepared.side_conditions[0]
+                    .introduced_variable
+                    .name
+                    .contains(r"\operatorname{counterexample}")
+            );
+        }
+    }
+
+    #[test]
+    fn negative_forall_preserves_premise_implication_semantics() {
+        let types = infer_symbolic_type_environment(&[]).unwrap();
+        let prepared = prepare_expression(
+            &types,
+            &parse(r"\forall a, a > 0, a > 1"),
+            VisitContext::negative(),
+        )
+        .unwrap();
+        let rendered = prepared.expression.as_latex().to_string();
+        assert!(rendered.contains(r"\implies"), "{rendered}");
+        assert!(matches!(
+            prepared.expression.raw,
+            RawExpr::LogicChain(crate::LogicChain { ref assertions, .. })
+                if matches!(assertions.as_slice(), [(crate::Logic::Imp, _)])
+        ));
+
+        let positive = prepare_expression(
+            &types,
+            &parse(r"\forall a, a = a"),
+            VisitContext::positive(),
+        );
+        assert!(matches!(
+            positive,
+            Err(TypeError::Unsupported(
+                "universal expressions can only be lowered in negative logical contexts"
             ))
         ));
     }

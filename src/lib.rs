@@ -248,6 +248,7 @@ pub enum Monop {
     Nul,
     /// Surface column-space operator, eliminated during preprocessing.
     Range,
+    Not,
     Neg,
     Inverse,
     Norm1,

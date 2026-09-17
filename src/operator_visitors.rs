@@ -33,7 +33,7 @@ where
         if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
             return;
         }
-        visit_mut::visit_expr_mut(self, context, node);
+        visit_mut::visit_expr_mut(self, context.clone(), node);
         let RawExpr::Monop(op @ (Monop::Nul | Monop::Range), operand) = &node.raw else {
             return;
         };
@@ -75,17 +75,18 @@ where
                 )
             }
             Monop::Range => {
-                let mut witness = Variable::new("w");
-                witness.non_numeric_subscript =
-                    format!("preimage of {}", operand.as_latex_verbose());
-                let witness_expression =
-                    Expr::with_metadata(Metadata::default(), RawExpr::Variable(witness.clone()));
-                let product = Expr::with_metadata(
-                    Metadata::default(),
-                    RawExpr::Finop(Finop::Times, vec![deep_clone(operand), witness_expression]),
-                );
-                (
-                    TypeExpr::Matrix(rows.with_default_metadata(), natural(1)),
+                let predicate = if context.logical_polarity {
+                    let mut witness = Variable::new("w");
+                    witness.non_numeric_subscript =
+                        format!("preimage of {}", operand.as_latex_verbose());
+                    let witness_expression = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Variable(witness.clone()),
+                    );
+                    let product = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Finop(Finop::Times, vec![deep_clone(operand), witness_expression]),
+                    );
                     Expr::with_metadata(
                         Metadata::default(),
                         RawExpr::Finop(
@@ -93,12 +94,90 @@ where
                             vec![
                                 Expr::with_metadata(
                                     Metadata::default(),
-                                    RawExpr::Variable(witness),
+                                    RawExpr::Binop(
+                                        Binop::ElementOf,
+                                        Expr::with_metadata(
+                                            Metadata::default(),
+                                            RawExpr::Variable(witness),
+                                        ),
+                                        Expr::with_metadata(
+                                            Metadata::default(),
+                                            RawExpr::Type(TypeExpr::Matrix(
+                                                columns.with_default_metadata(),
+                                                natural(1),
+                                            )),
+                                        ),
+                                    ),
                                 ),
                                 comparison(product, Cmp::Eq, vector),
                             ],
                         ),
-                    ),
+                    )
+                } else {
+                    let mut counterexample = Variable::new("z");
+                    counterexample.non_numeric_subscript =
+                        format!("left null of {}", operand.as_latex_verbose());
+                    let counterexample_expression = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Variable(counterexample.clone()),
+                    );
+                    let transpose_operand = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Monop(Monop::Transpose, deep_clone(operand)),
+                    );
+                    let left_null_product = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Finop(
+                            Finop::Times,
+                            vec![transpose_operand, deep_clone(&counterexample_expression)],
+                        ),
+                    );
+                    let zero = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::ZeroMatrix {
+                            rows: crate::ImplicitDimension::fresh(),
+                            cols: crate::ImplicitDimension::fresh(),
+                        },
+                    );
+                    let transpose_counterexample = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Monop(Monop::Transpose, counterexample_expression),
+                    );
+                    let orthogonality = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Finop(Finop::Times, vec![transpose_counterexample, vector]),
+                    );
+                    Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Finop(
+                            Finop::Forall,
+                            vec![
+                                Expr::with_metadata(
+                                    Metadata::default(),
+                                    RawExpr::Binop(
+                                        Binop::ElementOf,
+                                        Expr::with_metadata(
+                                            Metadata::default(),
+                                            RawExpr::Variable(counterexample),
+                                        ),
+                                        Expr::with_metadata(
+                                            Metadata::default(),
+                                            RawExpr::Type(TypeExpr::Matrix(
+                                                rows.with_default_metadata(),
+                                                natural(1),
+                                            )),
+                                        ),
+                                    ),
+                                ),
+                                comparison(left_null_product, Cmp::Eq, zero),
+                                comparison(orthogonality, Cmp::Eq, natural(0)),
+                            ],
+                        ),
+                    )
+                };
+                (
+                    TypeExpr::Matrix(rows.with_default_metadata(), natural(1)),
+                    predicate,
                 )
             }
             _ => unreachable!(),
@@ -122,21 +201,24 @@ where
 }
 
 #[derive(Default)]
-pub struct ExistsLowering {
+pub struct QuantifierLowering {
     rewrites: usize,
     error: Option<TypeError>,
     side_conditions: Vec<SideCondition<TypedMetadata>>,
     by_variable: BTreeMap<Variable, usize>,
 }
 
-impl ExistsLowering {
+/// Compatibility name for the original existential-only lowering pass.
+pub type ExistsLowering = QuantifierLowering;
+
+impl QuantifierLowering {
     pub fn finish(self) -> Result<(usize, Vec<SideCondition<TypedMetadata>>), TypeError> {
         self.error
             .map_or(Ok((self.rewrites, self.side_conditions)), Err)
     }
 }
 
-impl VisitMut<TypedMetadata> for ExistsLowering {
+impl VisitMut<TypedMetadata> for QuantifierLowering {
     fn side_conditions(&mut self) -> Vec<SideCondition<TypedMetadata>> {
         std::mem::take(&mut self.side_conditions)
     }
@@ -146,27 +228,32 @@ impl VisitMut<TypedMetadata> for ExistsLowering {
             return;
         }
         visit_mut::visit_expr_mut(self, context.clone(), node);
-        let RawExpr::Finop(Finop::Exists, expressions) = &node.raw else {
+        let RawExpr::Finop(op @ (Finop::Exists | Finop::Forall), expressions) = &node.raw else {
             return;
         };
-        if !context.logical_polarity {
+        let supported_polarity = match op {
+            Finop::Exists => context.logical_polarity,
+            Finop::Forall => !context.logical_polarity,
+            _ => unreachable!(),
+        };
+        if !supported_polarity {
             return;
         }
         let Some((declaration, remaining)) = expressions.split_first() else {
             self.error = Some(TypeError::Invalid(
-                "exists requires one typed binder declaration and a body",
+                "quantifier requires one binder declaration and a body",
             ));
             return;
         };
         if remaining.is_empty() {
             self.error = Some(TypeError::Invalid(
-                "exists requires one typed binder declaration and a body",
+                "quantifier requires one binder declaration and a body",
             ));
             return;
         }
         let Some((binder, explicit_type)) = binder_declaration(declaration) else {
             self.error = Some(TypeError::Invalid(
-                "exists requires a direct variable binder",
+                "quantifier requires a direct variable binder",
             ));
             return;
         };
@@ -192,8 +279,13 @@ impl VisitMut<TypedMetadata> for ExistsLowering {
             TypedMetadata::default(),
             RawExpr::Type(binder_type.with_default_metadata()),
         );
+        let role = match op {
+            Finop::Exists => "witness",
+            Finop::Forall => "counterexample",
+            _ => unreachable!(),
+        };
         let introduced_variable = Variable::new(format!(
-            r"\operatorname{{witness}}\left({}; {}\right)",
+            r"\operatorname{{{role}}}\left({}; {}\right)",
             type_expression.as_latex_verbose(),
             mapped_source.as_latex_verbose()
         ));
@@ -206,10 +298,20 @@ impl VisitMut<TypedMetadata> for ExistsLowering {
                 substitute_free_variable(&expression.with_default_metadata(), binder, &introduced)
             })
             .collect::<Vec<_>>();
-        let replacement = if lowered.len() == 1 {
-            lowered.pop().unwrap()
-        } else {
-            Expr::new(RawExpr::Finop(Finop::And, lowered))
+        let replacement = match op {
+            Finop::Exists => conjunction(lowered),
+            Finop::Forall => {
+                let body = lowered.pop().expect("a quantifier must have a body");
+                if lowered.is_empty() {
+                    body
+                } else {
+                    Expr::new(RawExpr::LogicChain(crate::LogicChain {
+                        start: conjunction(lowered),
+                        assertions: vec![(crate::Logic::Imp, body)],
+                    }))
+                }
+            }
+            _ => unreachable!(),
         };
         let condition = SideCondition {
             introduced_variable: introduced_variable.clone(),
@@ -228,6 +330,14 @@ impl VisitMut<TypedMetadata> for ExistsLowering {
         }
         *node = replacement.with_default_metadata();
         self.rewrites += 1;
+    }
+}
+
+fn conjunction(mut expressions: Vec<Expr<()>>) -> Expr<()> {
+    if expressions.len() == 1 {
+        expressions.pop().unwrap()
+    } else {
+        Expr::new(RawExpr::Finop(Finop::And, expressions))
     }
 }
 
@@ -778,6 +888,28 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("A"), "{rendered}");
+    }
+
+    #[test]
+    fn negative_range_lowers_to_left_null_orthogonality() {
+        let operand = typed(
+            TypeExpr::Matrix(dimension("m"), dimension("n")),
+            RawExpr::Variable(Variable::new("A")),
+        );
+        let mut expression = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::Monop(Monop::Range, operand),
+        );
+        let mut visitor = SetOperatorLowering::default();
+        visitor.visit_expr_mut(VisitContext::negative(), &mut expression);
+        assert_eq!(visitor.finish(), Ok(1));
+        let RawExpr::SetComprehension { predicate, .. } = &expression.raw else {
+            panic!("expected a set comprehension")
+        };
+        assert!(matches!(predicate.raw, RawExpr::Finop(Finop::Forall, _)));
+        let rendered = predicate.as_latex().to_string();
+        assert!(rendered.contains(r"A^\top"), "{rendered}");
+        assert!(rendered.contains(r"\mathbb{0}"), "{rendered}");
     }
 
     #[test]

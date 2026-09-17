@@ -92,9 +92,25 @@ fn expr_with_mode<Metadata>(
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
         crate::RawExpr::Matrix(value) => matrix(f, value, verbose),
+        crate::RawExpr::Monop(Monop::Not, e)
+            if matches!(e.raw, crate::RawExpr::Binop(Binop::ElementOf, _, _)) =>
+        {
+            let crate::RawExpr::Binop(Binop::ElementOf, left, right) = &e.raw else {
+                unreachable!()
+            };
+            grouped_expr(f, left, precedence(left) <= Precedence::Comparison, verbose)?;
+            write!(f, r" \notin ")?;
+            grouped_expr(
+                f,
+                right,
+                precedence(right) <= Precedence::Comparison,
+                verbose,
+            )
+        }
         crate::RawExpr::Monop(op, e) => monop(f, op, |f| {
             let grouped = match op {
                 Monop::Neg => precedence(e) <= Precedence::Addition,
+                Monop::Not => precedence(e) < Precedence::Prefix,
                 Monop::Inverse | Monop::Transpose => precedence(e) < Precedence::Power,
                 _ => false,
             };
@@ -222,7 +238,7 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::Finop(Finop::Times, _) | crate::RawExpr::Binop(Binop::Div, _, _) => {
             Precedence::Multiplication
         }
-        crate::RawExpr::Monop(Monop::Neg | Monop::Diag, _) => Precedence::Prefix,
+        crate::RawExpr::Monop(Monop::Neg | Monop::Not | Monop::Diag, _) => Precedence::Prefix,
         crate::RawExpr::Monop(Monop::Inverse | Monop::Transpose, _)
         | crate::RawExpr::Binop(Binop::Power, _, _) => Precedence::Power,
         _ => Precedence::Atom,
@@ -301,6 +317,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
         Monop::Diag => write!(f, r"\operatorname{{diag}}(")?,
         Monop::Nul => write!(f, r"\operatorname{{Nul}}(")?,
         Monop::Range => write!(f, r"\operatorname{{Range}}(")?,
+        Monop::Not => write!(f, r"\neg ")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
         Monop::Transpose => {}
@@ -313,6 +330,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
 
     match op {
         Monop::Trace | Monop::Det | Monop::Diag | Monop::Nul | Monop::Range => write!(f, ")"),
+        Monop::Not => Ok(()),
         Monop::Neg => Ok(()),
         Monop::Inverse => write!(f, "^{{-1}}"),
         Monop::Transpose => write!(f, r"^\top"),
