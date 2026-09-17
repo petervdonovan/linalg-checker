@@ -50,6 +50,20 @@ impl<Metadata> Visit<Metadata> for FreeVariableCollector {
         }
     }
 
+    fn visit_raw_expr_set_comprehension(
+        &mut self,
+        variable: &Variable,
+        domain: &crate::TypeExpr<Metadata>,
+        predicate: &Expr<Metadata>,
+    ) {
+        self.visit_type_expr(domain);
+        let was_bound = !self.bound.insert(variable.clone());
+        self.visit_expr(predicate);
+        if !was_bound {
+            self.bound.remove(variable);
+        }
+    }
+
     fn visit_raw_expr_seqop(
         &mut self,
         _op: &crate::SeqOp,
@@ -58,12 +72,11 @@ impl<Metadata> Visit<Metadata> for FreeVariableCollector {
     ) {
         self.visit_expr(&range.from);
         self.visit_expr(&range.to);
-        assert!(
-            self.bound.insert(range.index_variable.clone()),
-            "sequence binder shadows an active binder"
-        );
+        let was_bound = !self.bound.insert(range.index_variable.clone());
         self.visit_expr(body);
-        self.bound.remove(&range.index_variable);
+        if !was_bound {
+            self.bound.remove(&range.index_variable);
+        }
     }
 
     fn visit_raw_expr_finop(&mut self, op: &Finop, expressions: &[Expr<Metadata>]) {
@@ -126,6 +139,29 @@ pub(crate) fn substitute_free_variable(
     struct Substitution<'a> {
         variable: &'a Variable,
         replacement: &'a Expr<()>,
+        replacement_free: BTreeSet<Variable>,
+        used: BTreeSet<Variable>,
+    }
+
+    impl Substitution<'_> {
+        fn avoid_capture(&mut self, binder: &mut Variable, body: &mut Expr<()>) {
+            if !self.replacement_free.contains(binder) {
+                return;
+            }
+            let mut fresh = binder.clone();
+            loop {
+                fresh.annotations.push(crate::Annotation::Prime);
+                if self.used.insert(fresh.clone()) {
+                    break;
+                }
+            }
+            *body = substitute_free_variable(
+                body,
+                binder,
+                &Expr::new(RawExpr::Variable(fresh.clone())),
+            );
+            *binder = fresh;
+        }
     }
 
     impl VisitMut<()> for Substitution<'_> {
@@ -170,6 +206,20 @@ pub(crate) fn substitute_free_variable(
             }
         }
 
+        fn visit_raw_expr_set_comprehension_mut(
+            &mut self,
+            context: VisitContext,
+            binder: &mut Variable,
+            domain: &mut crate::TypeExpr<()>,
+            predicate: &mut Expr<()>,
+        ) {
+            self.visit_type_expr_mut(context.clone(), domain);
+            if binder != self.variable {
+                self.avoid_capture(binder, predicate);
+                self.visit_expr_mut(context, predicate);
+            }
+        }
+
         fn visit_raw_expr_seqop_mut(
             &mut self,
             context: VisitContext,
@@ -180,6 +230,7 @@ pub(crate) fn substitute_free_variable(
             self.visit_expr_mut(context.clone(), &mut range.from);
             self.visit_expr_mut(context.clone(), &mut range.to);
             if range.index_variable != *self.variable {
+                self.avoid_capture(&mut range.index_variable, body);
                 self.visit_expr_mut(context.with_range(range), body);
             }
         }
@@ -189,6 +240,8 @@ pub(crate) fn substitute_free_variable(
     Substitution {
         variable,
         replacement,
+        replacement_free: free_variables(std::iter::once(replacement)),
+        used: crate::expression_utils::all_variables([expression, replacement]),
     }
     .visit_expr_mut(POSITIVE, &mut result);
     result

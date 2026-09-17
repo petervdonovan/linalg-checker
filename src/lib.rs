@@ -14,6 +14,7 @@ mod model_finding;
 pub mod operator_visitors;
 pub mod preprocessing;
 pub mod rewriting_test_utils;
+pub mod set_lowering;
 pub mod to_tex;
 pub mod to_z3;
 mod type_expr;
@@ -117,6 +118,7 @@ impl Error for NaturalEvaluationError {}
 
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Clone)]
 pub enum TypeExpr<Metadata> {
+    Set(Box<TypeExpr<Metadata>>),
     Bool,
     Nat,
     Int,
@@ -128,6 +130,7 @@ pub enum TypeExpr<Metadata> {
 impl<Metadata> TypeExpr<Metadata> {
     pub fn with_default_metadata<NewMetadata: Default>(&self) -> TypeExpr<NewMetadata> {
         match self {
+            Self::Set(element) => TypeExpr::Set(Box::new(element.with_default_metadata())),
             Self::Bool => TypeExpr::Bool,
             Self::Nat => TypeExpr::Nat,
             Self::Int => TypeExpr::Int,
@@ -260,6 +263,8 @@ pub enum Binop {
     InnerProd,
     Cast,
     ElementOf,
+    /// Internal comprehension domain requirement; incompatible dimensions are errors.
+    InDomain,
     SingleSubscript,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -316,6 +321,15 @@ impl<Metadata> Expr<Metadata> {
 
     pub fn with_default_metadata<NewMetadata: Default>(&self) -> Expr<NewMetadata> {
         let raw = match &self.raw {
+            RawExpr::SetComprehension {
+                variable,
+                domain,
+                predicate,
+            } => RawExpr::SetComprehension {
+                variable: variable.clone(),
+                domain: domain.with_default_metadata(),
+                predicate: predicate.with_default_metadata(),
+            },
             RawExpr::Hole => RawExpr::Hole,
             RawExpr::Ellipsis => RawExpr::Ellipsis,
             RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
@@ -465,6 +479,11 @@ where
 }
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RawExpr<Metadata> {
+    SetComprehension {
+        variable: Variable,
+        domain: TypeExpr<Metadata>,
+        predicate: Expr<Metadata>,
+    },
     Hole,
     Ellipsis,
     /// An internal natural-valued leaf used to preserve a context-dependent

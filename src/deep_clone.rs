@@ -2,6 +2,15 @@ use crate::{CmpChain, Expr, LogicChain, Matrix, Range, RawExpr, TypeExpr};
 
 pub(crate) fn deep_clone<Metadata: Clone>(expression: &Expr<Metadata>) -> Expr<Metadata> {
     let raw = match &expression.raw {
+        RawExpr::SetComprehension {
+            variable,
+            domain,
+            predicate,
+        } => RawExpr::SetComprehension {
+            variable: variable.clone(),
+            domain: deep_clone_type(domain),
+            predicate: deep_clone(predicate),
+        },
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::Ellipsis => RawExpr::Ellipsis,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),
@@ -67,6 +76,7 @@ pub(crate) fn deep_clone<Metadata: Clone>(expression: &Expr<Metadata>) -> Expr<M
 
 fn deep_clone_type<Metadata: Clone>(ty: &TypeExpr<Metadata>) -> TypeExpr<Metadata> {
     match ty {
+        TypeExpr::Set(element) => TypeExpr::Set(Box::new(deep_clone_type(element))),
         TypeExpr::Bool => TypeExpr::Bool,
         TypeExpr::Nat => TypeExpr::Nat,
         TypeExpr::Int => TypeExpr::Int,

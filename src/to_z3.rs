@@ -342,6 +342,9 @@ fn lower<Metadata: MaybeTyped + Clone>(
     e: &Expr<Metadata>,
 ) -> Result<Z3Object, ToZ3Error> {
     match &e.raw {
+        RawExpr::SetComprehension { .. } => Err(ToZ3Error::Unsupported(
+            "set values must be eliminated before Z3 lowering",
+        )),
         RawExpr::Hole
         | RawExpr::Ellipsis
         | RawExpr::ImplicitDimension(_)
@@ -360,9 +363,9 @@ fn lower<Metadata: MaybeTyped + Clone>(
                 TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {
                     lower_typed_name(variable.z3_name(), &ty)
                 }
-                TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => Err(ToZ3Error::Unsupported(
-                    "nonscalar variable remains after concrete elaboration",
-                )),
+                TypeExpr::Set(_) | TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => Err(
+                    ToZ3Error::Unsupported("nonscalar variable remains after concrete elaboration"),
+                ),
             }
         }
         RawExpr::NatLiteral(value) => Ok(Z3Object::Z3(match e.meta.get_type()? {
@@ -501,7 +504,7 @@ fn lower_typed_name(name: String, ty: &TypeExpr<()>) -> Result<Z3Object, ToZ3Err
         TypeExpr::Bool => Z3Object::Z3(Bool::new_const(name).into()),
         TypeExpr::Nat | TypeExpr::Int => Z3Object::Z3(Int::new_const(name).into()),
         TypeExpr::Real => Z3Object::Z3(Real::new_const(name).into()),
-        TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => {
+        TypeExpr::Set(_) | TypeExpr::Matrix(_, _) | TypeExpr::Seq(_, _) => {
             return Err(ToZ3Error::Unsupported(
                 "nonscalar variables must be elaborated before Z3 lowering",
             ));

@@ -329,6 +329,45 @@ impl<'a> Cursor<'a> {
             }
             ParseNode::LeftRight {
                 body, left, right, ..
+            } if matches!(left.as_str(), r"\{" | "{") && matches!(right.as_str(), r"\}" | "}") => {
+                self.position += 1;
+                parse_set_comprehension(body)
+            }
+            ParseNode::Atom {
+                family: AtomFamily::Open,
+                text,
+                ..
+            } if matches!(text.as_str(), r"\{" | "{") => {
+                self.position += 1;
+                let start = self.position;
+                let mut depth = 1;
+                while let Some(node) = self.nodes.get(self.position) {
+                    match node {
+                        ParseNode::Atom {
+                            family: AtomFamily::Open,
+                            text,
+                            ..
+                        } if matches!(text.as_str(), r"\{" | "{") => depth += 1,
+                        ParseNode::Atom {
+                            family: AtomFamily::Close,
+                            text,
+                            ..
+                        } if matches!(text.as_str(), r"\}" | "}") => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        let body = &self.nodes[start..self.position];
+                        self.position += 1;
+                        return parse_set_comprehension(body);
+                    }
+                    self.position += 1;
+                }
+                Err(FromTexError::UnexpectedEnd {
+                    context: "a set comprehension",
+                })
+            }
+            ParseNode::LeftRight {
+                body, left, right, ..
             } if left == "[" && right == "]" => {
                 self.position += 1;
                 parse_bmatrix(body)
@@ -361,6 +400,16 @@ impl<'a> Cursor<'a> {
                     index: self.position,
                     message: "operator name is not plain text".to_owned(),
                 })?;
+                if name == "Set" {
+                    self.position += 1;
+                    let element = expr(self.take_parenthesized()?)?;
+                    let RawExpr::Type(element) = &element.raw else {
+                        return Err(self.unsupported("Set requires an element type".into()));
+                    };
+                    return Ok(Expr::new(RawExpr::Type(TypeExpr::Set(Box::new(
+                        element.clone(),
+                    )))));
+                }
                 if name == "cast" {
                     let start = self.position;
                     self.position += 1;
@@ -593,7 +642,7 @@ impl<'a> Cursor<'a> {
                 family: AtomFamily::Open,
                 text,
                 ..
-            }) => text == "(" || text == r"\langle",
+            }) => text == "(" || text == r"\langle" || matches!(text.as_str(), r"\{" | "{"),
             _ => false,
         }
     }
@@ -975,9 +1024,21 @@ fn split_top_level<'a>(nodes: &'a [ParseNode], delimiter: &str) -> Vec<&'a [Pars
     let mut start = 0;
     let mut depth = 0usize;
     for (index, node) in nodes.iter().enumerate() {
-        if is_atom(Some(node), AtomFamily::Open, "(") {
+        if matches!(
+            node,
+            ParseNode::Atom {
+                family: AtomFamily::Open,
+                ..
+            }
+        ) {
             depth += 1;
-        } else if is_atom(Some(node), AtomFamily::Close, ")") {
+        } else if matches!(
+            node,
+            ParseNode::Atom {
+                family: AtomFamily::Close,
+                ..
+            }
+        ) {
             depth = depth.saturating_sub(1);
         } else if depth == 0 && matches!(node, ParseNode::Atom { text, .. } if text == delimiter) {
             parts.push(&nodes[start..index]);
@@ -1033,6 +1094,29 @@ fn push_associative(expressions: &mut Vec<Expr<()>>, expression: Expr<()>, kind:
         }
         _ => expressions.push(expression),
     }
+}
+
+fn parse_set_comprehension(nodes: &[ParseNode]) -> Result<Expr<()>, FromTexError> {
+    let parts = split_top_level(nodes, ":");
+    let malformed = || FromTexError::Malformed {
+        index: 0,
+        message: "expected {x in T : predicate}".into(),
+    };
+    let [binder, predicate] = parts.as_slice() else {
+        return Err(malformed());
+    };
+    let binder = expr(binder)?;
+    let RawExpr::Binop(Binop::ElementOf, variable, domain) = &binder.raw else {
+        return Err(malformed());
+    };
+    let (RawExpr::Variable(variable), RawExpr::Type(domain)) = (&variable.raw, &domain.raw) else {
+        return Err(malformed());
+    };
+    Ok(Expr::new(RawExpr::SetComprehension {
+        variable: variable.clone(),
+        domain: domain.clone(),
+        predicate: expr(predicate)?,
+    }))
 }
 
 #[cfg(test)]

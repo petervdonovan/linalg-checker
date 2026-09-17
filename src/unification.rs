@@ -41,6 +41,18 @@ impl Unifier<'_> {
             };
         }
         match (&pattern.raw, &candidate.raw) {
+            (
+                RawExpr::SetComprehension {
+                    variable: av,
+                    domain: ad,
+                    predicate: ap,
+                },
+                RawExpr::SetComprehension {
+                    variable: bv,
+                    domain: bd,
+                    predicate: bp,
+                },
+            ) => self.type_expr(ad, bd) && self.bound_sequence_body(av, bv, ap, bp),
             (RawExpr::Hole, RawExpr::Hole) => true,
             (RawExpr::Ellipsis, RawExpr::Ellipsis) => true,
             (RawExpr::ImplicitDimension(a), RawExpr::ImplicitDimension(b)) => self.nonce(*a, *b),
@@ -182,6 +194,14 @@ impl Unifier<'_> {
         let candidate_was_bound = !self.candidate_bound.insert(candidate_index.clone());
         let old_bound_forward = self.bound_forward.clone();
         let old_bound_reverse = self.bound_reverse.clone();
+        // A comprehension may shadow an outer binder. Its correspondence is
+        // local to this body, just like its binding.
+        if let Some(old) = self.bound_forward.remove(pattern_index) {
+            self.bound_reverse.remove(&old);
+        }
+        if let Some(old) = self.bound_reverse.remove(candidate_index) {
+            self.bound_forward.remove(&old);
+        }
         let matched = self.expression(pattern, candidate);
         if !pattern_was_bound {
             self.pattern_bound.remove(pattern_index);
@@ -196,6 +216,7 @@ impl Unifier<'_> {
 
     fn type_expr(&mut self, pattern: &TypeExpr<()>, candidate: &TypeExpr<()>) -> bool {
         match (pattern, candidate) {
+            (TypeExpr::Set(a), TypeExpr::Set(b)) => self.type_expr(a, b),
             (TypeExpr::Bool, TypeExpr::Bool)
             | (TypeExpr::Nat, TypeExpr::Nat)
             | (TypeExpr::Int, TypeExpr::Int)

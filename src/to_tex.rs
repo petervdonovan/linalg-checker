@@ -42,6 +42,19 @@ fn expr_with_mode<Metadata>(
     verbose: bool,
 ) -> fmt::Result {
     match &e.raw {
+        crate::RawExpr::SetComprehension {
+            variable: binder,
+            domain,
+            predicate,
+        } => {
+            write!(f, r"\left\{{")?;
+            variable(f, binder)?;
+            write!(f, r" \in ")?;
+            type_expr(f, domain, verbose)?;
+            write!(f, " : ")?;
+            expr_with_mode(f, predicate, verbose)?;
+            write!(f, r"\right\}}")
+        }
         crate::RawExpr::Hole => write!(f, r"\square"),
         crate::RawExpr::Ellipsis => write!(f, r"\ldots"),
         crate::RawExpr::ImplicitDimension(dimension) if verbose => {
@@ -95,7 +108,7 @@ fn expr_with_mode<Metadata>(
                     f,
                     e0,
                     (matches!(op, Binop::Power) && precedence(e0) < Precedence::Power)
-                        || (matches!(op, Binop::ElementOf)
+                        || (matches!(op, Binop::ElementOf | Binop::InDomain)
                             && precedence(e0) <= Precedence::Comparison),
                     verbose,
                 )
@@ -104,7 +117,7 @@ fn expr_with_mode<Metadata>(
                 grouped_expr(
                     f,
                     e1,
-                    matches!(op, Binop::ElementOf) && precedence(e1) <= Precedence::Comparison,
+                    matches!(op, Binop::ElementOf | Binop::InDomain) && precedence(e1) <= Precedence::Comparison,
                     verbose,
                 )
             },
@@ -201,7 +214,7 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
         crate::RawExpr::Finop(Finop::Or, _) => Precedence::Or,
         crate::RawExpr::Finop(Finop::And, _) => Precedence::And,
-        crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf, _, _) => {
+        crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf | Binop::InDomain, _, _) => {
             Precedence::Comparison
         }
         crate::RawExpr::Finop(Finop::SeqLiteral, _) => Precedence::Sequence,
@@ -222,6 +235,11 @@ fn type_expr<Metadata>(
     verbose: bool,
 ) -> fmt::Result {
     match ty {
+        TypeExpr::Set(element) => {
+            write!(f, r"\operatorname{{Set}}(")?;
+            type_expr(f, element, verbose)?;
+            write!(f, ")")
+        }
         TypeExpr::Bool => write!(f, r"\mathbb{{B}}"),
         TypeExpr::Nat => write!(f, r"\mathbb{{N}}"),
         TypeExpr::Int => write!(f, r"\mathbb{{Z}}"),
@@ -340,7 +358,7 @@ fn binop<
             e1(f)?;
             write!(f, ")")
         }
-        Binop::ElementOf => {
+        Binop::ElementOf | Binop::InDomain => {
             e0(f)?;
             write!(f, r" \in ")?;
             e1(f)

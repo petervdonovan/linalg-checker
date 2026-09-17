@@ -8,6 +8,14 @@ use crate::{
 };
 
 pub trait Visit<Metadata> {
+    fn visit_raw_expr_set_comprehension(
+        &mut self,
+        variable: &Variable,
+        domain: &TypeExpr<Metadata>,
+        predicate: &Expr<Metadata>,
+    ) {
+        visit_raw_expr_set_comprehension(self, variable, domain, predicate);
+    }
     fn visit_expr(&mut self, node: &Expr<Metadata>) {
         visit_expr(self, node);
     }
@@ -115,6 +123,11 @@ pub fn visit_meta_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &MetaExpr<M>) {
 pub fn visit_metadata<V: Visit<M> + ?Sized, M>(_v: &mut V, _n: &M) {}
 pub fn visit_raw_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &RawExpr<M>) {
     match n {
+        RawExpr::SetComprehension {
+            variable,
+            domain,
+            predicate,
+        } => v.visit_raw_expr_set_comprehension(variable, domain, predicate),
         RawExpr::Hole => v.visit_raw_expr_hole(),
         RawExpr::Ellipsis => v.visit_raw_expr_ellipsis(),
         RawExpr::ImplicitDimension(dimension) => v.visit_raw_expr_implicit_dimension(dimension),
@@ -142,6 +155,7 @@ pub fn visit_raw_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &RawExpr<M>) {
 pub fn visit_type_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &TypeExpr<M>) {
     match n {
         TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
+        TypeExpr::Set(element) => v.visit_type_expr(element),
         TypeExpr::Matrix(a, b) | TypeExpr::Seq(a, b) => {
             v.visit_expr(a);
             v.visit_expr(b);
@@ -250,6 +264,17 @@ pub fn visit_raw_expr_seqop<V: Visit<M> + ?Sized, M>(
     v.visit_expr(b);
 }
 
+pub fn visit_raw_expr_set_comprehension<V: Visit<Metadata> + ?Sized, Metadata>(
+    v: &mut V,
+    variable: &Variable,
+    domain: &TypeExpr<Metadata>,
+    predicate: &Expr<Metadata>,
+) {
+    v.visit_type_expr(domain);
+    v.visit_variable(variable);
+    v.visit_expr(predicate);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -283,6 +308,7 @@ mod tests {
         impl Visit<()> for Variants {
             fn visit_raw_expr(&mut self, node: &RawExpr<()>) {
                 self.0.insert(match node {
+                    RawExpr::SetComprehension { .. } => "set comprehension",
                     RawExpr::Hole => "hole",
                     RawExpr::Ellipsis => "ellipsis",
                     RawExpr::ImplicitDimension(_) => "implicit dimension",
@@ -308,6 +334,11 @@ mod tests {
         let d = ImplicitDimension::fresh();
         let literal = || Expr::new(RawExpr::NatLiteral(1));
         let expressions = vec![
+            Expr::new(RawExpr::SetComprehension {
+                variable: Variable::new("s"),
+                domain: TypeExpr::Set(Box::new(TypeExpr::Real)),
+                predicate: Expr::new(RawExpr::NatLiteral(1)),
+            }),
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::Ellipsis),
             Expr::new(RawExpr::ImplicitDimension(d)),
@@ -357,6 +388,6 @@ mod tests {
         for expression in &expressions {
             visitor.visit_expr(expression);
         }
-        assert_eq!(visitor.0.len(), 18);
+        assert_eq!(visitor.0.len(), 19);
     }
 }

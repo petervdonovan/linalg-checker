@@ -22,6 +22,7 @@ impl VisitMut<()> for ShiftBoundNaturals {
 
     fn visit_type_expr_mut(&mut self, context: VisitContext, ty: &mut TypeExpr<()>) {
         match ty {
+            TypeExpr::Set(element) => self.visit_type_expr_mut(context, element),
             TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
             TypeExpr::Matrix(rows, cols) => {
                 self.visit_expr_mut(context.clone(), rows);
@@ -64,6 +65,7 @@ impl VisitMut<()> for AbstractVariable<'_> {
 
     fn visit_type_expr_mut(&mut self, context: VisitContext, ty: &mut TypeExpr<()>) {
         match ty {
+            TypeExpr::Set(element) => self.visit_type_expr_mut(context, element),
             TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
             TypeExpr::Matrix(rows, cols) => {
                 self.visit_expr_mut(context.clone(), rows);
@@ -118,6 +120,7 @@ impl VisitMut<()> for OpenBoundNatural<'_> {
 
     fn visit_type_expr_mut(&mut self, context: VisitContext, ty: &mut TypeExpr<()>) {
         match ty {
+            TypeExpr::Set(element) => self.visit_type_expr_mut(context, element),
             TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
             TypeExpr::Matrix(rows, cols) => {
                 self.visit_expr_mut(context.clone(), rows);
@@ -174,6 +177,7 @@ pub(crate) fn contains_unbound_natural(ty: &TypeExpr<()>) -> bool {
         }
         fn visit_type_expr_mut(&mut self, context: VisitContext, ty: &mut TypeExpr<()>) {
             match ty {
+                TypeExpr::Set(element) => self.visit_type_expr_mut(context, element),
                 TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
                 TypeExpr::Matrix(rows, cols) => {
                     self.visit_expr_mut(context.clone(), rows);

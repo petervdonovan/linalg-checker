@@ -419,19 +419,18 @@ impl<'a> MembershipVisitor<'a> {
         &self,
         left: &Expr<TypedMetadata>,
         right: &Expr<TypedMetadata>,
+        required: bool,
     ) -> Result<Expr<TypedMetadata>, ElaborationError> {
-        let RawExpr::Variable(_) = &left.raw else {
-            return Err(ElaborationError::InvalidOperands(
-                "type membership requires a variable subject",
-            ));
-        };
         let RawExpr::Type(expected) = &right.raw else {
             return Err(ElaborationError::InvalidOperands(
                 "type membership requires a type expression",
             ));
         };
         let actual = symbolic_type(left)?;
-        if !types_equal(self.environment, &actual, expected)? {
+        let numeric_real = matches!(expected, TypeExpr::Real)
+            && matches!(actual, TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real);
+        if !numeric_real && !types_equal(self.environment, &actual, expected)? {
+            if required { return Err(ElaborationError::Shape("set membership subject has incompatible domain dimensions or type")); }
             return Ok(boolean(false));
         }
         if matches!(actual, TypeExpr::Nat) {
@@ -453,10 +452,10 @@ impl VisitMut<TypedMetadata> for MembershipVisitor<'_> {
             return;
         }
         visit_mut::visit_expr_mut(self, context, node);
-        let RawExpr::Binop(Binop::ElementOf, left, right) = &node.raw else {
+        let RawExpr::Binop(op @ (Binop::ElementOf | Binop::InDomain), left, right) = &node.raw else {
             return;
         };
-        match self.replacement(left, right) {
+        match self.replacement(left, right, matches!(op, Binop::InDomain)) {
             Ok(replacement) => {
                 *node = replacement;
                 self.rewrites += 1;
@@ -1372,9 +1371,16 @@ impl<'a> MatrixVisitor<'a> {
             (TypeExpr::Matrix(_, _), Value::Scalar(_)) => Err(ElaborationError::InvalidOperands(
                 "a cast to a matrix requires a real scalar",
             )),
-            (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => Err(
-                ElaborationError::Unsupported("only real and 1x1 matrix casts are supported"),
-            ),
+            (
+                TypeExpr::Set(_)
+                | TypeExpr::Bool
+                | TypeExpr::Nat
+                | TypeExpr::Int
+                | TypeExpr::Seq(_, _),
+                _,
+            ) => Err(ElaborationError::Unsupported(
+                "only real and 1x1 matrix casts are supported",
+            )),
             (TypeExpr::Matrix(_, _), _) => Err(ElaborationError::InvalidOperands(
                 "a cast to a matrix requires a real scalar",
             )),
@@ -1653,6 +1659,19 @@ fn substitute_index(
 ) -> Expr<TypedMetadata> {
     let recurse = |expression: &Expr<TypedMetadata>| substitute_index(expression, variable, value);
     let raw = match &expression.raw {
+        RawExpr::SetComprehension {
+            variable: binder,
+            domain,
+            predicate,
+        } => RawExpr::SetComprehension {
+            variable: binder.clone(),
+            domain: substitute_type(domain, variable, value),
+            predicate: if binder == variable {
+                deep_clone(predicate)
+            } else {
+                recurse(predicate)
+            },
+        },
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::Ellipsis => RawExpr::Ellipsis,
@@ -1735,6 +1754,9 @@ fn substitute_type(
     value: u64,
 ) -> TypeExpr<TypedMetadata> {
     match ty {
+        TypeExpr::Set(element) => {
+            TypeExpr::Set(Box::new(substitute_type(element, variable, value)))
+        }
         TypeExpr::Bool => TypeExpr::Bool,
         TypeExpr::Nat => TypeExpr::Nat,
         TypeExpr::Int => TypeExpr::Int,
@@ -1793,6 +1815,9 @@ impl Visit<TypedMetadata> for CoreValidator {
             return;
         }
         self.error = match &node.raw {
+            RawExpr::SetComprehension { .. } => Some(ElaborationError::Unsupported(
+                "set values must be eliminated before Z3 lowering",
+            )),
             RawExpr::Hole => Some(ElaborationError::Unsupported(
                 "holes are not supported by to_z3",
             )),

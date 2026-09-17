@@ -279,6 +279,7 @@ fn specialize_type(
     environment: &Environment,
 ) -> Result<TypeExpr<()>, ModelFindingError> {
     Ok(match ty {
+        TypeExpr::Set(element) => TypeExpr::Set(Box::new(specialize_type(element, environment)?)),
         TypeExpr::Bool => TypeExpr::Bool,
         TypeExpr::Nat => TypeExpr::Nat,
         TypeExpr::Int => TypeExpr::Int,

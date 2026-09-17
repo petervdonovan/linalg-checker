@@ -147,6 +147,20 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         rewrites += logic.rewrites();
 
+        let mut sets = crate::set_lowering::SetMembershipLowering::default();
+        visit_forest(
+            &mut sets,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let set_rewrites = sets.finish()?;
+        if set_rewrites > 0 {
+            // Resolve substituted syntax before lowering operators or running
+            // synthesis; all remaining passes participate in the next iteration.
+            continue;
+        }
+
         let mut norm2_squared = Norm2SquaredVisitor::default();
         visit_forest(
             &mut norm2_squared,
@@ -308,6 +322,21 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
             return;
         }
         self.error = match &node.raw {
+            RawExpr::SetComprehension { .. } => Some(TypeError::Unsupported(
+                "set values must be consumed by direct comprehension membership",
+            )),
+            _ if matches!(node.meta.get_type(), Ok(crate::TypeExpr::Set(_))) => {
+                Some(TypeError::Unsupported(
+                    "set-valued expressions are not supported after preparation",
+                ))
+            }
+            RawExpr::Binop(Binop::ElementOf, _, right)
+                if !matches!(right.raw, RawExpr::Type(_)) =>
+            {
+                Some(TypeError::Unsupported(
+                    "named set membership is not supported",
+                ))
+            }
             RawExpr::Monop(Monop::Norm2, _) => {
                 Some(TypeError::Unsupported("2-norm remains after preprocessing"))
             }

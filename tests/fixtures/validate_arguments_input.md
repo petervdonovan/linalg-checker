@@ -329,3 +329,35 @@ WTS $\operatorname{diag}(c) = \operatorname{diag}(c)$
 1. $\operatorname{diag}(c) = \operatorname{diag}(d)$
 2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
 3. $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$
+
+# Scalar set comprehension
+
+Given:
+
+- $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+
+WTS $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
+
+1. $y > 0$
+2. $-1 \in \left\{x \in \mathbb{R} : x > 0\right\} \implies 0 = 1$
+
+# Matrix set comprehension
+
+Given:
+
+- $n = 2$
+- $A \in \left\{X \in \mathbb{R}^{n \times n} : \operatorname{tr}(X) > 0\right\}$
+
+WTS $A + A \in \left\{X \in \mathbb{R}^{n \times n} : \operatorname{tr}(X) > 0\right\}$
+
+# Set membership error localization
+
+Given:
+
+- $A \in \mathbb{R}^{2}$
+
+WTS $A = A$
+
+1. $A \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
+2. $A \in \left\{X \in \mathbb{R}^{2} : X\right\}$
+3. $A = A$

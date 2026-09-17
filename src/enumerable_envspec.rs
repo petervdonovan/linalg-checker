@@ -119,6 +119,15 @@ fn collect_equality_type_candidates(
 ) {
     struct Collector<'a>(&'a mut Vec<(Variable, TypeExpr<()>)>);
     impl Visit<TypedMetadata> for Collector<'_> {
+        fn visit_raw_expr_set_comprehension(
+            &mut self,
+            _variable: &Variable,
+            _domain: &TypeExpr<TypedMetadata>,
+            _predicate: &Expr<TypedMetadata>,
+        ) {
+            // Equalities under a set binder are predicates, not declarations.
+        }
+
         fn visit_cmp_chain(&mut self, chain: &CmpChain<TypedMetadata>) {
             let mut previous = &chain.start;
             for (comparison, current) in &chain.assertions {
@@ -596,16 +605,13 @@ fn collect_environment_specification(
             continue;
         };
         let RawExpr::Variable(variable) = &left.raw else {
-            return Err(ShapeError::InvalidTyping(
-                "type membership must have a variable on the left".to_owned(),
-            ));
+            continue;
         };
-        let RawExpr::Type(ty) = &right.raw else {
-            return Err(ShapeError::InvalidTyping(
-                "type membership must have a type on the right".to_owned(),
-            ));
+        let ty = match &right.raw {
+            RawExpr::Type(ty) => ty.clone(),
+            RawExpr::SetComprehension { domain, .. } => domain.clone(),
+            _ => continue,
         };
-        let ty = ty.clone();
         collect_type_dimension_variables(&ty, &mut specification.dimension_variables);
         specification
             .explicit_types
@@ -885,6 +891,7 @@ fn collect_type_implicit_dimensions(
     dimensions: &mut BTreeSet<ImplicitDimension>,
 ) {
     match ty {
+        TypeExpr::Set(element) => collect_type_implicit_dimensions(element, dimensions),
         TypeExpr::Matrix(rows, cols) => {
             collect_implicit_dimensions(rows, dimensions);
             collect_implicit_dimensions(cols, dimensions);
@@ -998,6 +1005,11 @@ impl DimensionConstraintBuilder<'_> {
         &mut self,
         expression: &Expr<Metadata>,
     ) -> Result<(), ShapeError> {
+        if let RawExpr::Finop(Finop::And, conjuncts) = &expression.raw {
+            for conjunct in conjuncts {
+                self.constrain_top_level_assertion(conjunct)?;
+            }
+        }
         if let RawExpr::CmpChain(chain) = &expression.raw
             && let Some(comparison) = self.natural_comparison(chain)?
         {
@@ -1216,6 +1228,11 @@ impl OperatorCompatibilityVisitor<'_, '_> {
         expression: &Expr<Metadata>,
     ) -> Result<(), ShapeError> {
         match &expression.raw {
+            RawExpr::SetComprehension { .. } => {
+                return Err(ShapeError::Unsupported(
+                    "set comprehension remains after preparation".into(),
+                ));
+            }
             RawExpr::StandardBasis { index, dimension } => {
                 let dimension = implicit_dimension(*dimension);
                 self.builder
@@ -1248,27 +1265,18 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                     ) => {}
                 }
             }
-            RawExpr::Binop(Binop::ElementOf, left, right) => {
-                let RawExpr::Variable(variable) = &left.raw else {
-                    return Err(ShapeError::InvalidTyping(
-                        "type membership requires a variable subject".to_owned(),
-                    ));
-                };
+            RawExpr::Binop(Binop::ElementOf | Binop::InDomain, left, right) => {
                 let RawExpr::Type(expected) = &right.raw else {
                     return Err(ShapeError::InvalidTyping(
-                        "type membership requires a type expression".to_owned(),
+                        "membership must be lowered to a type requirement".to_owned(),
                     ));
                 };
-                let actual = self
-                    .builder
-                    .variable_types
-                    .get(variable)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ShapeError::InvalidTyping(
-                            "membership subject has no inferred type".to_owned(),
-                        )
-                    })?;
+                let actual = self.builder.type_of(left)?;
+                if matches!(expected, TypeExpr::Real)
+                    && matches!(actual, TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real)
+                {
+                    return Ok(());
+                }
                 self.builder.constrain_types(&actual, expected)?;
             }
             RawExpr::Binop(Binop::Cast, target, value) => {
@@ -1288,7 +1296,14 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                         self.builder.assert_dimensions_equal(rows, &natural(1))?;
                         self.builder.assert_dimensions_equal(cols, &natural(1))?;
                     }
-                    (TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Seq(_, _), _) => {
+                    (
+                        TypeExpr::Set(_)
+                        | TypeExpr::Bool
+                        | TypeExpr::Nat
+                        | TypeExpr::Int
+                        | TypeExpr::Seq(_, _),
+                        _,
+                    ) => {
                         return Err(ShapeError::Unsupported(
                             "only real and 1x1 matrix casts are supported".to_owned(),
                         ));
@@ -1707,6 +1722,9 @@ fn lower_required_natural<Metadata>(
 
 fn structural_dimensions(ty: &TypeExpr<()>) -> Result<Vec<&Expr<()>>, ShapeError> {
     match ty {
+        TypeExpr::Set(_) => Err(ShapeError::Unsupported(
+            "set-valued variables are not supported".into(),
+        )),
         TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => Ok(Vec::new()),
         TypeExpr::Matrix(rows, cols) => Ok([rows, cols]
             .into_iter()
@@ -1776,6 +1794,11 @@ fn dependent_structural_dimension_cases(
             }
         };
         match ty {
+            TypeExpr::Set(_) => {
+                return Err(ShapeError::Unsupported(
+                    "set-valued variables are not supported".into(),
+                ));
+            }
             TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
             TypeExpr::Matrix(rows, cols) => {
                 for dimension in [rows, cols] {
@@ -1933,6 +1956,20 @@ fn collect_variables<Metadata>(
             self.variables.insert(variable.clone());
         }
 
+        fn visit_raw_expr_set_comprehension(
+            &mut self,
+            variable: &Variable,
+            domain: &TypeExpr<Metadata>,
+            predicate: &Expr<Metadata>,
+        ) {
+            self.visit_type_expr(domain);
+            for free in crate::formula::free_variables(std::iter::once(predicate)) {
+                if &free != variable {
+                    <Self as Visit<Metadata>>::visit_variable(self, &free);
+                }
+            }
+        }
+
         fn visit_raw_expr_seqop(
             &mut self,
             _op: &SeqOp,
@@ -1968,6 +2005,7 @@ fn collect_variables<Metadata>(
 
 fn collect_type_dimension_variables(ty: &TypeExpr<()>, variables: &mut BTreeSet<Variable>) {
     match ty {
+        TypeExpr::Set(element) => collect_type_dimension_variables(element, variables),
         TypeExpr::Matrix(rows, cols) => {
             collect_variables(rows, variables)
                 .expect("type dimensions cannot bind sequence indices");
@@ -1990,6 +2028,19 @@ fn collect_natural_position_variables<Metadata>(
 ) {
     struct Collector<'a>(&'a mut BTreeSet<Variable>);
     impl<Metadata> Visit<Metadata> for Collector<'_> {
+        fn visit_raw_expr_set_comprehension(
+            &mut self,
+            variable: &Variable,
+            domain: &TypeExpr<Metadata>,
+            predicate: &Expr<Metadata>,
+        ) {
+            collect_type_dimension_variables(&domain.with_default_metadata(), self.0);
+            let mut local = BTreeSet::new();
+            collect_natural_position_variables(predicate, &mut local);
+            local.remove(variable);
+            self.0.extend(local);
+        }
+
         fn visit_raw_expr_type(&mut self, ty: &TypeExpr<Metadata>) {
             collect_type_dimension_variables(&ty.with_default_metadata(), self.0);
         }
@@ -2131,6 +2182,7 @@ mod tests {
     ) -> TypeExpr<()> {
         fn specialize(ty: &TypeExpr<()>, environment: &Environment) -> TypeExpr<()> {
             match ty {
+                TypeExpr::Set(element) => TypeExpr::Set(Box::new(specialize(element, environment))),
                 TypeExpr::Bool => TypeExpr::Bool,
                 TypeExpr::Nat => TypeExpr::Nat,
                 TypeExpr::Int => TypeExpr::Int,

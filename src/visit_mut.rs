@@ -84,6 +84,15 @@ impl VisitContext {
 /// The default implementation expects every visited [`Expr`] to be uniquely
 /// owned. It panics if the expression's internal `Rc` is shared.
 pub trait VisitMut<Metadata> {
+    fn visit_raw_expr_set_comprehension_mut(
+        &mut self,
+        context: VisitContext,
+        variable: &mut Variable,
+        domain: &mut TypeExpr<Metadata>,
+        predicate: &mut Expr<Metadata>,
+    ) {
+        visit_raw_expr_set_comprehension_mut(self, context, variable, domain, predicate);
+    }
     fn side_conditions(&mut self) -> Vec<SideCondition<Metadata>> {
         vec![]
     }
@@ -306,6 +315,11 @@ pub fn visit_raw_expr_mut<V, Metadata>(
     V: VisitMut<Metadata> + ?Sized,
 {
     match node {
+        RawExpr::SetComprehension {
+            variable,
+            domain,
+            predicate,
+        } => visitor.visit_raw_expr_set_comprehension_mut(context, variable, domain, predicate),
         RawExpr::Hole => visitor.visit_raw_expr_hole_mut(context),
         RawExpr::Ellipsis => visitor.visit_raw_expr_ellipsis_mut(context),
         RawExpr::ImplicitDimension(dimension) => {
@@ -352,6 +366,7 @@ pub fn visit_type_expr_mut<V, Metadata>(
 {
     match node {
         TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
+        TypeExpr::Set(element) => visitor.visit_type_expr_mut(context, element),
         TypeExpr::Matrix(rows, cols) | TypeExpr::Seq(rows, cols) => {
             visitor.visit_expr_mut(context.clone(), rows);
             visitor.visit_expr_mut(context, cols);
@@ -628,6 +643,18 @@ pub fn visit_raw_expr_seqop_mut<V, Metadata>(
     visitor.visit_expr_mut(context.with_range(range), body);
 }
 
+pub fn visit_raw_expr_set_comprehension_mut<V: VisitMut<Metadata> + ?Sized, Metadata>(
+    visitor: &mut V,
+    context: VisitContext,
+    variable: &mut Variable,
+    domain: &mut TypeExpr<Metadata>,
+    predicate: &mut Expr<Metadata>,
+) {
+    visitor.visit_type_expr_mut(context.clone(), domain);
+    visitor.visit_variable_mut(context.clone(), variable);
+    visitor.visit_expr_mut(context, predicate);
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -841,6 +868,7 @@ mod tests {
         impl VisitMut<()> for VariantRecorder {
             fn visit_raw_expr_mut(&mut self, context: VisitContext, node: &mut RawExpr<()>) {
                 self.variants.insert(match node {
+                    RawExpr::SetComprehension { .. } => "set comprehension",
                     RawExpr::Hole => "hole",
                     RawExpr::Ellipsis => "ellipsis",
                     RawExpr::ImplicitDimension(_) => "implicit dimension",
@@ -866,6 +894,11 @@ mod tests {
 
         let dimension = ImplicitDimension::fresh();
         let mut expressions = vec![
+            Expr::new(RawExpr::SetComprehension {
+                variable: Variable::new("s"),
+                domain: TypeExpr::Set(Box::new(TypeExpr::Real)),
+                predicate: Expr::new(RawExpr::NatLiteral(1)),
+            }),
             Expr::new(RawExpr::Hole),
             Expr::new(RawExpr::Ellipsis),
             Expr::new(RawExpr::ImplicitDimension(dimension)),
@@ -929,6 +962,6 @@ mod tests {
         for expression in &mut expressions {
             visitor.visit_expr_mut(POSITIVE, expression);
         }
-        assert_eq!(visitor.variants.len(), 18);
+        assert_eq!(visitor.variants.len(), 19);
     }
 }

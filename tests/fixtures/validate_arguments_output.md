@@ -859,3 +859,89 @@ No premises seemed necessary to show this.
 
    No premises seemed necessary to show this.
    </details>
+
+# Scalar set comprehension
+
+Given:
+
+- $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+
+WTS $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+</details>
+
+1. $y > 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+   </details>
+2. $-1 \in \left\{x \in \mathbb{R} : x > 0\right\} \implies 0 = 1$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+# Matrix set comprehension
+
+Given:
+
+- $n = 2$
+- $A \in \left\{X \in \mathbb{R}^{n \times n} : \operatorname{tr}(X) > 0\right\}$
+
+WTS $A + A \in \left\{X \in \mathbb{R}^{n \times n} : \operatorname{tr}(X) > 0\right\}$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $A \in \left\{X \in \mathbb{R}^{n \times n} : \operatorname{tr}(X) > 0\right\}$
+</details>
+
+# Set membership error localization
+
+Given:
+
+- $A \in \mathbb{R}^{2}$
+
+WTS $A = A$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+1. $A \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   determinant requires a square matrix
+   </details>
+2. $A \in \left\{X \in \mathbb{R}^{2} : X\right\}$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   set comprehension predicate must be Boolean
+   </details>
+3. $A = A$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>

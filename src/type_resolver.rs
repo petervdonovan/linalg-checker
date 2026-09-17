@@ -159,6 +159,7 @@ impl OperatorTypeRules {
         rules.register_binop(Binop::InnerProd, real_result_rule);
         rules.register_binop(Binop::Cast, cast_rule);
         rules.register_binop(Binop::ElementOf, bool_result_rule);
+        rules.register_binop(Binop::InDomain, bool_result_rule);
         rules.register_binop(Binop::SingleSubscript, subscript_rule);
         rules.register_triop(Triop::DoubleSubscript, real_result_rule);
         rules.register_finop(Finop::Plus, addition_rule);
@@ -248,6 +249,8 @@ impl TypeLookup for SymbolicTypeEnvironment {
 pub struct TypeResolver<'a, Lookup> {
     types: &'a Lookup,
     rules: &'a OperatorTypeRules,
+    local_bindings: Vec<(Variable, TypeExpr<()>)>,
+    set_depth: usize,
     in_dimension_expression: bool,
     allow_missing_variables: bool,
     error: Option<TypeError>,
@@ -258,6 +261,8 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
         Self {
             types,
             rules,
+            local_bindings: Vec::new(),
+            set_depth: 0,
             in_dimension_expression: false,
             allow_missing_variables: false,
             error: None,
@@ -268,6 +273,8 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
         Self {
             types,
             rules,
+            local_bindings: Vec::new(),
+            set_depth: 0,
             in_dimension_expression: false,
             allow_missing_variables: true,
             error: None,
@@ -289,6 +296,23 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
         expression: &Expr<Metadata>,
     ) -> Result<Option<TypeExpr<()>>, TypeError> {
         let ty = match &expression.raw {
+            RawExpr::SetComprehension {
+                domain, predicate, ..
+            } => {
+                if !matches!(domain, TypeExpr::Real | TypeExpr::Matrix(_, _)) {
+                    return Err(TypeError::Unsupported(
+                        "set comprehension domains must be real scalars or matrices",
+                    ));
+                }
+                if let Ok(ty) = predicate.meta.get_type()
+                    && ty != TypeExpr::Bool
+                {
+                    return Err(TypeError::Invalid(
+                        "set comprehension predicate must be Boolean",
+                    ));
+                }
+                TypeExpr::Set(Box::new(domain.with_default_metadata()))
+            }
             RawExpr::Hole | RawExpr::Ellipsis | RawExpr::Type(_) => return Ok(None),
             RawExpr::ImplicitDimension(_) | RawExpr::BoundNatural(_) => TypeExpr::Nat,
             RawExpr::IdentityMatrix { dimension } => {
@@ -302,13 +326,21 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                 TypeExpr::Matrix(implicit_dimension(*rows), implicit_dimension(*cols))
             }
             RawExpr::Variable(variable) => {
-                let ty = context
-                    .active_ranges
+                let ty = self
+                    .local_bindings
                     .iter()
                     .rev()
-                    .find(|range| range.index_variable == *variable)
-                    .map(|_| TypeExpr::Nat)
-                    .or_else(|| self.types.type_of(variable));
+                    .find(|(bound, _)| bound == variable)
+                    .map(|(_, ty)| ty.clone())
+                    .or_else(|| {
+                        context
+                            .active_ranges
+                            .iter()
+                            .rev()
+                            .find(|range| range.index_variable == *variable)
+                            .map(|_| TypeExpr::Nat)
+                            .or_else(|| self.types.type_of(variable))
+                    });
                 if let Some(ty) = ty {
                     ty
                 } else if self.in_dimension_expression {
@@ -327,7 +359,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             RawExpr::Monop(op, inner) => {
                 return infer_operator([inner], |operands| self.rules.infer_monop(*op, operands));
             }
-            RawExpr::Binop(Binop::ElementOf, _, _) => TypeExpr::Bool,
+            RawExpr::Binop(Binop::ElementOf | Binop::InDomain, _, _) => TypeExpr::Bool,
             RawExpr::Binop(Binop::Cast, target, value) => {
                 let Some(value) = operand(value) else {
                     return Ok(None);
@@ -404,6 +436,25 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 .expect("type resolution requires unique expressions")
                 .raw;
             match raw {
+                RawExpr::SetComprehension {
+                    variable,
+                    domain,
+                    predicate,
+                } => {
+                    if crate::formula::contains_quantifier(predicate) {
+                        self.error = Some(TypeError::Unsupported(
+                            "quantified set predicates are not supported",
+                        ));
+                        return;
+                    }
+                    self.visit_type_expr_mut(context.clone(), domain);
+                    self.set_depth += 1;
+                    self.local_bindings
+                        .push((variable.clone(), domain.with_default_metadata()));
+                    self.visit_expr_mut(context.clone(), predicate);
+                    self.local_bindings.pop();
+                    self.set_depth -= 1;
+                }
                 RawExpr::Hole
                 | RawExpr::Ellipsis
                 | RawExpr::ImplicitDimension(_)
@@ -420,7 +471,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     }
                 }
                 RawExpr::Monop(_, inner) => self.visit_expr_mut(context.clone(), inner),
-                RawExpr::Binop(Binop::ElementOf, left, right) => {
+                RawExpr::Binop(Binop::ElementOf | Binop::InDomain, left, right) => {
                     self.visit_expr_mut(context.clone(), left);
                     self.visit_expr_mut(context.clone(), right);
                 }
@@ -459,18 +510,22 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 RawExpr::Seqop(_, range, body) => {
                     self.visit_expr_mut(context.clone(), &mut range.from);
                     self.visit_expr_mut(context.clone(), &mut range.to);
-                    if context
-                        .active_ranges
-                        .iter()
-                        .any(|active| active.index_variable == range.index_variable)
-                        || self.types.type_of(&range.index_variable).is_some()
+                    if self.set_depth == 0
+                        && (context
+                            .active_ranges
+                            .iter()
+                            .any(|active| active.index_variable == range.index_variable)
+                            || self.types.type_of(&range.index_variable).is_some())
                     {
                         self.error = Some(TypeError::Invalid(
                             "sequence index collides with a global variable or enclosing binder",
                         ));
                         return;
                     }
+                    self.local_bindings
+                        .push((range.index_variable.clone(), TypeExpr::Nat));
                     self.visit_expr_mut(context.with_range(range), body);
+                    self.local_bindings.pop();
                 }
             }
         }
@@ -486,6 +541,7 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
 
     fn visit_type_expr_mut(&mut self, context: VisitContext, node: &mut TypeExpr<Metadata>) {
         match node {
+            TypeExpr::Set(element) => self.visit_type_expr_mut(context, element),
             TypeExpr::Bool | TypeExpr::Nat | TypeExpr::Int | TypeExpr::Real => {}
             TypeExpr::Matrix(rows, cols) => {
                 let previous = self.in_dimension_expression;
@@ -743,6 +799,7 @@ pub(crate) fn same_type_structure(
     right: &TypeExpr<()>,
 ) -> Result<bool, TypeError> {
     Ok(match (left, right) {
+        (TypeExpr::Set(a), TypeExpr::Set(b)) => same_type_structure(a, b)?,
         (TypeExpr::Bool, TypeExpr::Bool)
         | (TypeExpr::Nat, TypeExpr::Nat)
         | (TypeExpr::Int, TypeExpr::Int)
@@ -818,7 +875,7 @@ pub(crate) fn block_dimensions(ty: TypeExpr<()>) -> Result<(Expr<()>, Expr<()>),
             ))
         }
         TypeExpr::Matrix(rows, cols) => Ok((rows, cols)),
-        TypeExpr::Bool | TypeExpr::Seq(_, _) => Err(TypeError::Invalid(
+        TypeExpr::Set(_) | TypeExpr::Bool | TypeExpr::Seq(_, _) => Err(TypeError::Invalid(
             "block matrix cells must be numeric scalars or matrices",
         )),
     }
