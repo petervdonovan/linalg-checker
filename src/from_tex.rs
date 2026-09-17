@@ -434,6 +434,7 @@ impl<'a> Cursor<'a> {
                     "tr" => Monop::Trace,
                     "det" => Monop::Det,
                     "diag" => Monop::Diag,
+                    "Nul" | "null" | "Null" | "nul" | "ker" => Monop::Nul,
                     _ => return Err(self.unsupported(format!("operator name {name}"))),
                 };
                 self.position += 1;
@@ -442,10 +443,15 @@ impl<'a> Cursor<'a> {
             }
             ParseNode::Op {
                 name: Some(name), ..
-            } if name == r"\det" => {
+            } if name == r"\det" || name == r"\ker" => {
                 self.position += 1;
                 let argument = self.take_parenthesized()?;
-                Ok(Expr::new(RawExpr::Monop(Monop::Det, expr(argument)?)))
+                let op = if name == r"\det" {
+                    Monop::Det
+                } else {
+                    Monop::Nul
+                };
+                Ok(Expr::new(RawExpr::Monop(op, expr(argument)?)))
             }
             ParseNode::Op {
                 name: Some(name), ..
@@ -1373,6 +1379,24 @@ mod tests {
             round_trip(r"\max(1, 2)").unwrap(),
             round_trip(r"\min(1, 2)").unwrap(),
         ));
+    }
+
+    #[test]
+    fn parses_null_space_aliases_canonically() {
+        for input in [
+            r"\operatorname{Nul}(A)",
+            r"\operatorname{null}(A)",
+            r"\operatorname{Null}(A)",
+            r"\operatorname{nul}(A)",
+            r"\operatorname{ker}(A)",
+            r"\ker(A)",
+        ] {
+            assert_eq!(
+                round_trip(input).unwrap(),
+                r"\operatorname{Nul}(A)",
+                "{input}"
+            );
+        }
     }
 
     #[test]

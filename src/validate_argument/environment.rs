@@ -148,6 +148,7 @@ pub(super) fn goal_environment_extensions(
     base: &Environment,
     symbolic_types: &SymbolicTypeEnvironment,
     givens: &[PreparedExpression],
+    contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let declarations = fixed_assignment_declarations(base, symbolic_types)?;
@@ -159,7 +160,7 @@ pub(super) fn goal_environment_extensions(
     let iterator = match extract_prepared_environment_iterator(
         symbolic_types,
         &assumptions,
-        &[],
+        contextual_expressions,
         max_dimension,
     ) {
         Ok(iterator) => iterator,
@@ -220,14 +221,14 @@ pub(super) fn quantifier_environment_extensions(
 pub(super) fn expression_environment_extensions(
     base: &Environment,
     symbolic_types: &SymbolicTypeEnvironment,
-    step: &PreparedExpression,
+    steps: &[PreparedExpression],
     max_dimension: u64,
 ) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let declarations = fixed_assignment_declarations(base, symbolic_types)?;
     let iterator = match extract_prepared_environment_iterator(
         symbolic_types,
         &declarations,
-        std::slice::from_ref(step),
+        steps,
         max_dimension,
     ) {
         Ok(iterator) => iterator,

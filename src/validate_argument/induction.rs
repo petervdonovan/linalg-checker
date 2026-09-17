@@ -134,7 +134,7 @@ pub(super) fn validate_tactic_fallback(
         .map_err(ToZ3Error::from)
         .map_err(ModelFindingError::from)?;
     let extensions =
-        goal_environment_extensions(&base, &types, &prepared_givens, run.max_dimension)?;
+        goal_environment_extensions(&base, &types, &prepared_givens, &[], run.max_dimension)?;
     goal.validation.environments_exhaustive &= extensions.exhaustive;
     if extensions.environments.is_empty() {
         goal.validation

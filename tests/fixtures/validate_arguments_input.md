@@ -361,3 +361,15 @@ WTS $A = A$
 1. $A \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
 2. $A \in \left\{X \in \mathbb{R}^{2} : X\right\}$
 3. $A = A$
+
+# Null space is closed under addition
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $x \in \mathbb{R}^{2}$
+- $y \in \mathbb{R}^{2}$
+- $x \in \operatorname{Nul}(A)$
+- $y \in \operatorname{Nul}(A)$
+
+WTS $x + y \in \operatorname{Nul}(A)$

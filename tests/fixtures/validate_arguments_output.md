@@ -929,7 +929,7 @@ No premises seemed necessary to show this.
    <details>
    <summary>Unsupported step</summary>
 
-   determinant requires a square matrix
+   set membership subject has incompatible domain dimensions or type
    </details>
 2. $A \in \left\{X \in \mathbb{R}^{2} : X\right\}$
 
@@ -945,3 +945,24 @@ No premises seemed necessary to show this.
 
    No premises seemed necessary to show this.
    </details>
+
+# Null space is closed under addition
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $x \in \mathbb{R}^{2}$
+- $y \in \mathbb{R}^{2}$
+- $x \in \operatorname{Nul}(A)$
+- $y \in \operatorname{Nul}(A)$
+
+WTS $x + y \in \operatorname{Nul}(A)$
+
+<details>
+<summary>✅ verified</summary>
+
+This follows from the following facts:
+
+- $x \in \operatorname{Nul}(A)$
+- $y \in \operatorname{Nul}(A)$
+</details>

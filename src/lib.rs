@@ -244,6 +244,8 @@ pub enum Monop {
     Trace,
     Det,
     Diag,
+    /// Surface right-null-space operator, eliminated during preprocessing.
+    Nul,
     Neg,
     Inverse,
     Norm1,

@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use crate::{
     Binop, Expr, Logic, Monop, RawExpr,
     logic_lowering::LogicLowering,
-    operator_visitors::{Norm2SquaredVisitor, Norm2Visitor, SquareRootVisitor, assert_compatible},
+    operator_visitors::{
+        Norm2SquaredVisitor, Norm2Visitor, NulVisitor, SquareRootVisitor, assert_compatible,
+    },
     type_resolver::{
         MaybeTyped, OperatorTypeRules, TypeError, TypeLookup, TypeResolver, TypedMetadata,
     },
@@ -146,6 +148,19 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
             &mut side_conditions,
         );
         rewrites += logic.rewrites();
+
+        let mut nul = NulVisitor::default();
+        visit_forest(
+            &mut nul,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        if nul.finish()? > 0 {
+            // The generated comprehension and its predicate need fresh type
+            // annotations before membership can consume them.
+            continue;
+        }
 
         let mut sets = crate::set_lowering::SetMembershipLowering::default();
         visit_forest(

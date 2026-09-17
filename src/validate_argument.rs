@@ -774,18 +774,6 @@ fn validate_nested_goal(
         environment_givens.push(prepared.clone());
     }
 
-    let extensions = goal_environment_extensions(
-        &parent_environment,
-        &symbolic_types,
-        &environment_givens,
-        run.max_dimension,
-    )?;
-    and_exhaustive(goal, extensions.exhaustive);
-    if extensions.environments.is_empty() {
-        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
-        return Ok(None);
-    }
-
     let prepared_implication =
         if introduced_variables.is_empty() && !goal.givens.iter().any(is_quantifier) {
             let mut scope = run.givens.clone();
@@ -805,6 +793,19 @@ fn validate_nested_goal(
         } else {
             None
         };
+    let implication_context = prepared_implication.as_slice();
+    let extensions = goal_environment_extensions(
+        &parent_environment,
+        &symbolic_types,
+        &environment_givens,
+        implication_context,
+        run.max_dimension,
+    )?;
+    and_exhaustive(goal, extensions.exhaustive);
+    if extensions.environments.is_empty() {
+        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
+        return Ok(None);
+    }
 
     let mut feasible = 0;
     let mut all_validated = true;
@@ -985,7 +986,7 @@ fn validate_ordinary_claim(
     let extensions = expression_environment_extensions(
         &environment,
         symbolic_types,
-        &positive,
+        &[positive.clone(), negative.clone()],
         run.max_dimension,
     )?;
     validation.environments_exhaustive &= extensions.exhaustive;

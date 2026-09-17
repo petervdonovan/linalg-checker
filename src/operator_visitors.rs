@@ -1,12 +1,79 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
+    Annotation, Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
+    expression_utils::all_variables,
     type_expr::abstract_type_variable,
     type_resolver::{MaybeTyped, TypeError},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
+
+#[derive(Default)]
+pub struct NulVisitor {
+    rewrites: usize,
+    error: Option<TypeError>,
+}
+
+impl NulVisitor {
+    pub fn finish(self) -> Result<usize, TypeError> {
+        self.error.map_or(Ok(self.rewrites), Err)
+    }
+}
+
+impl<Metadata> VisitMut<Metadata> for NulVisitor
+where
+    Metadata: Clone + Default + MaybeTyped,
+{
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<Metadata>) {
+        if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context, node);
+        let RawExpr::Monop(Monop::Nul, operand) = &node.raw else {
+            return;
+        };
+        let TypeExpr::Matrix(_, columns) = (match operand.meta.get_type() {
+            Ok(ty) => ty,
+            Err(_) => {
+                self.error = Some(TypeError::Invalid(
+                    "Nul requires an operand with a resolved symbolic matrix type",
+                ));
+                return;
+            }
+        }) else {
+            self.error = Some(TypeError::Invalid("Nul requires a matrix operand"));
+            return;
+        };
+
+        let used = all_variables(std::iter::once(operand));
+        let mut variable = Variable::new("x");
+        while used.contains(&variable) {
+            variable.annotations.push(Annotation::Prime);
+        }
+        let vector = Expr::with_metadata(Metadata::default(), RawExpr::Variable(variable.clone()));
+        let product = Expr::with_metadata(
+            Metadata::default(),
+            RawExpr::Finop(Finop::Times, vec![deep_clone(operand), vector]),
+        );
+        let zero = Expr::with_metadata(
+            Metadata::default(),
+            RawExpr::ZeroMatrix {
+                rows: crate::ImplicitDimension::fresh(),
+                cols: crate::ImplicitDimension::fresh(),
+            },
+        );
+        *node = Expr::with_metadata(
+            Metadata::default(),
+            RawExpr::SetComprehension {
+                variable,
+                domain: TypeExpr::Matrix(columns.with_default_metadata(), natural(1)),
+                predicate: comparison(product, Cmp::Eq, zero),
+            },
+        );
+        self.rewrites += 1;
+    }
+}
 
 #[derive(Default)]
 pub struct Norm2SquaredVisitor {
@@ -466,5 +533,84 @@ pub(crate) fn assert_compatible<Metadata>(
             "same-named synthetic variables have incompatible existence checks"
         ),
         _ => panic!("same-named synthetic variables have incompatible existence classes"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{type_resolver::TypedMetadata, visit_mut::VisitMut};
+
+    fn dimension(name: &str) -> Expr<()> {
+        Expr::new(RawExpr::Variable(Variable::new(name)))
+    }
+
+    fn typed(ty: TypeExpr<()>, raw: RawExpr<TypedMetadata>) -> Expr<TypedMetadata> {
+        Expr::with_metadata(TypedMetadata::resolved(ty), raw)
+    }
+
+    #[test]
+    fn nul_lowers_to_the_right_kernel_universe() {
+        let operand = typed(
+            TypeExpr::Matrix(dimension("m"), dimension("n")),
+            RawExpr::Variable(Variable::new("A")),
+        );
+        let mut expression = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::Monop(Monop::Nul, operand),
+        );
+        let mut visitor = NulVisitor::default();
+        visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
+        assert_eq!(visitor.finish(), Ok(1));
+        let RawExpr::SetComprehension {
+            variable,
+            domain: TypeExpr::Matrix(rows, cols),
+            predicate,
+        } = &expression.raw
+        else {
+            panic!("expected a vector set comprehension")
+        };
+        assert_eq!(variable, &Variable::new("x"));
+        assert_eq!(rows.as_latex().to_string(), "n");
+        assert!(matches!(cols.raw, RawExpr::NatLiteral(1)));
+        assert_eq!(predicate.as_latex().to_string(), r"A x = \mathbb{0}");
+    }
+
+    #[test]
+    fn nul_chooses_a_capture_avoiding_binder() {
+        let operand = typed(
+            TypeExpr::Matrix(dimension("m"), dimension("n")),
+            RawExpr::Variable(Variable::new("x")),
+        );
+        let mut expression = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::Monop(Monop::Nul, operand),
+        );
+        let mut visitor = NulVisitor::default();
+        visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
+        assert_eq!(visitor.finish(), Ok(1));
+        let RawExpr::SetComprehension { variable, .. } = &expression.raw else {
+            panic!("expected a set comprehension")
+        };
+        assert_eq!(variable.annotations, vec![Annotation::Prime]);
+    }
+
+    #[test]
+    fn nul_rejects_nonmatrix_and_untyped_operands() {
+        for operand in [
+            typed(TypeExpr::Real, RawExpr::Variable(Variable::new("a"))),
+            Expr::with_metadata(
+                TypedMetadata::default(),
+                RawExpr::Variable(Variable::new("A")),
+            ),
+        ] {
+            let mut expression = Expr::with_metadata(
+                TypedMetadata::default(),
+                RawExpr::Monop(Monop::Nul, operand),
+            );
+            let mut visitor = NulVisitor::default();
+            visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
+            assert!(visitor.finish().is_err());
+        }
     }
 }

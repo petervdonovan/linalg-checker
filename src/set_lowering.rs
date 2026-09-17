@@ -214,6 +214,26 @@ mod tests {
     }
 
     #[test]
+    fn nul_membership_lowers_through_a_generated_comprehension() {
+        let prepared = prepare(
+            r"z \in \operatorname{Nul}(A)",
+            &[r"A \in \mathbb{R}^{m \times n}", r"z \in \mathbb{R}^{n}"],
+        )
+        .unwrap();
+        let rendered = prepared.expression.as_latex().to_string();
+        assert!(!rendered.contains("Nul"));
+        assert!(!rendered.contains(r"\left\{"));
+        assert!(rendered.contains(r"A z = \mathbb{0}"), "{rendered}");
+        assert!(
+            prepare(
+                r"\operatorname{Nul}(A)",
+                &[r"A \in \mathbb{R}^{m \times n}"]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_domains_predicates_and_set_values() {
         for input in [
             r"1 \in \{x \in \mathbb{N} : x > 0\}",
