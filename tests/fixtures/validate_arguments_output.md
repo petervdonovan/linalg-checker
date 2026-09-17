@@ -966,3 +966,19 @@ This follows from the following facts:
 - $x \in \operatorname{Nul}(A)$
 - $y \in \operatorname{Nul}(A)$
 </details>
+
+# Range membership witness
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $b \in \mathbb{R}^{2}$
+- $b \in \operatorname{Range}(A)$
+
+WTS $b = b$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>

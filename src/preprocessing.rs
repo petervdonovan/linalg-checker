@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use crate::{
-    Binop, Expr, Logic, Monop, RawExpr,
+    Binop, Expr, Finop, Logic, Monop, RawExpr,
     logic_lowering::LogicLowering,
     operator_visitors::{
-        Norm2SquaredVisitor, Norm2Visitor, NulVisitor, SquareRootVisitor, assert_compatible,
+        ExistsLowering, Norm2SquaredVisitor, Norm2Visitor, SetOperatorLowering, SquareRootVisitor,
+        assert_compatible,
     },
     type_resolver::{
         MaybeTyped, OperatorTypeRules, TypeError, TypeLookup, TypeResolver, TypedMetadata,
@@ -149,18 +150,15 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         rewrites += logic.rewrites();
 
-        let mut nul = NulVisitor::default();
+        let mut set_operators = SetOperatorLowering::default();
         visit_forest(
-            &mut nul,
+            &mut set_operators,
             context.clone(),
             &mut expression,
             &mut side_conditions,
         );
-        if nul.finish()? > 0 {
-            // The generated comprehension and its predicate need fresh type
-            // annotations before membership can consume them.
-            continue;
-        }
+        let set_operator_rewrites = set_operators.finish()?;
+        rewrites += set_operator_rewrites;
 
         let mut sets = crate::set_lowering::SetMembershipLowering::default();
         visit_forest(
@@ -170,12 +168,21 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
             &mut side_conditions,
         );
         let set_rewrites = sets.finish()?;
-        if set_rewrites > 0 {
-            // Resolve substituted syntax before lowering operators or running
-            // synthesis; all remaining passes participate in the next iteration.
+
+        let mut exists = ExistsLowering::default();
+        visit_forest(
+            &mut exists,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let (exists_rewrites, conditions) = exists.finish()?;
+        merge_side_conditions(&mut side_conditions, conditions);
+        if set_rewrites > 0 || exists_rewrites > 0 {
+            // Resolve substituted syntax and newly introduced witnesses before
+            // lowering other operators or running synthesis.
             continue;
         }
-
         let mut norm2_squared = Norm2SquaredVisitor::default();
         visit_forest(
             &mut norm2_squared,
@@ -337,24 +344,12 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
             return;
         }
         self.error = match &node.raw {
-            RawExpr::SetComprehension { .. } => Some(TypeError::Unsupported(
-                "set values must be consumed by direct comprehension membership",
-            )),
-            _ if matches!(node.meta.get_type(), Ok(crate::TypeExpr::Set(_))) => {
-                Some(TypeError::Unsupported(
-                    "set-valued expressions are not supported after preparation",
-                ))
-            }
-            RawExpr::Binop(Binop::ElementOf, _, right)
-                if !matches!(right.raw, RawExpr::Type(_)) =>
-            {
-                Some(TypeError::Unsupported(
-                    "named set membership is not supported",
-                ))
-            }
             RawExpr::Monop(Monop::Norm2, _) => {
                 Some(TypeError::Unsupported("2-norm remains after preprocessing"))
             }
+            RawExpr::Finop(Finop::Exists, _) => Some(TypeError::Unsupported(
+                "existential expressions can only be lowered in positive logical contexts",
+            )),
             RawExpr::Binop(Binop::Power, _, exponent) if is_half(exponent) => Some(
                 TypeError::Unsupported("square root remains after preprocessing"),
             ),
@@ -417,6 +412,16 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
         } else {
             visit::visit_raw_expr_binop(self, op, left, right);
         }
+    }
+
+    fn visit_raw_expr_set_comprehension(
+        &mut self,
+        _variable: &crate::Variable,
+        _domain: &crate::TypeExpr<TypedMetadata>,
+        _predicate: &Expr<TypedMetadata>,
+    ) {
+        // First-class sets are retained until concrete/Z3 lowering actually
+        // requires their elimination.
     }
 }
 

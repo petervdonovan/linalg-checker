@@ -1254,9 +1254,9 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             "2-norm must be lowered before dimension inference".to_owned(),
                         ));
                     }
-                    (Monop::Nul, _) => {
+                    (Monop::Nul | Monop::Range, _) => {
                         return Err(ShapeError::Unsupported(
-                            "Nul must be lowered before dimension inference".to_owned(),
+                            "set operators must be lowered before dimension inference".to_owned(),
                         ));
                     }
                     (Monop::Diag, _) => {}

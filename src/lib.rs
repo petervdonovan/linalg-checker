@@ -246,6 +246,8 @@ pub enum Monop {
     Diag,
     /// Surface right-null-space operator, eliminated during preprocessing.
     Nul,
+    /// Surface column-space operator, eliminated during preprocessing.
+    Range,
     Neg,
     Inverse,
     Norm1,

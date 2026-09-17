@@ -1197,9 +1197,7 @@ mod tests {
         assert_lowering_error(
             environment,
             expression(r"\exists p, p"),
-            ToZ3Error::Elaboration(ElaborationError::Unsupported(
-                "finite operator remains after concrete elaboration",
-            )),
+            ToZ3Error::Type(TypeError::Invalid("exists binder must be fresh")),
         );
     }
 

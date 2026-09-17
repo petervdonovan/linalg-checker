@@ -435,6 +435,7 @@ impl<'a> Cursor<'a> {
                     "det" => Monop::Det,
                     "diag" => Monop::Diag,
                     "Nul" | "null" | "Null" | "nul" | "ker" => Monop::Nul,
+                    "Range" | "range" | "Ran" | "ran" | "Im" | "im" => Monop::Range,
                     _ => return Err(self.unsupported(format!("operator name {name}"))),
                 };
                 self.position += 1;
@@ -443,15 +444,21 @@ impl<'a> Cursor<'a> {
             }
             ParseNode::Op {
                 name: Some(name), ..
-            } if name == r"\det" || name == r"\ker" => {
+            } if name == r"\det" || name == r"\ker" || name == r"\Im" => {
                 self.position += 1;
                 let argument = self.take_parenthesized()?;
-                let op = if name == r"\det" {
-                    Monop::Det
-                } else {
-                    Monop::Nul
+                let op = match name.as_str() {
+                    r"\det" => Monop::Det,
+                    r"\ker" => Monop::Nul,
+                    r"\Im" => Monop::Range,
+                    _ => unreachable!(),
                 };
                 Ok(Expr::new(RawExpr::Monop(op, expr(argument)?)))
+            }
+            ParseNode::TextOrd { text, .. } if text == r"\Im" => {
+                self.position += 1;
+                let argument = self.take_parenthesized()?;
+                Ok(Expr::new(RawExpr::Monop(Monop::Range, expr(argument)?)))
             }
             ParseNode::Op {
                 name: Some(name), ..
@@ -1394,6 +1401,25 @@ mod tests {
             assert_eq!(
                 round_trip(input).unwrap(),
                 r"\operatorname{Nul}(A)",
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_range_aliases_canonically() {
+        for input in [
+            r"\operatorname{Range}(A)",
+            r"\operatorname{range}(A)",
+            r"\operatorname{Ran}(A)",
+            r"\operatorname{ran}(A)",
+            r"\operatorname{Im}(A)",
+            r"\operatorname{im}(A)",
+            r"\Im(A)",
+        ] {
+            assert_eq!(
+                round_trip(input).unwrap(),
+                r"\operatorname{Range}(A)",
                 "{input}"
             );
         }

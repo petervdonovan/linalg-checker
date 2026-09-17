@@ -441,12 +441,6 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     domain,
                     predicate,
                 } => {
-                    if crate::formula::contains_quantifier(predicate) {
-                        self.error = Some(TypeError::Unsupported(
-                            "quantified set predicates are not supported",
-                        ));
-                        return;
-                    }
                     self.visit_type_expr_mut(context.clone(), domain);
                     self.set_depth += 1;
                     self.local_bindings
@@ -489,6 +483,97 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     self.visit_expr_mut(context.clone(), a);
                     self.visit_expr_mut(context.clone(), b);
                     self.visit_expr_mut(context.clone(), c);
+                }
+                RawExpr::Finop(Finop::Exists, expressions) => {
+                    let Some((declaration, remaining)) = expressions.split_first() else {
+                        self.error = Some(TypeError::Invalid(
+                            "exists requires one typed binder declaration and a body",
+                        ));
+                        return;
+                    };
+                    if remaining.is_empty() {
+                        self.error = Some(TypeError::Invalid(
+                            "exists requires one typed binder declaration and a body",
+                        ));
+                        return;
+                    }
+                    let (binder, explicit_type) = match &declaration.raw {
+                        RawExpr::Variable(binder) => (binder.clone(), None),
+                        RawExpr::Binop(Binop::ElementOf, subject, target) => {
+                            let (RawExpr::Variable(binder), RawExpr::Type(ty)) =
+                                (&subject.raw, &target.raw)
+                            else {
+                                self.error = Some(TypeError::Invalid(
+                                    "exists requires a direct variable binder",
+                                ));
+                                return;
+                            };
+                            (binder.clone(), Some(ty.with_default_metadata()))
+                        }
+                        _ => {
+                            self.error = Some(TypeError::Invalid(
+                                "exists requires a direct variable binder",
+                            ));
+                            return;
+                        }
+                    };
+                    if remaining[..remaining.len() - 1].iter().any(|expression| {
+                        match &expression.raw {
+                            RawExpr::Binop(Binop::ElementOf, left, right) => {
+                                matches!(left.raw, RawExpr::Variable(_))
+                                    && matches!(right.raw, RawExpr::Type(_))
+                            }
+                            RawExpr::Variable(variable) => self.types.type_of(variable).is_none(),
+                            _ => false,
+                        }
+                    }) {
+                        self.error = Some(TypeError::Unsupported(
+                            "exists lowering supports exactly one binder",
+                        ));
+                        return;
+                    }
+                    if self.types.type_of(&binder).is_some()
+                        || self
+                            .local_bindings
+                            .iter()
+                            .any(|(active, _)| active == &binder)
+                        || context
+                            .active_ranges
+                            .iter()
+                            .any(|range| range.index_variable == binder)
+                    {
+                        self.error = Some(TypeError::Invalid("exists binder must be fresh"));
+                        return;
+                    }
+                    let ty = if let Some(ty) = explicit_type {
+                        ty
+                    } else {
+                        let premise: Expr<()> = declaration.with_default_metadata();
+                        let inferred =
+                            match crate::enumerable_envspec::infer_symbolic_type_environment(
+                                std::slice::from_ref(&premise),
+                            ) {
+                                Ok(inferred) => inferred,
+                                Err(_) => {
+                                    self.error = Some(TypeError::Invalid(
+                                        "exists binder type could not be inferred",
+                                    ));
+                                    return;
+                                }
+                            };
+                        let Some(ty) = inferred.types.get(&binder).cloned() else {
+                            self.error = Some(TypeError::Invalid(
+                                "exists binder type could not be inferred",
+                            ));
+                            return;
+                        };
+                        ty
+                    };
+                    self.local_bindings.push((binder, ty));
+                    for expression in expressions {
+                        self.visit_expr_mut(context.clone(), expression);
+                    }
+                    self.local_bindings.pop();
                 }
                 RawExpr::Finop(_, expressions) => {
                     for expression in expressions {

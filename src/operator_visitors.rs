@@ -4,24 +4,28 @@ use crate::{
     Annotation, Binop, Cmp, CmpChain, Expr, Finop, Monop, RawExpr, TypeExpr, Variable,
     deep_clone::deep_clone,
     expression_utils::all_variables,
+    formula::substitute_free_variable,
     type_expr::abstract_type_variable,
-    type_resolver::{MaybeTyped, TypeError},
+    type_resolver::{MaybeTyped, TypeError, TypedMetadata},
     visit_mut::{self, Existence, SideCondition, VisitContext, VisitMut},
 };
 
 #[derive(Default)]
-pub struct NulVisitor {
+pub struct SetOperatorLowering {
     rewrites: usize,
     error: Option<TypeError>,
 }
 
-impl NulVisitor {
+/// Compatibility name for the original single-operator lowering pass.
+pub type NulVisitor = SetOperatorLowering;
+
+impl SetOperatorLowering {
     pub fn finish(self) -> Result<usize, TypeError> {
         self.error.map_or(Ok(self.rewrites), Err)
     }
 }
 
-impl<Metadata> VisitMut<Metadata> for NulVisitor
+impl<Metadata> VisitMut<Metadata> for SetOperatorLowering
 where
     Metadata: Clone + Default + MaybeTyped,
 {
@@ -30,19 +34,19 @@ where
             return;
         }
         visit_mut::visit_expr_mut(self, context, node);
-        let RawExpr::Monop(Monop::Nul, operand) = &node.raw else {
+        let RawExpr::Monop(op @ (Monop::Nul | Monop::Range), operand) = &node.raw else {
             return;
         };
-        let TypeExpr::Matrix(_, columns) = (match operand.meta.get_type() {
+        let TypeExpr::Matrix(rows, columns) = (match operand.meta.get_type() {
             Ok(ty) => ty,
             Err(_) => {
                 self.error = Some(TypeError::Invalid(
-                    "Nul requires an operand with a resolved symbolic matrix type",
+                    "set operators require an operand with a resolved symbolic matrix type",
                 ));
                 return;
             }
         }) else {
-            self.error = Some(TypeError::Invalid("Nul requires a matrix operand"));
+            self.error = Some(TypeError::Invalid("set operators require a matrix operand"));
             return;
         };
 
@@ -52,26 +56,193 @@ where
             variable.annotations.push(Annotation::Prime);
         }
         let vector = Expr::with_metadata(Metadata::default(), RawExpr::Variable(variable.clone()));
-        let product = Expr::with_metadata(
-            Metadata::default(),
-            RawExpr::Finop(Finop::Times, vec![deep_clone(operand), vector]),
-        );
-        let zero = Expr::with_metadata(
-            Metadata::default(),
-            RawExpr::ZeroMatrix {
-                rows: crate::ImplicitDimension::fresh(),
-                cols: crate::ImplicitDimension::fresh(),
-            },
-        );
+        let (domain, predicate) = match op {
+            Monop::Nul => {
+                let product = Expr::with_metadata(
+                    Metadata::default(),
+                    RawExpr::Finop(Finop::Times, vec![deep_clone(operand), vector]),
+                );
+                let zero = Expr::with_metadata(
+                    Metadata::default(),
+                    RawExpr::ZeroMatrix {
+                        rows: crate::ImplicitDimension::fresh(),
+                        cols: crate::ImplicitDimension::fresh(),
+                    },
+                );
+                (
+                    TypeExpr::Matrix(columns.with_default_metadata(), natural(1)),
+                    comparison(product, Cmp::Eq, zero),
+                )
+            }
+            Monop::Range => {
+                let mut witness = Variable::new("w");
+                witness.non_numeric_subscript =
+                    format!("preimage of {}", operand.as_latex_verbose());
+                let witness_expression =
+                    Expr::with_metadata(Metadata::default(), RawExpr::Variable(witness.clone()));
+                let product = Expr::with_metadata(
+                    Metadata::default(),
+                    RawExpr::Finop(Finop::Times, vec![deep_clone(operand), witness_expression]),
+                );
+                (
+                    TypeExpr::Matrix(rows.with_default_metadata(), natural(1)),
+                    Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Finop(
+                            Finop::Exists,
+                            vec![
+                                Expr::with_metadata(
+                                    Metadata::default(),
+                                    RawExpr::Variable(witness),
+                                ),
+                                comparison(product, Cmp::Eq, vector),
+                            ],
+                        ),
+                    ),
+                )
+            }
+            _ => unreachable!(),
+        };
+        let mut predicate = predicate;
+        predicate
+            .get_mut()
+            .expect("new set predicates must be uniquely owned")
+            .meta
+            .put_type(TypeExpr::Bool);
         *node = Expr::with_metadata(
             Metadata::default(),
             RawExpr::SetComprehension {
                 variable,
-                domain: TypeExpr::Matrix(columns.with_default_metadata(), natural(1)),
-                predicate: comparison(product, Cmp::Eq, zero),
+                domain,
+                predicate,
             },
         );
         self.rewrites += 1;
+    }
+}
+
+#[derive(Default)]
+pub struct ExistsLowering {
+    rewrites: usize,
+    error: Option<TypeError>,
+    side_conditions: Vec<SideCondition<TypedMetadata>>,
+    by_variable: BTreeMap<Variable, usize>,
+}
+
+impl ExistsLowering {
+    pub fn finish(self) -> Result<(usize, Vec<SideCondition<TypedMetadata>>), TypeError> {
+        self.error
+            .map_or(Ok((self.rewrites, self.side_conditions)), Err)
+    }
+}
+
+impl VisitMut<TypedMetadata> for ExistsLowering {
+    fn side_conditions(&mut self) -> Vec<SideCondition<TypedMetadata>> {
+        std::mem::take(&mut self.side_conditions)
+    }
+
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
+        if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context.clone(), node);
+        let RawExpr::Finop(Finop::Exists, expressions) = &node.raw else {
+            return;
+        };
+        if !context.logical_polarity {
+            return;
+        }
+        let Some((declaration, remaining)) = expressions.split_first() else {
+            self.error = Some(TypeError::Invalid(
+                "exists requires one typed binder declaration and a body",
+            ));
+            return;
+        };
+        if remaining.is_empty() {
+            self.error = Some(TypeError::Invalid(
+                "exists requires one typed binder declaration and a body",
+            ));
+            return;
+        }
+        let Some((binder, explicit_type)) = binder_declaration(declaration) else {
+            self.error = Some(TypeError::Invalid(
+                "exists requires a direct variable binder",
+            ));
+            return;
+        };
+        let binder_type = match explicit_type {
+            Some(ty) => ty,
+            None => match declaration.meta.get_type() {
+                Ok(ty) => ty,
+                Err(_) => return,
+            },
+        };
+
+        let source = deep_clone(node);
+        let witness_source = if remaining.len() == 1 {
+            deep_clone(&remaining[0])
+        } else {
+            Expr::with_metadata(
+                TypedMetadata::default(),
+                RawExpr::Finop(Finop::And, remaining.iter().map(deep_clone).collect()),
+            )
+        };
+        let mapped_source = wrap_in_maps(&witness_source, &context.active_ranges);
+        let type_expression: Expr<TypedMetadata> = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::Type(binder_type.with_default_metadata()),
+        );
+        let introduced_variable = Variable::new(format!(
+            r"\operatorname{{witness}}\left({}; {}\right)",
+            type_expression.as_latex_verbose(),
+            mapped_source.as_latex_verbose()
+        ));
+        let introduced_type = lift_type(binder_type.clone(), &context.active_ranges);
+        let introduced =
+            indexed_introduced_variable(introduced_variable.clone(), &context.active_ranges);
+        let mut lowered = remaining
+            .iter()
+            .map(|expression| {
+                substitute_free_variable(&expression.with_default_metadata(), binder, &introduced)
+            })
+            .collect::<Vec<_>>();
+        let replacement = if lowered.len() == 1 {
+            lowered.pop().unwrap()
+        } else {
+            Expr::new(RawExpr::Finop(Finop::And, lowered))
+        };
+        let condition = SideCondition {
+            introduced_variable: introduced_variable.clone(),
+            display_name: source.as_latex().to_string(),
+            introduced_type,
+            active_ranges: context.active_ranges.clone(),
+            defining_assertions: Vec::new(),
+            existence: Existence::Guaranteed,
+        };
+        if let Some(index) = self.by_variable.get(&introduced_variable).copied() {
+            assert_compatible(&self.side_conditions[index], &condition);
+        } else {
+            self.by_variable
+                .insert(introduced_variable, self.side_conditions.len());
+            self.side_conditions.push(condition);
+        }
+        *node = replacement.with_default_metadata();
+        self.rewrites += 1;
+    }
+}
+
+fn binder_declaration<Metadata>(
+    expression: &Expr<Metadata>,
+) -> Option<(&Variable, Option<TypeExpr<()>>)> {
+    match &expression.raw {
+        RawExpr::Variable(variable) => Some((variable, None)),
+        RawExpr::Binop(Binop::ElementOf, left, right) => {
+            let (RawExpr::Variable(variable), RawExpr::Type(ty)) = (&left.raw, &right.raw) else {
+                return None;
+            };
+            Some((variable, Some(ty.with_default_metadata())))
+        }
+        _ => None,
     }
 }
 
@@ -577,6 +748,39 @@ mod tests {
     }
 
     #[test]
+    fn range_lowers_to_a_typed_existential_preimage() {
+        let operand = typed(
+            TypeExpr::Matrix(dimension("m"), dimension("n")),
+            RawExpr::Variable(Variable::new("A")),
+        );
+        let mut expression = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::Monop(Monop::Range, operand),
+        );
+        let mut visitor = SetOperatorLowering::default();
+        visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
+        assert_eq!(visitor.finish(), Ok(1));
+        let RawExpr::SetComprehension {
+            domain: TypeExpr::Matrix(rows, cols),
+            predicate,
+            ..
+        } = &expression.raw
+        else {
+            panic!("expected a vector set comprehension")
+        };
+        assert_eq!(rows.as_latex().to_string(), "m");
+        assert!(matches!(cols.raw, RawExpr::NatLiteral(1)));
+        assert_eq!(predicate.meta.get_type(), Ok(TypeExpr::Bool));
+        assert!(matches!(predicate.raw, RawExpr::Finop(Finop::Exists, _)));
+        let rendered = predicate.as_latex().to_string();
+        assert!(
+            rendered.contains(r"\exists w_{\text{preimage of A}}"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("A"), "{rendered}");
+    }
+
+    #[test]
     fn nul_chooses_a_capture_avoiding_binder() {
         let operand = typed(
             TypeExpr::Matrix(dimension("m"), dimension("n")),
@@ -597,20 +801,28 @@ mod tests {
 
     #[test]
     fn nul_rejects_nonmatrix_and_untyped_operands() {
-        for operand in [
-            typed(TypeExpr::Real, RawExpr::Variable(Variable::new("a"))),
-            Expr::with_metadata(
-                TypedMetadata::default(),
-                RawExpr::Variable(Variable::new("A")),
-            ),
-        ] {
-            let mut expression = Expr::with_metadata(
-                TypedMetadata::default(),
-                RawExpr::Monop(Monop::Nul, operand),
-            );
-            let mut visitor = NulVisitor::default();
-            visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
-            assert!(visitor.finish().is_err());
+        for op in [Monop::Nul, Monop::Range] {
+            for operand in [
+                typed(TypeExpr::Real, RawExpr::Variable(Variable::new("a"))),
+                typed(
+                    TypeExpr::Set(Box::new(TypeExpr::Real)),
+                    RawExpr::Variable(Variable::new("S")),
+                ),
+                typed(
+                    TypeExpr::Seq(Expr::new(RawExpr::Type(TypeExpr::Real)), dimension("n")),
+                    RawExpr::Variable(Variable::new("s")),
+                ),
+                Expr::with_metadata(
+                    TypedMetadata::default(),
+                    RawExpr::Variable(Variable::new("A")),
+                ),
+            ] {
+                let mut expression =
+                    Expr::with_metadata(TypedMetadata::default(), RawExpr::Monop(op, operand));
+                let mut visitor = SetOperatorLowering::default();
+                visitor.visit_expr_mut(VisitContext::positive(), &mut expression);
+                assert!(visitor.finish().is_err());
+            }
         }
     }
 }

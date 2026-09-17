@@ -373,3 +373,13 @@ Given:
 - $y \in \operatorname{Nul}(A)$
 
 WTS $x + y \in \operatorname{Nul}(A)$
+
+# Range membership witness
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $b \in \mathbb{R}^{2}$
+- $b \in \operatorname{Range}(A)$
+
+WTS $b = b$

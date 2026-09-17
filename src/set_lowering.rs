@@ -224,31 +224,178 @@ mod tests {
         assert!(!rendered.contains("Nul"));
         assert!(!rendered.contains(r"\left\{"));
         assert!(rendered.contains(r"A z = \mathbb{0}"), "{rendered}");
-        assert!(
-            prepare(
-                r"\operatorname{Nul}(A)",
-                &[r"A \in \mathbb{R}^{m \times n}"]
-            )
-            .is_err()
-        );
+        let set_value = prepare(
+            r"\operatorname{Nul}(A)",
+            &[r"A \in \mathbb{R}^{2 \times 2}"],
+        )
+        .unwrap();
+        assert!(crate::to_z3::to_z3(&crate::Environment::default(), &set_value).is_err());
     }
 
     #[test]
-    fn rejects_unsupported_domains_predicates_and_set_values() {
+    fn range_membership_lowers_through_a_positive_existential() {
+        let prepared = prepare(
+            r"b \in \operatorname{Range}(A)",
+            &[r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"],
+        )
+        .unwrap();
+        let rendered = prepared.expression.as_latex().to_string();
+        assert!(!rendered.contains("Range"), "{rendered}");
+        assert!(!rendered.contains(r"\left\{"), "{rendered}");
+        assert!(!crate::formula::contains_quantifier(&prepared.expression));
+        assert!(rendered.contains("A"), "{rendered}");
+        assert!(rendered.contains("= b"), "{rendered}");
+        assert_eq!(prepared.side_conditions.len(), 1);
+        assert!(matches!(
+            prepared.side_conditions[0].introduced_type,
+            TypeExpr::Matrix(_, _)
+        ));
+        let TypeExpr::Matrix(_, witness_cols) = &prepared.side_conditions[0].introduced_type else {
+            unreachable!()
+        };
+        assert!(matches!(witness_cols.raw, RawExpr::NatLiteral(1)));
+        assert!(matches!(
+            prepared.side_conditions[0].existence,
+            crate::visit_mut::Existence::Guaranteed
+        ));
+        assert!(prepared.side_conditions[0].defining_assertions.is_empty());
+    }
+
+    #[test]
+    fn positive_exists_lowers_and_negative_exists_is_rejected() {
+        let tex = r"\exists w \in \mathbb{R}^{n}, A w = b";
+        let givens = [r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"];
+        let positive = prepare(tex, &givens).unwrap();
+        assert!(
+            !positive
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\exists")
+        );
+        assert_eq!(positive.side_conditions.len(), 1);
+
+        for scalar in [r"\exists a, a > 0", r"\exists a \in \mathbb{R}, a > 0"] {
+            let prepared = prepare(scalar, &[]).unwrap();
+            assert_eq!(prepared.side_conditions.len(), 1);
+            assert_eq!(prepared.side_conditions[0].introduced_type, TypeExpr::Real);
+        }
+
+        let parsed_givens = givens.iter().map(|s| parse(s)).collect::<Vec<_>>();
+        let types = infer_symbolic_type_environment(&parsed_givens).unwrap();
+        let negative = prepare_expression(&types, &parse(tex), VisitContext::negative());
+        assert!(matches!(
+            negative,
+            Err(TypeError::Unsupported(
+                "existential expressions can only be lowered in positive logical contexts"
+            ))
+        ));
+    }
+
+    #[test]
+    fn exists_rejects_multiple_typed_binders() {
+        for tex in [
+            r"\exists u \in \mathbb{R}^{n}, v \in \mathbb{R}^{n}, u = v",
+            r"\exists u, v, u = v",
+        ] {
+            assert!(matches!(
+                prepare(tex, &[]),
+                Err(TypeError::Unsupported(
+                    "exists lowering supports exactly one binder"
+                ))
+            ));
+        }
+        assert!(matches!(
+            prepare(r"\exists w, w > 0", &[r"w \in \mathbb{R}"]),
+            Err(TypeError::Invalid("exists binder must be fresh"))
+        ));
+    }
+
+    #[test]
+    fn exists_respects_logical_polarity() {
+        let givens = [
+            r"P \in \mathbb{B}",
+            r"A \in \mathbb{R}^{m \times n}",
+            r"b \in \mathbb{R}^{m}",
+        ];
+        let consequent = prepare(
+            r"P \implies \left(\exists w \in \mathbb{R}^{n}, A w = b\right)",
+            &givens,
+        )
+        .unwrap();
+        assert_eq!(consequent.side_conditions.len(), 1);
+        assert!(!crate::formula::contains_quantifier(&consequent.expression));
+
+        let antecedent = prepare(
+            r"\left(\exists w \in \mathbb{R}^{n}, A w = b\right) \implies P",
+            &givens,
+        );
+        assert!(matches!(
+            antecedent,
+            Err(TypeError::Unsupported(
+                "existential expressions can only be lowered in positive logical contexts"
+            ))
+        ));
+    }
+
+    #[test]
+    fn exists_witnesses_are_lifted_under_sequence_ranges() {
+        let prepared = prepare(
+            r"\operatorname{map}_{i=1}^{n}\left(\exists w \in \mathbb{R}, w > 0\right)",
+            &[r"n = 2"],
+        )
+        .unwrap();
+        assert_eq!(prepared.side_conditions.len(), 1);
+        let TypeExpr::Seq(element, length) = &prepared.side_conditions[0].introduced_type else {
+            panic!("expected a sequence-valued witness")
+        };
+        assert!(matches!(element.raw, RawExpr::Type(TypeExpr::Real)));
+        assert_eq!(length.as_latex().to_string(), "n - 1 + 1");
+        assert_eq!(prepared.side_conditions[0].active_ranges.len(), 1);
+    }
+
+    #[test]
+    fn repeated_exists_uses_one_deterministically_named_witness() {
+        let quantified = r"\left(\exists w \in \mathbb{R}^{n}, A w = b\right)";
+        let prepared = prepare(
+            &format!(r"{quantified} \land {quantified}"),
+            &[r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"],
+        )
+        .unwrap();
+        assert_eq!(prepared.side_conditions.len(), 1);
+        let name = &prepared.side_conditions[0].introduced_variable.name;
+        assert!(name.contains(r"\operatorname{witness}"), "{name}");
+        assert!(!name.contains("implicit_dimension"), "{name}");
+    }
+
+    #[test]
+    fn rejects_unsupported_domains_and_predicates_but_defers_set_values() {
         for input in [
             r"1 \in \{x \in \mathbb{N} : x > 0\}",
             r"1 \in \{x \in \mathbb{R} : x\}",
-            r"\{x \in \mathbb{R} : x > 0\}",
-            r"\{x \in \mathbb{R} : x > 0\} = \{x \in \mathbb{R} : x > 0\}",
         ] {
             assert!(prepare(input, &[]).is_err(), "{input}");
         }
-        assert!(
+
+        for prepared in [
+            prepare(r"\{x \in \mathbb{R} : x > 0\}", &[]).unwrap(),
+            prepare(
+                r"\operatorname{Range}(A)",
+                &[r"A \in \mathbb{R}^{2 \times 2}"],
+            )
+            .unwrap(),
+            prepare(
+                r"\{x \in \mathbb{R} : x > 0\} = \{x \in \mathbb{R} : x > 0\}",
+                &[],
+            )
+            .unwrap(),
             prepare(
                 r"y \in S",
-                &[r"y \in \mathbb{R}", r"S \in \operatorname{Set}(\mathbb{R})"]
+                &[r"y \in \mathbb{R}", r"S \in \operatorname{Set}(\mathbb{R})"],
             )
-            .is_err()
-        );
+            .unwrap(),
+        ] {
+            assert!(crate::to_z3::to_z3(&crate::Environment::default(), &prepared).is_err());
+        }
     }
 }

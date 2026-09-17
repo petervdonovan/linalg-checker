@@ -300,6 +300,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
         Monop::Det => write!(f, r"\det(")?,
         Monop::Diag => write!(f, r"\operatorname{{diag}}(")?,
         Monop::Nul => write!(f, r"\operatorname{{Nul}}(")?,
+        Monop::Range => write!(f, r"\operatorname{{Range}}(")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
         Monop::Transpose => {}
@@ -311,7 +312,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
     e(f)?;
 
     match op {
-        Monop::Trace | Monop::Det | Monop::Diag | Monop::Nul => write!(f, ")"),
+        Monop::Trace | Monop::Det | Monop::Diag | Monop::Nul | Monop::Range => write!(f, ")"),
         Monop::Neg => Ok(()),
         Monop::Inverse => write!(f, "^{{-1}}"),
         Monop::Transpose => write!(f, r"^\top"),
@@ -818,9 +819,9 @@ mod tests {
 
     #[test]
     fn test_unary_operators() {
-        expect!["\\operatorname{tr}(x)\n\\det(x)\n\\operatorname{diag}(x)\n\\operatorname{Nul}(x)\n-x\nx^{-1}"].assert_eq(
+        expect!["\\operatorname{tr}(x)\n\\det(x)\n\\operatorname{diag}(x)\n\\operatorname{Nul}(x)\n\\operatorname{Range}(x)\n-x\nx^{-1}"].assert_eq(
             &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 as_latex(RawExpr::Monop(
                     Monop::Trace,
                     Expr::new(RawExpr::Variable(Variable::new("x"))),
@@ -835,6 +836,10 @@ mod tests {
                 )),
                 as_latex(RawExpr::Monop(
                     Monop::Nul,
+                    Expr::new(RawExpr::Variable(Variable::new("x"))),
+                )),
+                as_latex(RawExpr::Monop(
+                    Monop::Range,
                     Expr::new(RawExpr::Variable(Variable::new("x"))),
                 )),
                 as_latex(RawExpr::Monop(
