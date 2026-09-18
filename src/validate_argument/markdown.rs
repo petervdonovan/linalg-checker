@@ -343,6 +343,15 @@ fn validation_details(
             "<details>\n<summary>⚠️ invalid tactic</summary>\n\n{message}\n</details>"
         ));
     }
+    if let Some(StepCheck::InvalidExistentialElimination { message }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::InvalidExistentialElimination { .. }))
+    {
+        return Some(format!(
+            "<details>\n<summary>Invalid existential elimination</summary>\n\n{message}\n</details>"
+        ));
+    }
     let existence_warnings: Vec<_> = validation
         .checks
         .iter()
@@ -439,6 +448,27 @@ fn validation_details(
         return Some(format!(
             "<details>\n<summary>✅ witness found</summary>\n\nWitness:\n\n{assignments}\n\nMatched facts:\n\n{}{warning}\n</details>",
             expression_bullets(supporting_facts)
+        ));
+    }
+    if let Some(StepCheck::ExistentialElimination { fact, assignments }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::ExistentialElimination { .. }))
+    {
+        let assignments = assignments
+            .iter()
+            .map(|(binder, witness)| {
+                format!(
+                    "- ${}$ as a witness for ${}$",
+                    witness.z3_name(),
+                    binder.z3_name()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(format!(
+            "<details>\n<summary>✅ witness introduced</summary>\n\nFrom ${}$:\n\n{assignments}\n</details>",
+            fact.as_latex()
         ));
     }
     if let Some(StepCheck::QuestionableQuantifier { premises }) = validation

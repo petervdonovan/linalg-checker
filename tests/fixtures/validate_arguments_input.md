@@ -395,6 +395,25 @@ Given:
 
 WTS $z \notin \operatorname{Range}(A)$
 
+# Range is closed under linear combinations
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $x \in \mathbb{R}^{2}$
+- $y \in \mathbb{R}^{2}$
+- $a \in \mathbb{R}$
+- $b \in \mathbb{R}$
+- $x \in \operatorname{Range}(A)$
+- $y \in \operatorname{Range}(A)$
+
+WTS $a x + b y \in \operatorname{Range}(A)$
+
+1. $x = A u$
+2. $y = A v$
+3. $a x + b y = A \left(a u + b v\right)$
+4. $a x + b y \in \operatorname{Range}(A)$
+
 # Positive existential skolemization
 
 Given:

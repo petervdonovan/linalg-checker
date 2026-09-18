@@ -38,6 +38,20 @@ pub(crate) fn contains_quantifier<Metadata>(expression: &Expr<Metadata>) -> bool
     finder.0
 }
 
+pub(crate) fn conjunction_views<Metadata>(expression: &Expr<Metadata>) -> Vec<&Expr<Metadata>> {
+    fn collect<'a, Metadata>(expression: &'a Expr<Metadata>, views: &mut Vec<&'a Expr<Metadata>>) {
+        views.push(expression);
+        if let RawExpr::Finop(Finop::And, expressions) = &expression.raw {
+            for expression in expressions {
+                collect(expression, views);
+            }
+        }
+    }
+    let mut views = Vec::new();
+    collect(expression, &mut views);
+    views
+}
+
 struct FreeVariableCollector {
     variables: BTreeSet<Variable>,
     bound: HashSet<Variable>,

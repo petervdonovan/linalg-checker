@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Argument, ArgumentItem, Arguments, StepCheck, Tactic, ToFromMd, free_variables,
-    infer_induction_start,
+    Argument, ArgumentItem, Arguments, StepCheck, StepValidationData, Tactic, ToFromMd,
+    free_variables, infer_induction_start,
 };
-use crate::{Environment, RawExpr, type_resolver::SymbolicTypeEnvironment};
+use crate::{Environment, RawExpr, TypeExpr, Variable, type_resolver::SymbolicTypeEnvironment};
 
 const ARGUMENT: &str = r#"# Scalar argument
 
@@ -475,6 +475,127 @@ fn existential_unification_does_not_leak_inner_binders() {
         nonce_pairs: BTreeSet::new(),
     };
     assert!(!unifier.expression(&pattern, &candidate));
+}
+
+#[test]
+fn contextual_existential_elimination_supports_multiple_fresh_binders() {
+    use z3::ast::Bool;
+
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let x = Variable::new("x");
+    let types = SymbolicTypeEnvironment {
+        types: [(x, TypeExpr::Real)].into_iter().collect(),
+    };
+    let fact = super::TrackedFact {
+        tracker: Bool::new_const("multiple_binder_fact"),
+        sentence: expression("P"),
+        alternatives: vec![expression(
+            r"\exists u \in \mathbb{R}, v \in \mathbb{R}, x = u + v \land 0 = 0",
+        )],
+    };
+    let mut validation = StepValidationData::default();
+    let run = super::ValidationRun {
+        givens: Vec::new(),
+        max_dimension: 2,
+        next_tracker: 0,
+    };
+    let result = super::try_existential_elimination(
+        &expression("x = a + b"),
+        &mut validation,
+        &Environment::default(),
+        &types,
+        super::ProofContext {
+            tracked: std::slice::from_ref(&fact),
+            retained: &[],
+        },
+        &run,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        result
+            .introduced_types
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([Variable::new("a"), Variable::new("b")])
+    );
+    assert!(matches!(
+        validation.checks.as_slice(),
+        [StepCheck::ExistentialElimination { assignments, .. }] if assignments.len() == 2
+    ));
+
+    let mut invalid = StepValidationData::default();
+    assert!(
+        super::try_existential_elimination(
+            &expression("x = a + 1"),
+            &mut invalid,
+            &Environment::default(),
+            &types,
+            super::ProofContext {
+                tracked: &[fact],
+                retained: &[],
+            },
+            &run,
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn existential_witness_matching_sees_through_contextual_conjunctions() {
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let active = SymbolicTypeEnvironment {
+        types: [
+            (Variable::new("x"), TypeExpr::Real),
+            (Variable::new("a"), TypeExpr::Real),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let quantified = expression(r"\exists w \in \mathbb{R}, x = w");
+    let spec = super::analyze_quantifier(&quantified, &active).unwrap();
+    let facts = [expression(r"0 = 0 \land x = a")];
+    let witness = super::quantifier::find_existential_witness(
+        &spec,
+        &active,
+        &Environment::default(),
+        &facts,
+    )
+    .unwrap();
+    assert_eq!(witness.assignments[&Variable::new("w")], expression("a"));
+    assert_eq!(witness.supporting_facts, facts);
+}
+
+#[test]
+fn existential_witnesses_cannot_escape_their_goal() {
+    let mut argument = Argument::parse_str(
+        r#"# Escaping witness
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $x \in \mathbb{R}^{2}$
+- $x \in \operatorname{Range}(A)$
+
+WTS $u = u$
+
+1. $x = A u$"#,
+    );
+    argument.validate(2).unwrap();
+    assert!(matches!(
+        sentence(&argument, 0).validation.checks.as_slice(),
+        [StepCheck::ExistentialElimination { .. }]
+    ));
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::InvalidExistentialElimination { .. }))
+    );
 }
 
 #[test]

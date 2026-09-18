@@ -35,6 +35,8 @@ pub(super) fn validate_quantified_claim(
         return Ok(ClaimResult {
             assertions: Vec::new(),
             retained: vec![sentence.clone()],
+            introduced_types: BTreeMap::new(),
+            alternatives: Vec::new(),
             validated: true,
         });
     }
@@ -49,6 +51,8 @@ pub(super) fn validate_quantified_claim(
                     Ok(ClaimResult {
                         assertions: Vec::new(),
                         retained: vec![sentence.clone()],
+                        introduced_types: BTreeMap::new(),
+                        alternatives: Vec::new(),
                         validated: true,
                     })
                 }
@@ -134,7 +138,11 @@ fn validate_universal_claim(
             assert_definitions(solver, &assertion.side_conditions)?;
             let tracker = fresh_tracker(&mut run.next_tracker);
             solver.assert_and_track(assertion.expression, &tracker);
-            local_tracked.push((tracker, premise.clone()));
+            local_tracked.push(TrackedFact {
+                tracker,
+                sentence: premise.clone(),
+                alternatives: prepared.expression.meta.alternatives().to_vec(),
+            });
         }
         match solver.check() {
             SatResult::Sat => {
@@ -190,6 +198,8 @@ fn validate_universal_claim(
         Ok(ClaimResult {
             assertions: Vec::new(),
             retained: vec![sentence.clone()],
+            introduced_types: BTreeMap::new(),
+            alternatives: Vec::new(),
             validated: true,
         })
     } else {
@@ -212,11 +222,15 @@ pub(super) struct QuantifierSpec {
 }
 
 impl QuantifierSpec {
-    fn is_binder_declaration(&self, expression: &Expr<()>) -> bool {
-        matches!(
-            &expression.raw,
-            RawExpr::Variable(variable) if self.introduced.contains(variable)
-        )
+    pub(super) fn is_binder_declaration(&self, expression: &Expr<()>) -> bool {
+        match &expression.raw {
+            RawExpr::Variable(variable) => self.introduced.contains(variable),
+            RawExpr::Binop(Binop::ElementOf, left, right) => {
+                matches!(&left.raw, RawExpr::Variable(variable) if self.introduced.contains(variable))
+                    && matches!(right.raw, RawExpr::Type(_))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -313,10 +327,12 @@ pub(super) fn analyze_quantifier(
     })
 }
 
-fn proof_facts(tracked: &[(Bool, Expr<()>)], retained: &[Expr<()>]) -> Vec<Expr<()>> {
+pub(super) fn proof_facts(tracked: &[TrackedFact], retained: &[Expr<()>]) -> Vec<Expr<()>> {
     tracked
         .iter()
-        .map(|(_, expression)| expression.clone())
+        .flat_map(|fact| {
+            std::iter::once(fact.sentence.clone()).chain(fact.alternatives.iter().cloned())
+        })
         .chain(retained.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -325,8 +341,8 @@ fn proof_facts(tracked: &[(Bool, Expr<()>)], retained: &[Expr<()>]) -> Vec<Expr<
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct WitnessMatch {
-    assignments: BTreeMap<Variable, Expr<()>>,
-    supporting_facts: Vec<Expr<()>>,
+    pub(super) assignments: BTreeMap<Variable, Expr<()>>,
+    pub(super) supporting_facts: Vec<Expr<()>>,
     nonce_pairs: BTreeSet<(crate::ImplicitDimension, crate::ImplicitDimension)>,
 }
 
@@ -351,22 +367,25 @@ pub(super) fn find_existential_witness(
         let mut next = BTreeSet::new();
         for state in &matches {
             for fact in facts {
-                let mut unifier = Unifier {
-                    metavariables: &spec.introduced,
-                    assignments: state.assignments.clone(),
-                    pattern_accessible: accessible
-                        .iter()
-                        .chain(spec.introduced.iter())
-                        .cloned()
-                        .collect(),
-                    candidate_accessible: accessible.clone(),
-                    pattern_bound: BTreeSet::new(),
-                    candidate_bound: BTreeSet::new(),
-                    bound_forward: BTreeMap::new(),
-                    bound_reverse: BTreeMap::new(),
-                    nonce_pairs: state.nonce_pairs.clone(),
-                };
-                if unifier.expression(requirement, fact) {
+                for candidate in crate::formula::conjunction_views(fact) {
+                    let mut unifier = Unifier {
+                        metavariables: &spec.introduced,
+                        assignments: state.assignments.clone(),
+                        pattern_accessible: accessible
+                            .iter()
+                            .chain(spec.introduced.iter())
+                            .cloned()
+                            .collect(),
+                        candidate_accessible: accessible.clone(),
+                        pattern_bound: BTreeSet::new(),
+                        candidate_bound: BTreeSet::new(),
+                        bound_forward: BTreeMap::new(),
+                        bound_reverse: BTreeMap::new(),
+                        nonce_pairs: state.nonce_pairs.clone(),
+                    };
+                    if !unifier.expression(requirement, candidate) {
+                        continue;
+                    }
                     let mut supporting_facts = state.supporting_facts.clone();
                     if !supporting_facts.contains(fact) {
                         supporting_facts.push(fact.clone());

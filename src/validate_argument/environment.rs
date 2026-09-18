@@ -365,11 +365,11 @@ pub(super) fn check_step_existence(
     Ok(checks)
 }
 
-pub(super) fn core_facts(solver: &Solver, tracked: &[(Bool, Expr<()>)]) -> Vec<Expr<()>> {
+pub(super) fn core_facts(solver: &Solver, tracked: &[TrackedFact]) -> Vec<Expr<()>> {
     let core = solver.get_unsat_core();
     tracked
         .iter()
-        .filter(|(tracker, _)| core.contains(tracker))
-        .map(|(_, expression)| expression.clone())
+        .filter(|fact| core.contains(&fact.tracker))
+        .map(|fact| fact.sentence.clone())
         .collect()
 }

@@ -1005,6 +1005,74 @@ This follows from the following facts:
 - $z \ne \mathbb{0}$
 </details>
 
+# Range is closed under linear combinations
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+- $x \in \mathbb{R}^{2}$
+- $y \in \mathbb{R}^{2}$
+- $a \in \mathbb{R}$
+- $b \in \mathbb{R}$
+- $x \in \operatorname{Range}(A)$
+- $y \in \operatorname{Range}(A)$
+
+WTS $a x + b y \in \operatorname{Range}(A)$
+
+<details>
+<summary>✅ witness found</summary>
+
+Witness:
+
+- $w_{preimage of A} = a u + b v$
+
+Matched facts:
+
+- $a x + b y = A \left(a u + b v\right)$
+</details>
+
+1. $x = A u$
+
+   <details>
+   <summary>✅ witness introduced</summary>
+
+   From $x \in \operatorname{Range}(A)$:
+
+   - $u$ as a witness for $w_{preimage of A}$
+   </details>
+2. $y = A v$
+
+   <details>
+   <summary>✅ witness introduced</summary>
+
+   From $y \in \operatorname{Range}(A)$:
+
+   - $v$ as a witness for $w_{preimage of A}$
+   </details>
+3. $a x + b y = A \left(a u + b v\right)$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   This follows from the following facts:
+
+   - $x = A u$
+   - $y = A v$
+   </details>
+4. $a x + b y \in \operatorname{Range}(A)$
+
+   <details>
+   <summary>✅ witness found</summary>
+
+   Witness:
+
+   - $w_{preimage of A} = a u + b v$
+
+   Matched facts:
+
+   - $a x + b y = A \left(a u + b v\right)$
+   </details>
+
 # Positive existential skolemization
 
 Given:

@@ -117,7 +117,7 @@ pub(super) fn validate_tactic_fallback(
     solver: &mut Solver,
     base: Rc<Environment>,
     parent_types: &SymbolicTypeEnvironment,
-    tracked: &[(Bool, Expr<()>)],
+    tracked: &[TrackedFact],
     scoped_statements: &[Expr<()>],
     run: &mut ValidationRun,
 ) -> Result<ClaimResult, ArgumentValidationError> {
@@ -157,7 +157,11 @@ pub(super) fn validate_tactic_fallback(
             assert_definitions(solver, &assertion.side_conditions)?;
             let tracker = fresh_tracker(&mut run.next_tracker);
             solver.assert_and_track(assertion.expression, &tracker);
-            local_tracked.push((tracker, given.clone()));
+            local_tracked.push(TrackedFact {
+                tracker,
+                sentence: given.clone(),
+                alternatives: prepared.expression.meta.alternatives().to_vec(),
+            });
         }
         if matches!(solver.check(), SatResult::Sat) {
             let scope_len = run.givens.len();
@@ -183,6 +187,8 @@ pub(super) fn validate_tactic_fallback(
     Ok(ClaimResult {
         assertions: Vec::new(),
         retained: Vec::new(),
+        introduced_types: BTreeMap::new(),
+        alternatives: Vec::new(),
         validated: all_validated,
     })
 }

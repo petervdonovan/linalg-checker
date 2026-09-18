@@ -26,7 +26,7 @@ use crate::{
         PreparedExpression, prepare_expression, prepare_expression_with_premises, prepare_givens,
     },
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error},
-    type_resolver::{SymbolicTypeEnvironment, TypeError},
+    type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError},
     unification::Unifier,
     visit_mut::VisitContext,
 };
@@ -117,6 +117,13 @@ pub enum StepCheck {
     ExistentialWitness {
         assignments: Vec<(Variable, Expr<()>)>,
         supporting_facts: Vec<Expr<()>>,
+    },
+    ExistentialElimination {
+        fact: Expr<()>,
+        assignments: Vec<(Variable, Variable)>,
+    },
+    InvalidExistentialElimination {
+        message: String,
     },
     QuantifierInconclusive {
         message: String,
@@ -322,7 +329,11 @@ impl Argument {
                 assert_definitions(&solver, &assertion.side_conditions)?;
                 let tracker = fresh_tracker(&mut run.next_tracker);
                 solver.assert_and_track(assertion.expression, &tracker);
-                tracked.push((tracker, given.clone()));
+                tracked.push(TrackedFact {
+                    tracker,
+                    sentence: given.clone(),
+                    alternatives: prepared.expression.meta.alternatives().to_vec(),
+                });
             }
             match solver.check() {
                 SatResult::Sat => {
@@ -375,6 +386,8 @@ impl Arguments {
 struct ClaimResult {
     assertions: Vec<crate::model_finding::LoweredBoolean>,
     retained: Vec<Expr<()>>,
+    introduced_types: BTreeMap<Variable, TypeExpr<()>>,
+    alternatives: Vec<Expr<()>>,
     validated: bool,
 }
 
@@ -390,15 +403,22 @@ struct ValidationRun {
     next_tracker: usize,
 }
 
+#[derive(Clone)]
+struct TrackedFact {
+    tracker: Bool,
+    sentence: Expr<()>,
+    alternatives: Vec<Expr<()>>,
+}
+
 #[derive(Clone, Copy)]
 struct ProofContext<'a> {
-    tracked: &'a [(Bool, Expr<()>)],
+    tracked: &'a [TrackedFact],
     retained: &'a [Expr<()>],
 }
 
 struct ParentGoalScope<'a> {
     symbolic_types: &'a SymbolicTypeEnvironment,
-    tracked: &'a [(Bool, Expr<()>)],
+    tracked: &'a [TrackedFact],
     scoped_statements: &'a [Expr<()>],
     forced_natural: Option<(&'a Variable, u64)>,
 }
@@ -458,7 +478,8 @@ fn track_assertions(
     solver: &mut Solver,
     assertions: &[crate::model_finding::LoweredBoolean],
     sentence: Expr<()>,
-    tracked: &mut Vec<(Bool, Expr<()>)>,
+    alternatives: Vec<Expr<()>>,
+    tracked: &mut Vec<TrackedFact>,
     next_tracker: &mut usize,
 ) -> Result<(), ModelFindingError> {
     let mut expressions = Vec::new();
@@ -468,7 +489,11 @@ fn track_assertions(
     }
     let tracker = fresh_tracker(next_tracker);
     solver.assert_and_track(Bool::and(&expressions), &tracker);
-    tracked.push((tracker, sentence));
+    tracked.push(TrackedFact {
+        tracker,
+        sentence,
+        alternatives,
+    });
     Ok(())
 }
 
@@ -477,7 +502,7 @@ fn validate_goal_contents(
     solver: &mut Solver,
     environment: Rc<Environment>,
     symbolic_types: &SymbolicTypeEnvironment,
-    tracked: &mut Vec<(Bool, Expr<()>)>,
+    tracked: &mut Vec<TrackedFact>,
     scoped_statements: &mut Vec<Expr<()>>,
     run: &mut ValidationRun,
 ) -> Result<ClaimResult, ArgumentValidationError> {
@@ -531,6 +556,8 @@ fn validate_goal_contents(
     let mut base_exhaustive = false;
     let mut step_valid = false;
     let mut step_exhaustive = false;
+    let mut proof_types = symbolic_types.clone();
+    let mut existential_locals = BTreeSet::new();
 
     for item in &mut goal.steps {
         match item {
@@ -543,7 +570,7 @@ fn validate_goal_contents(
                     &mut step.validation,
                     solver,
                     Rc::clone(&environment),
-                    symbolic_types,
+                    &proof_types,
                     ProofContext {
                         tracked,
                         retained: scoped_statements,
@@ -551,11 +578,16 @@ fn validate_goal_contents(
                     run,
                 )?;
                 if result.validated {
+                    for (variable, ty) in &result.introduced_types {
+                        proof_types.types.insert(variable.clone(), ty.clone());
+                        existential_locals.insert(variable.clone());
+                    }
                     if !result.assertions.is_empty() {
                         track_assertions(
                             solver,
                             &result.assertions,
                             step.sentence.clone(),
+                            result.alternatives,
                             tracked,
                             &mut run.next_tracker,
                         )?;
@@ -579,7 +611,7 @@ fn validate_goal_contents(
                     solver,
                     Rc::clone(&environment),
                     ParentGoalScope {
-                        symbolic_types,
+                        symbolic_types: &proof_types,
                         tracked,
                         scoped_statements,
                         forced_natural,
@@ -603,6 +635,7 @@ fn validate_goal_contents(
                             solver,
                             &export.assertions,
                             child.conclusion.clone(),
+                            Vec::new(),
                             tracked,
                             &mut run.next_tracker,
                         )?;
@@ -622,6 +655,8 @@ fn validate_goal_contents(
             return Ok(ClaimResult {
                 assertions: Vec::new(),
                 retained: vec![deep_clone(&goal.conclusion)],
+                introduced_types: BTreeMap::new(),
+                alternatives: Vec::new(),
                 validated: true,
             });
         }
@@ -652,18 +687,30 @@ fn validate_goal_contents(
             goal,
             solver,
             environment,
-            symbolic_types,
+            &proof_types,
             tracked,
             scoped_statements,
             run,
         );
+    }
+    if free_variables(std::iter::once(&goal.conclusion))
+        .iter()
+        .any(|variable| existential_locals.contains(variable))
+    {
+        goal.validation
+            .checks
+            .push(StepCheck::InvalidExistentialElimination {
+                message: "an existential witness cannot occur freely in the goal conclusion"
+                    .to_owned(),
+            });
+        return Ok(ClaimResult::default());
     }
     validate_claim(
         &goal.conclusion,
         &mut goal.validation,
         solver,
         environment,
-        symbolic_types,
+        &proof_types,
         ProofContext {
             tracked,
             retained: scoped_statements,
@@ -822,7 +869,11 @@ fn validate_nested_goal(
             assert_definitions(solver, &assertion.side_conditions)?;
             let tracker = fresh_tracker(&mut run.next_tracker);
             solver.assert_and_track(assertion.expression, &tracker);
-            tracked.push((tracker, given.clone()));
+            tracked.push(TrackedFact {
+                tracker,
+                sentence: given.clone(),
+                alternatives: prepared.expression.meta.alternatives().to_vec(),
+            });
         }
         if let Some((_, prepared)) = &forced_lower_bound {
             let assertion = lower_prepared_boolean(&extension, prepared)?;
@@ -899,6 +950,132 @@ fn record_inconsistent_givens(goal: &mut Goal, exhaustive: bool, max_dimension: 
     }
 }
 
+fn existential_payload(spec: &quantifier::QuantifierSpec) -> Expr<()> {
+    let mut expressions = spec
+        .premises
+        .iter()
+        .filter(|premise| !spec.is_binder_declaration(premise))
+        .cloned()
+        .collect::<Vec<_>>();
+    expressions.push(spec.body.clone());
+    if expressions.len() == 1 {
+        expressions.pop().unwrap()
+    } else {
+        Expr::new(RawExpr::Finop(Finop::And, expressions))
+    }
+}
+
+fn try_existential_elimination(
+    sentence: &Expr<()>,
+    validation: &mut StepValidationData,
+    environment: &Environment,
+    symbolic_types: &SymbolicTypeEnvironment,
+    proof: ProofContext<'_>,
+    run: &ValidationRun,
+) -> Result<Option<ClaimResult>, ArgumentValidationError> {
+    let unbound = free_variables(std::iter::once(sentence))
+        .into_iter()
+        .filter(|variable| !symbolic_types.types.contains_key(variable))
+        .collect::<BTreeSet<_>>();
+    if unbound.is_empty() {
+        return Ok(None);
+    }
+    let accessible = symbolic_types
+        .types
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for fact in proof.tracked {
+        for alternative in &fact.alternatives {
+            let Ok(spec) = analyze_quantifier(alternative, symbolic_types) else {
+                continue;
+            };
+            if !matches!(spec.kind, quantifier::QuantifierKind::Exists) {
+                continue;
+            }
+            let payload = existential_payload(&spec);
+            let Some(unifier) = crate::formula::conjunction_views(&payload)
+                .into_iter()
+                .find_map(|pattern| {
+                    let mut unifier = Unifier {
+                        metavariables: &spec.introduced,
+                        assignments: BTreeMap::new(),
+                        pattern_accessible: accessible
+                            .iter()
+                            .chain(spec.introduced.iter())
+                            .cloned()
+                            .collect(),
+                        candidate_accessible: accessible.clone(),
+                        pattern_bound: BTreeSet::new(),
+                        candidate_bound: BTreeSet::new(),
+                        bound_forward: BTreeMap::new(),
+                        bound_reverse: BTreeMap::new(),
+                        nonce_pairs: BTreeSet::new(),
+                    };
+                    (unifier.expression(pattern, sentence)
+                        && spec
+                            .introduced
+                            .iter()
+                            .all(|variable| unifier.assignments.contains_key(variable)))
+                    .then_some(unifier)
+                })
+            else {
+                continue;
+            };
+            let mut introduced_types = BTreeMap::new();
+            let mut assignments = Vec::new();
+            let mut assigned_variables = BTreeSet::new();
+            let mut valid = true;
+            for binder in &spec.introduced {
+                let Some(RawExpr::Variable(candidate)) = unifier
+                    .assignments
+                    .get(binder)
+                    .map(|expression| &expression.raw)
+                else {
+                    valid = false;
+                    break;
+                };
+                if !unbound.contains(candidate) || !assigned_variables.insert(candidate.clone()) {
+                    valid = false;
+                    break;
+                }
+                let Some(ty) = spec.types.types.get(binder).cloned() else {
+                    valid = false;
+                    break;
+                };
+                introduced_types.insert(candidate.clone(), ty);
+                assignments.push((binder.clone(), candidate.clone()));
+            }
+            if !valid || assigned_variables != unbound {
+                continue;
+            }
+            let mut extended = symbolic_types.clone();
+            extended.types.extend(introduced_types.clone());
+            let prepared = prepare_expression_with_premises(
+                &extended,
+                sentence,
+                POSITIVE,
+                &run.givens,
+                run.max_dimension,
+            )
+            .map_err(ModelFindingError::from_type)?;
+            let lowered = lower_prepared_boolean(environment, &prepared)?;
+            validation.checks.push(StepCheck::ExistentialElimination {
+                fact: fact.sentence.clone(),
+                assignments,
+            });
+            return Ok(Some(ClaimResult {
+                assertions: vec![lowered],
+                retained: Vec::new(),
+                introduced_types,
+                alternatives: prepared.expression.meta.alternatives().to_vec(),
+                validated: true,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn validate_claim(
     sentence: &Expr<()>,
     validation: &mut StepValidationData,
@@ -908,6 +1085,16 @@ fn validate_claim(
     proof: ProofContext<'_>,
     run: &mut ValidationRun,
 ) -> Result<ClaimResult, ArgumentValidationError> {
+    if let Some(result) = try_existential_elimination(
+        sentence,
+        validation,
+        &environment,
+        symbolic_types,
+        proof,
+        run,
+    )? {
+        return Ok(result);
+    }
     if is_quantifier(sentence) {
         return validate_quantified_claim(
             sentence,
@@ -942,7 +1129,7 @@ fn validate_ordinary_claim(
     solver: &mut Solver,
     environment: Rc<Environment>,
     symbolic_types: &SymbolicTypeEnvironment,
-    tracked: &[(Bool, Expr<()>)],
+    tracked: &[TrackedFact],
     run: &mut ValidationRun,
 ) -> Result<ClaimResult, ArgumentValidationError> {
     if let Err(error) = ensure_expression_bound(sentence, symbolic_types) {
@@ -996,6 +1183,38 @@ fn validate_ordinary_claim(
             declarations: concrete_declarations(symbolic_types, &environment)?,
         });
         return Ok(ClaimResult::default());
+    }
+
+    let facts = proof_facts(tracked, &[]);
+    let alternative_witness =
+        positive
+            .expression
+            .meta
+            .alternatives()
+            .iter()
+            .find_map(|alternative| {
+                let spec = analyze_quantifier(alternative, symbolic_types).ok()?;
+                if !matches!(spec.kind, quantifier::QuantifierKind::Exists) {
+                    return None;
+                }
+                find_existential_witness(&spec, symbolic_types, &environment, &facts)
+            });
+    if let Some(witness) = alternative_witness {
+        let mut accepted = Vec::new();
+        for extension in extensions.environments {
+            accepted.push(lower_prepared_boolean(&extension, &positive)?);
+        }
+        validation.checks.push(StepCheck::ExistentialWitness {
+            assignments: witness.assignments.into_iter().collect(),
+            supporting_facts: witness.supporting_facts,
+        });
+        return Ok(ClaimResult {
+            assertions: accepted,
+            retained: Vec::new(),
+            introduced_types: BTreeMap::new(),
+            alternatives: positive.expression.meta.alternatives().to_vec(),
+            validated: true,
+        });
     }
 
     let mut accepted = Vec::new();
@@ -1069,12 +1288,16 @@ fn validate_ordinary_claim(
     Ok(ClaimResult {
         assertions: accepted,
         retained: Vec::new(),
+        introduced_types: BTreeMap::new(),
+        alternatives: positive.expression.meta.alternatives().to_vec(),
         validated: true,
     })
 }
 
 mod quantifier;
-use quantifier::{analyze_quantifier, validate_quantified_claim};
+use quantifier::{
+    analyze_quantifier, find_existential_witness, proof_facts, validate_quantified_claim,
+};
 
 fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
     if givens.is_empty() {

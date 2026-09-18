@@ -30,33 +30,53 @@ impl Error for TypeError {}
 pub trait MaybeTyped {
     fn get_type(&self) -> Result<TypeExpr<()>, TypeError>;
     fn put_type(&mut self, ty: TypeExpr<()>);
+    fn alternatives(&self) -> &[Expr<()>] {
+        &[]
+    }
+    fn add_alternative(&mut self, _expression: Expr<()>) {}
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TypedMetadata(Option<TypeExpr<()>>);
+pub struct TypedMetadata {
+    ty: Option<TypeExpr<()>>,
+    alternatives: Vec<Expr<()>>,
+}
 
 impl MaybeTyped for TypedMetadata {
     fn get_type(&self) -> Result<TypeExpr<()>, TypeError> {
-        self.0
+        self.ty
             .clone()
             .ok_or(TypeError::Unsupported("expression has no value type"))
     }
 
     fn put_type(&mut self, ty: TypeExpr<()>) {
-        if let Some(previous) = &self.0 {
+        if let Some(previous) = &self.ty {
             assert_eq!(
                 previous, &ty,
                 "type resolution changed an existing annotation"
             );
         } else {
-            self.0 = Some(ty);
+            self.ty = Some(ty);
+        }
+    }
+
+    fn alternatives(&self) -> &[Expr<()>] {
+        &self.alternatives
+    }
+
+    fn add_alternative(&mut self, expression: Expr<()>) {
+        if !self.alternatives.contains(&expression) {
+            self.alternatives.push(expression);
         }
     }
 }
 
 impl TypedMetadata {
     pub(crate) fn resolved(ty: TypeExpr<()>) -> Self {
-        Self(Some(ty))
+        Self {
+            ty: Some(ty),
+            alternatives: Vec::new(),
+        }
     }
 }
 
@@ -1359,7 +1379,7 @@ mod tests {
             types: HashMap::from([(variable.clone(), TypeExpr::Real)]),
         };
         let mut expression = Expr::with_metadata(
-            TypedMetadata(Some(TypeExpr::Nat)),
+            TypedMetadata::resolved(TypeExpr::Nat),
             RawExpr::Variable(variable),
         );
         assert!(

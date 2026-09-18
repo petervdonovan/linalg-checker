@@ -40,6 +40,12 @@ impl VisitMut<TypedMetadata> for SetMembershipLowering {
             let subject = subject.with_default_metadata();
             let predicate =
                 substitute_free_variable(&predicate.with_default_metadata(), variable, &subject);
+            let alternatives = set
+                .meta
+                .alternatives()
+                .iter()
+                .map(|alternative| substitute_free_variable(alternative, variable, &subject))
+                .collect::<Vec<_>>();
             let domain_check = Expr::new(RawExpr::Binop(
                 Binop::InDomain,
                 subject,
@@ -49,6 +55,13 @@ impl VisitMut<TypedMetadata> for SetMembershipLowering {
                 Expr::new(RawExpr::Finop(Finop::And, vec![domain_check, predicate]));
             // Substitution changes dependent types; infer them afresh next iteration.
             *node = replacement.with_default_metadata();
+            let metadata = &mut node
+                .get_mut()
+                .expect("new membership replacement must be uniquely owned")
+                .meta;
+            for alternative in alternatives {
+                metadata.add_alternative(alternative);
+            }
             self.rewrites += 1;
             return;
         }
@@ -244,7 +257,7 @@ mod tests {
         assert!(!rendered.contains(r"\left\{"), "{rendered}");
         assert!(!crate::formula::contains_quantifier(&prepared.expression));
         assert!(rendered.contains("A"), "{rendered}");
-        assert!(rendered.contains("= b"), "{rendered}");
+        assert!(rendered.contains("b = A"), "{rendered}");
         assert_eq!(prepared.side_conditions.len(), 1);
         assert!(matches!(
             prepared.side_conditions[0].introduced_type,
@@ -259,6 +272,11 @@ mod tests {
             crate::visit_mut::Existence::Guaranteed
         ));
         assert!(prepared.side_conditions[0].defining_assertions.is_empty());
+        assert_eq!(prepared.expression.meta.alternatives().len(), 1);
+        assert!(matches!(
+            prepared.expression.meta.alternatives()[0].raw,
+            RawExpr::Finop(Finop::Exists, _)
+        ));
     }
 
     #[test]

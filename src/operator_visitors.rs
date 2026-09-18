@@ -109,7 +109,7 @@ where
                                         ),
                                     ),
                                 ),
-                                comparison(product, Cmp::Eq, vector),
+                                comparison(vector, Cmp::Eq, product),
                             ],
                         ),
                     )
@@ -188,8 +188,12 @@ where
             .expect("new set predicates must be uniquely owned")
             .meta
             .put_type(TypeExpr::Bool);
+        let mut metadata = Metadata::default();
+        if matches!(op, Monop::Range) && context.logical_polarity {
+            metadata.add_alternative(predicate.with_default_metadata());
+        }
         *node = Expr::with_metadata(
-            Metadata::default(),
+            metadata,
             RawExpr::SetComprehension {
                 variable,
                 domain,
