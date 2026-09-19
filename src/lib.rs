@@ -248,6 +248,7 @@ pub enum Monop {
     Nul,
     /// Surface column-space operator, eliminated during preprocessing.
     Range,
+    SetLiteral,
     Not,
     Neg,
     Inverse,
@@ -296,6 +297,7 @@ pub enum Finop {
 pub enum SeqOp {
     Sum,
     Prod,
+    BigOr,
     Map,
 }
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -353,6 +355,8 @@ impl<Metadata> Expr<Metadata> {
             RawExpr::Type(ty) => RawExpr::Type(ty.with_default_metadata()),
             RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
             RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
+            RawExpr::BoolLiteral(value) => RawExpr::BoolLiteral(*value),
+            RawExpr::EmptySet => RawExpr::EmptySet,
             RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
                 rows: matrix.rows,
                 cols: matrix.cols,
@@ -510,6 +514,8 @@ pub enum RawExpr<Metadata> {
     Type(TypeExpr<Metadata>),
     Variable(Variable),
     NatLiteral(u64),
+    BoolLiteral(bool),
+    EmptySet,
     Matrix(Matrix<Expr<Metadata>>),
     Monop(Monop, Expr<Metadata>),
     Binop(Binop, Expr<Metadata>, Expr<Metadata>),

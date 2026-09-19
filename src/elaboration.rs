@@ -646,6 +646,7 @@ impl<'a> SequenceVisitor<'a> {
         let op = match op {
             SeqOp::Sum => Finop::Plus,
             SeqOp::Prod => Finop::Times,
+            SeqOp::BigOr => Finop::Or,
             SeqOp::Map => {
                 return Ok(typed(result_type, RawExpr::Finop(Finop::SeqLiteral, terms)));
             }
@@ -1673,6 +1674,8 @@ fn substitute_index(
             },
         },
         RawExpr::Variable(found) if found == variable => RawExpr::NatLiteral(value),
+        RawExpr::BoolLiteral(value) => RawExpr::BoolLiteral(*value),
+        RawExpr::EmptySet => RawExpr::EmptySet,
         RawExpr::Hole => RawExpr::Hole,
         RawExpr::Ellipsis => RawExpr::Ellipsis,
         RawExpr::ImplicitDimension(dimension) => RawExpr::ImplicitDimension(*dimension),

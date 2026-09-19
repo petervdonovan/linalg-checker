@@ -91,6 +91,12 @@ fn expr_with_mode<Metadata>(
         crate::RawExpr::Type(ty) => type_expr(f, ty, verbose),
         crate::RawExpr::Variable(v) => variable(f, v),
         crate::RawExpr::NatLiteral(value) => write!(f, "{value}"),
+        crate::RawExpr::BoolLiteral(value) => write!(
+            f,
+            r"\operatorname{{{}}}",
+            if *value { "true" } else { "false" }
+        ),
+        crate::RawExpr::EmptySet => write!(f, r"\emptyset"),
         crate::RawExpr::Matrix(value) => matrix(f, value, verbose),
         crate::RawExpr::Monop(Monop::Not, e)
             if matches!(e.raw, crate::RawExpr::Binop(Binop::ElementOf, _, _)) =>
@@ -317,6 +323,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
         Monop::Diag => write!(f, r"\operatorname{{diag}}(")?,
         Monop::Nul => write!(f, r"\operatorname{{Nul}}(")?,
         Monop::Range => write!(f, r"\operatorname{{Range}}(")?,
+        Monop::SetLiteral => write!(f, r"\left\{{")?,
         Monop::Not => write!(f, r"\neg ")?,
         Monop::Neg => write!(f, "-")?,
         Monop::Inverse => {}
@@ -330,6 +337,7 @@ fn monop<F: FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result>(
 
     match op {
         Monop::Trace | Monop::Det | Monop::Diag | Monop::Nul | Monop::Range => write!(f, ")"),
+        Monop::SetLiteral => write!(f, r"\right\}}"),
         Monop::Not => Ok(()),
         Monop::Neg => Ok(()),
         Monop::Inverse => write!(f, "^{{-1}}"),
@@ -575,6 +583,7 @@ fn seqop<
     match op {
         SeqOp::Sum => write!(f, r"\sum")?,
         SeqOp::Prod => write!(f, r"\prod")?,
+        SeqOp::BigOr => write!(f, r"\bigvee")?,
         SeqOp::Map => write!(f, r"\operatorname{{map}}")?,
     }
     write!(f, "_{{{index_variable}=")?;

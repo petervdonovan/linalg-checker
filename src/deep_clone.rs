@@ -29,6 +29,8 @@ pub(crate) fn deep_clone<Metadata: Clone>(expression: &Expr<Metadata>) -> Expr<M
         RawExpr::Type(ty) => RawExpr::Type(deep_clone_type(ty)),
         RawExpr::Variable(variable) => RawExpr::Variable(variable.clone()),
         RawExpr::NatLiteral(value) => RawExpr::NatLiteral(*value),
+        RawExpr::BoolLiteral(value) => RawExpr::BoolLiteral(*value),
+        RawExpr::EmptySet => RawExpr::EmptySet,
         RawExpr::Matrix(matrix) => RawExpr::Matrix(Matrix {
             rows: matrix.rows,
             cols: matrix.cols,

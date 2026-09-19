@@ -414,6 +414,22 @@ WTS $a x + b y \in \operatorname{Range}(A)$
 3. $a x + b y = A \left(a u + b v\right)$
 4. $a x + b y \in \operatorname{Range}(A)$
 
+# Sequence entries form a finite set
+
+Given:
+
+- $s \in \operatorname{Seq}_{2}(\mathbb{R})$
+
+WTS $s_{1} \in \left\{s\right\}$
+
+# Empty set has no real members
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x \notin \emptyset$
+
 # Positive existential skolemization
 
 Given:

@@ -388,7 +388,7 @@ impl Visit<TypedMetadata> for CompletenessValidator<'_> {
             RawExpr::Seqop(op, _, _) if !self.rules.supports_seqop(*op) => {
                 Some(TypeError::Unsupported("unregistered sequence operator"))
             }
-            RawExpr::Hole | RawExpr::Type(_) => None,
+            RawExpr::Hole | RawExpr::Type(_) | RawExpr::EmptySet => None,
             RawExpr::Ellipsis => Some(TypeError::Unsupported(
                 "ellipses must be eliminated before preprocessing completes",
             )),

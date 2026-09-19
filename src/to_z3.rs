@@ -377,6 +377,10 @@ fn lower<Metadata: MaybeTyped + Clone>(
                 ));
             }
         })),
+        RawExpr::BoolLiteral(value) => Ok(Z3Object::Z3(Bool::from_bool(*value).into())),
+        RawExpr::EmptySet => Err(ToZ3Error::Unsupported(
+            "empty set was not eliminated before Z3 lowering",
+        )),
         RawExpr::Monop(Monop::Neg, inner) => lower(γ, inner)?.neg(),
         RawExpr::Monop(Monop::Not, inner) => {
             let Z3Object::Z3(inner) = lower(γ, inner)? else {
@@ -1398,6 +1402,24 @@ mod tests {
                 "boolean negation requires a Boolean operand",
             )),
         );
+    }
+
+    #[test]
+    fn test_boolean_literals_and_big_disjunction() {
+        for (tex, expected) in [
+            (r"\operatorname{true}", true),
+            (r"\operatorname{false}", false),
+            (r"\bigvee_{i=1}^{2}\left(i = 2\right)", true),
+            (r"\bigvee_{i=1}^{2}\left(i = 3\right)", false),
+        ] {
+            let Z3Object::Z3(value) = to_z3(Environment::default(), expression(tex)) else {
+                panic!("expected a Boolean expression")
+            };
+            let value = value.as_bool().unwrap();
+            let solver = Solver::new();
+            solver.assert(if expected { value.not() } else { value });
+            assert_eq!(solver.check(), SatResult::Unsat, "{tex}");
+        }
     }
 
     #[test]

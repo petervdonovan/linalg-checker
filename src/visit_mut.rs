@@ -338,6 +338,7 @@ pub fn visit_raw_expr_mut<V, Metadata>(
         RawExpr::Type(ty) => visitor.visit_raw_expr_type_mut(context, ty),
         RawExpr::Variable(variable) => visitor.visit_raw_expr_variable_mut(context, variable),
         RawExpr::NatLiteral(value) => visitor.visit_raw_expr_nat_literal_mut(context, value),
+        RawExpr::BoolLiteral(_) | RawExpr::EmptySet => {}
         RawExpr::Matrix(matrix) => visitor.visit_raw_expr_matrix_mut(context, matrix),
         RawExpr::Monop(op, expression) => visitor.visit_raw_expr_monop_mut(context, op, expression),
         RawExpr::Binop(op, left, right) => {
@@ -887,6 +888,8 @@ mod tests {
                     RawExpr::Type(_) => "type",
                     RawExpr::Variable(_) => "variable",
                     RawExpr::NatLiteral(_) => "literal",
+                    RawExpr::BoolLiteral(_) => "boolean literal",
+                    RawExpr::EmptySet => "empty set",
                     RawExpr::Matrix(_) => "matrix",
                     RawExpr::Monop(_, _) => "monop",
                     RawExpr::Binop(_, _, _) => "binop",
@@ -929,6 +932,8 @@ mod tests {
             ))),
             variable("x"),
             Expr::new(RawExpr::NatLiteral(0)),
+            Expr::new(RawExpr::BoolLiteral(false)),
+            Expr::new(RawExpr::EmptySet),
             Expr::new(RawExpr::Matrix(Matrix {
                 rows: 1,
                 cols: 1,
@@ -970,6 +975,6 @@ mod tests {
         for expression in &mut expressions {
             visitor.visit_expr_mut(POSITIVE, expression);
         }
-        assert_eq!(visitor.variants.len(), 19);
+        assert_eq!(visitor.variants.len(), 21);
     }
 }

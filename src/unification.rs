@@ -77,6 +77,8 @@ impl Unifier<'_> {
             (RawExpr::Type(a), RawExpr::Type(b)) => self.type_expr(a, b),
             (RawExpr::Variable(a), RawExpr::Variable(b)) => a == b,
             (RawExpr::NatLiteral(a), RawExpr::NatLiteral(b)) => a == b,
+            (RawExpr::BoolLiteral(a), RawExpr::BoolLiteral(b)) => a == b,
+            (RawExpr::EmptySet, RawExpr::EmptySet) => true,
             (RawExpr::Matrix(a), RawExpr::Matrix(b)) => {
                 a.rows == b.rows && a.cols == b.cols && self.expressions(&a.elements, &b.elements)
             }

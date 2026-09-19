@@ -280,6 +280,73 @@ mod tests {
     }
 
     #[test]
+    fn finite_set_literals_lower_singletons_and_sequence_entries() {
+        let singleton =
+            prepare(r"y \in \{x\}", &[r"x \in \mathbb{R}", r"y \in \mathbb{R}"]).unwrap();
+        assert!(
+            singleton
+                .expression
+                .as_latex()
+                .to_string()
+                .contains("y = x")
+        );
+
+        let literal = prepare(
+            r"z \in \{x, y\}",
+            &[
+                r"x \in \mathbb{R}",
+                r"y \in \mathbb{R}",
+                r"z \in \mathbb{R}",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            literal.expression.meta.get_type(),
+            Ok(TypeExpr::Bool)
+        ));
+
+        let sequence = prepare(
+            r"x \in \{s\}",
+            &[
+                r"s \in \operatorname{Seq}_{n}(\mathbb{R})",
+                r"x \in \mathbb{R}",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            sequence.expression.meta.get_type(),
+            Ok(TypeExpr::Bool)
+        ));
+        assert!(
+            !sequence
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\left\{")
+        );
+    }
+
+    #[test]
+    fn empty_set_uses_contextual_element_types() {
+        let membership = prepare(r"x \in \emptyset", &[r"x \in \mathbb{R}"]).unwrap();
+        assert!(
+            membership
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\operatorname{false}")
+        );
+
+        for tex in [r"\emptyset = \{x\}", r"\{x\} = \emptyset"] {
+            let prepared = prepare(tex, &[r"x \in \mathbb{R}"]).unwrap();
+            assert_eq!(prepared.expression.meta.get_type(), Ok(TypeExpr::Bool));
+        }
+
+        let untyped = prepare(r"\emptyset", &[]).unwrap();
+        assert!(crate::to_z3::to_z3(&crate::Environment::default(), &untyped).is_err());
+    }
+
+    #[test]
     fn negative_range_membership_lowers_through_a_counterexample() {
         let givens = [
             parse(r"A \in \mathbb{R}^{m \times n}"),

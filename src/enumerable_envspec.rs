@@ -1263,7 +1263,7 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                             "2-norm must be lowered before dimension inference".to_owned(),
                         ));
                     }
-                    (Monop::Nul | Monop::Range, _) => {
+                    (Monop::Nul | Monop::Range | Monop::SetLiteral, _) => {
                         return Err(ShapeError::Unsupported(
                             "set operators must be lowered before dimension inference".to_owned(),
                         ));
@@ -1452,6 +1452,8 @@ impl OperatorCompatibilityVisitor<'_, '_> {
             | RawExpr::Type(_)
             | RawExpr::Variable(_)
             | RawExpr::NatLiteral(_)
+            | RawExpr::BoolLiteral(_)
+            | RawExpr::EmptySet
             | RawExpr::Matrix(_)
             | RawExpr::Seqop(_, _, _) => {}
         }

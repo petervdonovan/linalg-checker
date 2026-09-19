@@ -322,6 +322,16 @@ impl<'a> Cursor<'a> {
                 cols: crate::ImplicitDimension::fresh(),
             }));
         }
+        if matches!(current.symbol_text(), Some(r"\emptyset" | r"\varnothing")) {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::EmptySet));
+        }
+        if matches!(current.symbol_text(), Some(r"\top" | r"\bot")) {
+            self.position += 1;
+            return Ok(Expr::new(RawExpr::BoolLiteral(
+                current.symbol_text() == Some(r"\top"),
+            )));
+        }
         if let Some(ty) = parse_type(current)? {
             self.position += 1;
             return Ok(Expr::new(RawExpr::Type(ty)));
@@ -346,7 +356,7 @@ impl<'a> Cursor<'a> {
                 body, left, right, ..
             } if matches!(left.as_str(), r"\{" | "{") && matches!(right.as_str(), r"\}" | "}") => {
                 self.position += 1;
-                parse_set_comprehension(body)
+                parse_set_braces(body)
             }
             ParseNode::Atom {
                 family: AtomFamily::Open,
@@ -373,7 +383,7 @@ impl<'a> Cursor<'a> {
                     if depth == 0 {
                         let body = &self.nodes[start..self.position];
                         self.position += 1;
-                        return parse_set_comprehension(body);
+                        return parse_set_braces(body);
                     }
                     self.position += 1;
                 }
@@ -415,6 +425,10 @@ impl<'a> Cursor<'a> {
                     index: self.position,
                     message: "operator name is not plain text".to_owned(),
                 })?;
+                if matches!(name.as_str(), "true" | "false") {
+                    self.position += 1;
+                    return Ok(Expr::new(RawExpr::BoolLiteral(name == "true")));
+                }
                 if name == "Set" {
                     self.position += 1;
                     let element = expr(self.take_parenthesized()?)?;
@@ -973,6 +987,7 @@ fn parse_sequence_head(node: &ParseNode) -> Result<Option<(SeqOp, Range<()>)>, F
         } => match name.as_str() {
             r"\sum" => SeqOp::Sum,
             r"\prod" => SeqOp::Prod,
+            r"\bigvee" => SeqOp::BigOr,
             _ => return Ok(None),
         },
         ParseNode::OperatorName { body, .. } if collect_text(body).as_deref() == Some("map") => {
@@ -1165,6 +1180,17 @@ fn parse_set_comprehension(nodes: &[ParseNode]) -> Result<Expr<()>, FromTexError
         domain: domain.clone(),
         predicate: expr(predicate)?,
     }))
+}
+
+fn parse_set_braces(nodes: &[ParseNode]) -> Result<Expr<()>, FromTexError> {
+    if nodes.is_empty() {
+        return Ok(Expr::new(RawExpr::EmptySet));
+    }
+    if split_top_level(nodes, ":").len() > 1 {
+        parse_set_comprehension(nodes)
+    } else {
+        Ok(Expr::new(RawExpr::Monop(Monop::SetLiteral, expr(nodes)?)))
+    }
 }
 
 #[cfg(test)]
@@ -1433,6 +1459,25 @@ mod tests {
         );
         assert_eq!(round_trip(r"x \notin S").unwrap(), r"x \notin S");
         assert_eq!(round_trip(r"\neg(x \in S)").unwrap(), r"x \notin S");
+    }
+
+    #[test]
+    fn parses_finite_and_empty_sets_and_boolean_literals() {
+        assert_eq!(round_trip(r"\{x\}").unwrap(), r"\left\{x\right\}");
+        assert_eq!(round_trip(r"\{x, y\}").unwrap(), r"\left\{x, y\right\}");
+        for input in [r"\emptyset", r"\varnothing", r"\{\}"] {
+            assert_eq!(round_trip(input).unwrap(), r"\emptyset", "{input}");
+        }
+        for input in [r"\top", r"\operatorname{true}"] {
+            assert_eq!(round_trip(input).unwrap(), r"\operatorname{true}");
+        }
+        for input in [r"\bot", r"\operatorname{false}"] {
+            assert_eq!(round_trip(input).unwrap(), r"\operatorname{false}");
+        }
+        assert_eq!(
+            round_trip(r"\bigvee_{i=1}^{n}P_i").unwrap(),
+            r"\bigvee_{i=1}^{n}P_{i}"
+        );
     }
 
     #[test]

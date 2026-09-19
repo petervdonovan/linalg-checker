@@ -140,6 +140,7 @@ pub fn visit_raw_expr<V: Visit<M> + ?Sized, M>(v: &mut V, n: &RawExpr<M>) {
         RawExpr::Type(ty) => v.visit_raw_expr_type(ty),
         RawExpr::Variable(variable) => v.visit_raw_expr_variable(variable),
         RawExpr::NatLiteral(value) => v.visit_raw_expr_nat_literal(value),
+        RawExpr::BoolLiteral(_) | RawExpr::EmptySet => {}
         RawExpr::Matrix(matrix) => v.visit_raw_expr_matrix(matrix),
         RawExpr::Monop(op, expression) => v.visit_raw_expr_monop(op, expression),
         RawExpr::Binop(op, left, right) => v.visit_raw_expr_binop(op, left, right),
@@ -319,6 +320,8 @@ mod tests {
                     RawExpr::Type(_) => "type",
                     RawExpr::Variable(_) => "variable",
                     RawExpr::NatLiteral(_) => "literal",
+                    RawExpr::BoolLiteral(_) => "boolean literal",
+                    RawExpr::EmptySet => "empty set",
                     RawExpr::Matrix(_) => "matrix",
                     RawExpr::Monop(_, _) => "monop",
                     RawExpr::Binop(_, _, _) => "binop",
@@ -352,6 +355,8 @@ mod tests {
             Expr::new(RawExpr::Type(TypeExpr::Matrix(literal(), literal()))),
             Expr::new(RawExpr::Variable(Variable::new("x"))),
             literal(),
+            Expr::new(RawExpr::BoolLiteral(true)),
+            Expr::new(RawExpr::EmptySet),
             Expr::new(RawExpr::Matrix(Matrix {
                 rows: 1,
                 cols: 1,
@@ -388,6 +393,6 @@ mod tests {
         for expression in &expressions {
             visitor.visit_expr(expression);
         }
-        assert_eq!(visitor.0.len(), 19);
+        assert_eq!(visitor.0.len(), 21);
     }
 }

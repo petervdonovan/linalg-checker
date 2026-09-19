@@ -34,6 +34,92 @@ where
             return;
         }
         visit_mut::visit_expr_mut(self, context.clone(), node);
+        if matches!(node.raw, RawExpr::EmptySet) {
+            let Ok(TypeExpr::Set(element)) = node.meta.get_type() else {
+                return;
+            };
+            let mut predicate =
+                Expr::with_metadata(Metadata::default(), RawExpr::BoolLiteral(false));
+            predicate.get_mut().unwrap().meta.put_type(TypeExpr::Bool);
+            *node = Expr::with_metadata(
+                Metadata::default(),
+                RawExpr::SetComprehension {
+                    variable: Variable::new("x"),
+                    domain: element.with_default_metadata(),
+                    predicate,
+                },
+            );
+            self.rewrites += 1;
+            return;
+        }
+        if let RawExpr::Monop(Monop::SetLiteral, operand) = &node.raw {
+            let operand_type = match operand.meta.get_type() {
+                Ok(ty) => ty,
+                Err(_) => {
+                    self.error = Some(TypeError::Invalid(
+                        "set literal requires an operand with a resolved symbolic type",
+                    ));
+                    return;
+                }
+            };
+            let used = all_variables(std::iter::once(operand));
+            let mut variable = Variable::new("x");
+            while used.contains(&variable) {
+                variable.annotations.push(Annotation::Prime);
+            }
+            let subject =
+                Expr::with_metadata(Metadata::default(), RawExpr::Variable(variable.clone()));
+            let (domain, raw_predicate) = match operand_type {
+                TypeExpr::Seq(element, length) => {
+                    let RawExpr::Type(element_type) = &element.raw else {
+                        self.error = Some(TypeError::Invalid(
+                            "sequence element must be a type expression",
+                        ));
+                        return;
+                    };
+                    let mut index = Variable::new("i");
+                    while used.contains(&index) || index == variable {
+                        index.annotations.push(Annotation::Prime);
+                    }
+                    let position =
+                        Expr::with_metadata(Metadata::default(), RawExpr::Variable(index.clone()));
+                    let entry = Expr::with_metadata(
+                        Metadata::default(),
+                        RawExpr::Binop(Binop::SingleSubscript, deep_clone(operand), position),
+                    );
+                    (
+                        element_type.with_default_metadata(),
+                        RawExpr::Seqop(
+                            crate::SeqOp::BigOr,
+                            crate::Range {
+                                index_variable: index,
+                                from: natural(1),
+                                to: length.with_default_metadata(),
+                            },
+                            comparison(subject, Cmp::Eq, entry),
+                        ),
+                    )
+                }
+                ty => {
+                    let mut predicate = comparison(subject, Cmp::Eq, deep_clone(operand));
+                    let raw =
+                        std::mem::replace(&mut predicate.get_mut().unwrap().raw, RawExpr::Hole);
+                    (ty.with_default_metadata(), raw)
+                }
+            };
+            let mut predicate = Expr::with_metadata(Metadata::default(), raw_predicate);
+            predicate.get_mut().unwrap().meta.put_type(TypeExpr::Bool);
+            *node = Expr::with_metadata(
+                Metadata::default(),
+                RawExpr::SetComprehension {
+                    variable,
+                    domain,
+                    predicate,
+                },
+            );
+            self.rewrites += 1;
+            return;
+        }
         let RawExpr::Monop(op @ (Monop::Nul | Monop::Range), operand) = &node.raw else {
             return;
         };

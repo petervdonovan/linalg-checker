@@ -1073,6 +1073,34 @@ Matched facts:
    - $a x + b y = A \left(a u + b v\right)$
    </details>
 
+# Sequence entries form a finite set
+
+Given:
+
+- $s \in \operatorname{Seq}_{2}(\mathbb{R})$
+
+WTS $s_{1} \in \left\{s\right\}$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+# Empty set has no real members
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x \notin \emptyset$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
 # Positive existential skolemization
 
 Given:

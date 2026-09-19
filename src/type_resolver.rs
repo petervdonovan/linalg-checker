@@ -194,6 +194,7 @@ impl OperatorTypeRules {
         rules.register_finop(Finop::SeqLiteral, sequence_literal_rule);
         rules.register_seqop(SeqOp::Sum, sequence_fold_rule);
         rules.register_seqop(SeqOp::Prod, sequence_fold_rule);
+        rules.register_seqop(SeqOp::BigOr, boolean_sequence_fold_rule);
         rules.register_seqop(SeqOp::Map, map_rule);
         rules
     }
@@ -336,6 +337,8 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             }
             RawExpr::Hole | RawExpr::Ellipsis | RawExpr::Type(_) => return Ok(None),
             RawExpr::ImplicitDimension(_) | RawExpr::BoundNatural(_) => TypeExpr::Nat,
+            RawExpr::BoolLiteral(_) => TypeExpr::Bool,
+            RawExpr::EmptySet => return Ok(expression.meta.get_type().ok()),
             RawExpr::IdentityMatrix { dimension } => {
                 let dimension = implicit_dimension(*dimension);
                 TypeExpr::Matrix(dimension.clone(), dimension)
@@ -477,7 +480,9 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                 | RawExpr::IdentityMatrix { .. }
                 | RawExpr::ZeroMatrix { .. }
                 | RawExpr::Variable(_)
-                | RawExpr::NatLiteral(_) => {}
+                | RawExpr::NatLiteral(_)
+                | RawExpr::BoolLiteral(_)
+                | RawExpr::EmptySet => {}
                 RawExpr::StandardBasis { index, .. } => self.visit_expr_mut(context.clone(), index),
                 RawExpr::Type(ty) => self.visit_type_expr_mut(context.clone(), ty),
                 RawExpr::Matrix(matrix) => {
@@ -638,6 +643,44 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
         if self.error.is_some() {
             return;
         }
+        match &mut node.get_mut().unwrap().raw {
+            RawExpr::Binop(Binop::ElementOf, subject, set)
+                if matches!(set.raw, RawExpr::EmptySet) =>
+            {
+                if let Ok(subject_type) = subject.meta.get_type() {
+                    set.get_mut()
+                        .unwrap()
+                        .meta
+                        .put_type(TypeExpr::Set(Box::new(subject_type)));
+                }
+            }
+            RawExpr::CmpChain(chain) => {
+                let mut previous = &mut chain.start;
+                for (comparison, current) in &mut chain.assertions {
+                    if matches!(comparison, crate::Cmp::Eq) {
+                        if matches!(previous.raw, RawExpr::EmptySet)
+                            && let Ok(TypeExpr::Set(element)) = current.meta.get_type()
+                        {
+                            previous
+                                .get_mut()
+                                .unwrap()
+                                .meta
+                                .put_type(TypeExpr::Set(element));
+                        } else if matches!(current.raw, RawExpr::EmptySet)
+                            && let Ok(TypeExpr::Set(element)) = previous.meta.get_type()
+                        {
+                            current
+                                .get_mut()
+                                .unwrap()
+                                .meta
+                                .put_type(TypeExpr::Set(element));
+                        }
+                    }
+                    previous = current;
+                }
+            }
+            _ => {}
+        }
         match self.infer(&context, node) {
             Ok(Some(ty)) => node.get_mut().unwrap().meta.put_type(ty),
             Ok(None) => {}
@@ -718,6 +761,18 @@ fn sequence_fold_rule(
     operand: &TypeRuleOperand,
 ) -> Result<TypeExpr<()>, TypeError> {
     uniform_sequence_body_type(range, operand.value()?)
+}
+
+fn boolean_sequence_fold_rule(
+    _range: &Range<()>,
+    operand: &TypeRuleOperand,
+) -> Result<TypeExpr<()>, TypeError> {
+    match operand.value()? {
+        TypeExpr::Bool => Ok(TypeExpr::Bool),
+        _ => Err(TypeError::Invalid(
+            "big disjunction requires a Boolean body",
+        )),
+    }
 }
 
 fn map_rule(range: &Range<()>, operand: &TypeRuleOperand) -> Result<TypeExpr<()>, TypeError> {
