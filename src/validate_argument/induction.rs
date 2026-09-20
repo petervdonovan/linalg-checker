@@ -177,6 +177,7 @@ pub(super) fn validate_tactic_fallback(
                     retained: scoped_statements,
                 },
                 run,
+                false,
             );
             run.givens.truncate(scope_len);
             let result = result?;

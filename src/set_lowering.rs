@@ -1,11 +1,127 @@
 //! Exact elimination of direct membership in typed set comprehensions.
 
 use crate::{
-    Binop, Expr, Finop, RawExpr,
+    Binop, Cmp, Expr, Finop, Logic, LogicChain, RawExpr, TypeExpr, Variable,
+    expression_utils::all_variables,
     formula::substitute_free_variable,
     type_resolver::{MaybeTyped, TypeError, TypedMetadata},
     visit_mut::{self, VisitContext, VisitMut},
 };
+
+#[derive(Default)]
+pub struct SetEqualityLowering {
+    rewrites: usize,
+    error: Option<TypeError>,
+}
+
+impl SetEqualityLowering {
+    pub fn finish(self) -> Result<usize, TypeError> {
+        self.error.map_or(Ok(self.rewrites), Err)
+    }
+}
+
+impl VisitMut<TypedMetadata> for SetEqualityLowering {
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
+        if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context.clone(), node);
+        if context.logical_polarity {
+            return;
+        }
+        let RawExpr::CmpChain(chain) = &node.raw else {
+            return;
+        };
+        let [(Cmp::Eq, right)] = chain.assertions.as_slice() else {
+            return;
+        };
+        let left = &chain.start;
+        let left_set = comprehension(left, right);
+        let right_set = comprehension(right, left);
+        let (
+            Some((left_binder, left_domain, left_predicate)),
+            Some((right_binder, right_domain, right_predicate)),
+        ) = (left_set, right_set)
+        else {
+            return;
+        };
+        match crate::type_resolver::same_type_structure(&left_domain, &right_domain) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.error = Some(TypeError::Invalid(
+                    "set equality requires compatible element types",
+                ));
+                return;
+            }
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+
+        let used = all_variables([left, right]);
+        let mut binder = Variable::new("x");
+        while used.contains(&binder) {
+            binder.annotations.push(crate::Annotation::Prime);
+        }
+        let binder_expression = Expr::new(RawExpr::Variable(binder.clone()));
+        let left_predicate =
+            substitute_free_variable(&left_predicate, &left_binder, &binder_expression);
+        let right_predicate =
+            substitute_free_variable(&right_predicate, &right_binder, &binder_expression);
+        let declaration = Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            binder_expression.clone(),
+            Expr::new(RawExpr::Type(left_domain.clone())),
+        ));
+        let right_domain_check = Expr::new(RawExpr::Binop(
+            Binop::InDomain,
+            binder_expression,
+            Expr::new(RawExpr::Type(right_domain)),
+        ));
+        let iff = Expr::new(RawExpr::LogicChain(LogicChain {
+            start: left_predicate,
+            assertions: vec![(Logic::Iff, right_predicate)],
+        }));
+        *node = Expr::new(RawExpr::Finop(
+            Finop::Forall,
+            vec![
+                declaration,
+                Expr::new(RawExpr::Finop(Finop::And, vec![right_domain_check, iff])),
+            ],
+        ))
+        .with_default_metadata();
+        self.rewrites += 1;
+    }
+}
+
+fn comprehension(
+    expression: &Expr<TypedMetadata>,
+    other: &Expr<TypedMetadata>,
+) -> Option<(Variable, TypeExpr<()>, Expr<()>)> {
+    match &expression.raw {
+        RawExpr::SetComprehension {
+            variable,
+            domain,
+            predicate,
+        } => Some((
+            variable.clone(),
+            domain.with_default_metadata(),
+            predicate.with_default_metadata(),
+        )),
+        RawExpr::Type(domain)
+            if matches!(other.raw, RawExpr::SetComprehension { .. })
+                && matches!(domain, TypeExpr::Real | TypeExpr::Matrix(_, _)) =>
+        {
+            Some((
+                Variable::new("x"),
+                domain.with_default_metadata(),
+                Expr::new(RawExpr::BoolLiteral(true)),
+            ))
+        }
+        _ => None,
+    }
+}
 
 #[derive(Default)]
 pub struct SetMembershipLowering {
@@ -344,6 +460,83 @@ mod tests {
 
         let untyped = prepare(r"\emptyset", &[]).unwrap();
         assert!(crate::to_z3::to_z3(&crate::Environment::default(), &untyped).is_err());
+    }
+
+    #[test]
+    fn negative_set_equality_lowers_by_extensionality() {
+        let givens = [parse(r"A \in \mathbb{R}^{2 \times 2}")];
+        let types = infer_symbolic_type_environment(&givens).unwrap();
+        let tex = r"\operatorname{Nul}(A^\top A) = \operatorname{Nul}(A)";
+        let negative = prepare_expression(&types, &parse(tex), VisitContext::negative()).unwrap();
+        assert!(!crate::formula::contains_quantifier(&negative.expression));
+        assert!(
+            !negative
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\left\{")
+        );
+        assert_eq!(negative.side_conditions.len(), 1);
+
+        let positive = prepare_expression(&types, &parse(tex), VisitContext::positive()).unwrap();
+        assert!(crate::to_z3::to_z3(&crate::Environment::default(), &positive).is_err());
+    }
+
+    #[test]
+    fn type_expression_is_the_true_predicate_universe_in_set_equality() {
+        let types = infer_symbolic_type_environment(&[]).unwrap();
+        let prepared = prepare_expression(
+            &types,
+            &parse(r"\left\{x \in \mathbb{R} : \operatorname{true}\right\} = \mathbb{R}"),
+            VisitContext::negative(),
+        )
+        .unwrap();
+        assert!(!crate::formula::contains_quantifier(&prepared.expression));
+        assert!(
+            prepared
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\operatorname{true}")
+        );
+    }
+
+    #[test]
+    fn set_equality_handles_distinct_binders_and_rejects_incompatible_universes() {
+        let types = infer_symbolic_type_environment(&[]).unwrap();
+        let equivalent = prepare_expression(
+            &types,
+            &parse(
+                r"\left\{x \in \mathbb{R} : x > 0\right\} = \left\{y \in \mathbb{R} : y > 0\right\}",
+            ),
+            VisitContext::negative(),
+        )
+        .unwrap();
+        assert!(!crate::formula::contains_quantifier(&equivalent.expression));
+
+        let incompatible = prepare_expression(
+            &types,
+            &parse(
+                r"\left\{x \in \mathbb{R} : x > 0\right\} = \left\{y \in \mathbb{R}^{2} : y = y\right\}",
+            ),
+            VisitContext::negative(),
+        );
+        assert!(matches!(
+            incompatible,
+            Err(TypeError::Invalid(
+                "set equality requires compatible element types"
+            ))
+        ));
+
+        let inequality = prepare_expression(
+            &types,
+            &parse(
+                r"\left\{x \in \mathbb{R} : x > 0\right\} \ne \left\{y \in \mathbb{R} : y > 0\right\}",
+            ),
+            VisitContext::negative(),
+        )
+        .unwrap();
+        assert!(crate::to_z3::to_z3(&crate::Environment::default(), &inequality).is_err());
     }
 
     #[test]

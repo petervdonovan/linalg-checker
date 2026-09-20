@@ -171,6 +171,7 @@ fn validate_universal_claim(
                         &spec.types,
                         &local_tracked,
                         run,
+                        false,
                     );
                     run.givens.truncate(scope_len);
                     let result = result?;

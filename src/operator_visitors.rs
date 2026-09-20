@@ -317,9 +317,12 @@ impl VisitMut<TypedMetadata> for QuantifierLowering {
         if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
             return;
         }
-        visit_mut::visit_expr_mut(self, context.clone(), node);
-        let RawExpr::Finop(op @ (Finop::Exists | Finop::Forall), expressions) = &node.raw else {
+        if !matches!(node.raw, RawExpr::Finop(Finop::Exists | Finop::Forall, _)) {
+            visit_mut::visit_expr_mut(self, context, node);
             return;
+        }
+        let RawExpr::Finop(op @ (Finop::Exists | Finop::Forall), expressions) = &node.raw else {
+            unreachable!()
         };
         let supported_polarity = match op {
             Finop::Exists => context.logical_polarity,

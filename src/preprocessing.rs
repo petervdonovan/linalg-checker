@@ -169,6 +169,15 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         let set_rewrites = sets.finish()?;
 
+        let mut set_equalities = crate::set_lowering::SetEqualityLowering::default();
+        visit_forest(
+            &mut set_equalities,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let set_equality_rewrites = set_equalities.finish()?;
+
         let mut quantifiers = QuantifierLowering::default();
         visit_forest(
             &mut quantifiers,
@@ -178,7 +187,7 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         let (quantifier_rewrites, conditions) = quantifiers.finish()?;
         merge_side_conditions(&mut side_conditions, conditions);
-        if set_rewrites > 0 || quantifier_rewrites > 0 {
+        if set_rewrites > 0 || set_equality_rewrites > 0 || quantifier_rewrites > 0 {
             // Resolve substituted syntax and newly introduced witnesses before
             // lowering other operators or running synthesis.
             continue;

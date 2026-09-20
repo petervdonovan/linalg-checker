@@ -374,6 +374,18 @@ Given:
 
 WTS $x + y \in \operatorname{Nul}(A)$
 
+# Gram matrix has the same null space
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+WTS $\operatorname{Nul}(A^\top A) = \operatorname{Nul}(A)$
+
+# Type expression is its full universe
+
+WTS $\left\{x \in \mathbb{R} : \operatorname{true}\right\} = \mathbb{R}$
+
 # Invertible matrix has full range
 
 Given:

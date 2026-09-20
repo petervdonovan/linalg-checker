@@ -155,7 +155,7 @@ WTS $U U^\top = I$
 
 The negation of $U U^\top = I$ is satisfied by:
 
-- $U = \begin{bmatrix}\frac{1}{4} \\ \left(\frac{15}{16}\right)^{\frac{1}{2}}\end{bmatrix}$
+- $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
 </details>
 
 # Logic-chain preprocessing
@@ -199,11 +199,9 @@ Given:
 WTS $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
 
 <details>
-<summary>⚠️ conditional</summary>
+<summary>✅ verified</summary>
 
-The expression $x^{\frac{1}{2}}$ may be undefined. For example:
-
-- $x = -1$
+No premises seemed necessary to show this.
 </details>
 
 # Assumed matrix square root
@@ -215,9 +213,9 @@ Given:
 WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
 <details>
-<summary>⚠️ conditional</summary>
+<summary>✅ verified</summary>
 
-The existence of $A^{\frac{1}{2}}$ was assumed without checking.
+No premises seemed necessary to show this.
 </details>
 
 # Dimensionally invalid matrix square root
@@ -965,6 +963,30 @@ This follows from the following facts:
 
 - $x \in \operatorname{Nul}(A)$
 - $y \in \operatorname{Nul}(A)$
+</details>
+
+# Gram matrix has the same null space
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+WTS $\operatorname{Nul}(A^\top A) = \operatorname{Nul}(A)$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
+# Type expression is its full universe
+
+WTS $\left\{x \in \mathbb{R} : \operatorname{true}\right\} = \mathbb{R}$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
 </details>
 
 # Invertible matrix has full range

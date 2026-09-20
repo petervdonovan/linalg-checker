@@ -241,6 +241,7 @@ impl Argument {
                 &mut tracked,
                 &mut scoped_statements,
                 &mut run,
+                false,
             )?;
             return Ok(());
         }
@@ -348,6 +349,7 @@ impl Argument {
                         &mut tracked,
                         &mut scoped_statements,
                         &mut run,
+                        false,
                     )?;
                 }
                 SatResult::Unknown => {
@@ -497,6 +499,7 @@ fn track_assertions(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_goal_contents(
     goal: &mut Goal,
     solver: &mut Solver,
@@ -505,6 +508,7 @@ fn validate_goal_contents(
     tracked: &mut Vec<TrackedFact>,
     scoped_statements: &mut Vec<Expr<()>>,
     run: &mut ValidationRun,
+    export_conclusion: bool,
 ) -> Result<ClaimResult, ArgumentValidationError> {
     let induction = match &goal.tactic {
         Some(Tactic::Induction { variable }) => {
@@ -576,6 +580,7 @@ fn validate_goal_contents(
                         retained: scoped_statements,
                     },
                     run,
+                    true,
                 )?;
                 if result.validated {
                     for (variable, ty) in &result.introduced_types {
@@ -716,6 +721,7 @@ fn validate_goal_contents(
             retained: scoped_statements,
         },
         run,
+        export_conclusion,
     )
 }
 
@@ -746,6 +752,7 @@ fn validate_nested_goal(
             &mut tracked,
             &mut scoped_statements,
             run,
+            true,
         )?;
         return Ok(result.validated.then(|| GoalExport {
             statement: exported_goal_expression(
@@ -893,6 +900,7 @@ fn validate_nested_goal(
                     &mut tracked,
                     &mut scoped_statements,
                     run,
+                    true,
                 );
                 run.givens.truncate(scope_len);
                 let result = result?;
@@ -1076,6 +1084,7 @@ fn try_existential_elimination(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_claim(
     sentence: &Expr<()>,
     validation: &mut StepValidationData,
@@ -1084,6 +1093,7 @@ fn validate_claim(
     symbolic_types: &SymbolicTypeEnvironment,
     proof: ProofContext<'_>,
     run: &mut ValidationRun,
+    require_positive: bool,
 ) -> Result<ClaimResult, ArgumentValidationError> {
     if let Some(result) = try_existential_elimination(
         sentence,
@@ -1120,9 +1130,11 @@ fn validate_claim(
         symbolic_types,
         proof.tracked,
         run,
+        require_positive,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_ordinary_claim(
     sentence: &Expr<()>,
     validation: &mut StepValidationData,
@@ -1131,6 +1143,7 @@ fn validate_ordinary_claim(
     symbolic_types: &SymbolicTypeEnvironment,
     tracked: &[TrackedFact],
     run: &mut ValidationRun,
+    require_positive: bool,
 ) -> Result<ClaimResult, ArgumentValidationError> {
     if let Err(error) = ensure_expression_bound(sentence, symbolic_types) {
         validation
@@ -1170,10 +1183,15 @@ fn validate_ordinary_claim(
             return Ok(ClaimResult::default());
         }
     };
+    let contextual_forms = if require_positive {
+        vec![positive.clone(), negative.clone()]
+    } else {
+        vec![negative.clone()]
+    };
     let extensions = expression_environment_extensions(
         &environment,
         symbolic_types,
-        &[positive.clone(), negative.clone()],
+        &contextual_forms,
         run.max_dimension,
     )?;
     validation.environments_exhaustive &= extensions.exhaustive;
@@ -1201,8 +1219,10 @@ fn validate_ordinary_claim(
             });
     if let Some(witness) = alternative_witness {
         let mut accepted = Vec::new();
-        for extension in extensions.environments {
-            accepted.push(lower_prepared_boolean(&extension, &positive)?);
+        if require_positive {
+            for extension in extensions.environments {
+                accepted.push(lower_prepared_boolean(&extension, &positive)?);
+            }
         }
         validation.checks.push(StepCheck::ExistentialWitness {
             assignments: witness.assignments.into_iter().collect(),
@@ -1263,25 +1283,32 @@ fn validate_ordinary_claim(
             SatResult::Unsat => {
                 let supporting_facts = core_facts(solver, tracked);
                 solver.pop(1);
-                solver.push();
-                assert_natural_assignment(solver, &extension);
-                let positive = lower_prepared_boolean(&extension, &positive)?;
-                let warnings = check_step_existence(
-                    solver,
-                    Rc::clone(&extension),
-                    symbolic_types,
-                    &positive.side_conditions,
-                )?;
-                solver.pop(1);
-                if warnings.is_empty() {
+                if require_positive {
+                    solver.push();
+                    assert_natural_assignment(solver, &extension);
+                    let positive = lower_prepared_boolean(&extension, &positive)?;
+                    let warnings = check_step_existence(
+                        solver,
+                        Rc::clone(&extension),
+                        symbolic_types,
+                        &positive.side_conditions,
+                    )?;
+                    solver.pop(1);
+                    if warnings.is_empty() {
+                        validation.checks.push(StepCheck::Unsat {
+                            environment: extension,
+                            supporting_facts,
+                        });
+                    } else {
+                        validation.checks.extend(warnings);
+                    }
+                    accepted.push(positive);
+                } else {
                     validation.checks.push(StepCheck::Unsat {
                         environment: extension,
                         supporting_facts,
                     });
-                } else {
-                    validation.checks.extend(warnings);
                 }
-                accepted.push(positive);
             }
         }
     }
