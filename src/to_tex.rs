@@ -130,6 +130,9 @@ fn expr_with_mode<Metadata>(
                     f,
                     e0,
                     (matches!(op, Binop::Power) && precedence(e0) < Precedence::Power)
+                        || (matches!(op, Binop::SetUnion) && precedence(e0) < Precedence::SetUnion)
+                        || (matches!(op, Binop::SetIntersection | Binop::SetDifference)
+                            && precedence(e0) < Precedence::SetIntersection)
                         || (matches!(op, Binop::ElementOf | Binop::InDomain)
                             && precedence(e0) <= Precedence::Comparison),
                     verbose,
@@ -139,7 +142,17 @@ fn expr_with_mode<Metadata>(
                 grouped_expr(
                     f,
                     e1,
-                    matches!(op, Binop::ElementOf | Binop::InDomain) && precedence(e1) <= Precedence::Comparison,
+                    (matches!(op, Binop::ElementOf | Binop::InDomain)
+                        && precedence(e1) <= Precedence::Comparison)
+                        || (matches!(op, Binop::SetUnion) && precedence(e1) < Precedence::SetUnion)
+                        || (matches!(op, Binop::SetIntersection)
+                            && (precedence(e1) < Precedence::SetIntersection
+                                || matches!(
+                                    e1.raw,
+                                    crate::RawExpr::Binop(Binop::SetDifference, _, _)
+                                )))
+                        || (matches!(op, Binop::SetDifference)
+                            && precedence(e1) <= Precedence::SetIntersection),
                     verbose,
                 )
             },
@@ -222,6 +235,8 @@ enum Precedence {
     Or,
     And,
     Comparison,
+    SetUnion,
+    SetIntersection,
     Sequence,
     Addition,
     Multiplication,
@@ -236,8 +251,11 @@ fn precedence<Metadata>(e: &Expr<Metadata>) -> Precedence {
         crate::RawExpr::LogicChain(_) => Precedence::Logic,
         crate::RawExpr::Finop(Finop::Or, _) => Precedence::Or,
         crate::RawExpr::Finop(Finop::And, _) => Precedence::And,
-        crate::RawExpr::CmpChain(_) | crate::RawExpr::Binop(Binop::ElementOf | Binop::InDomain, _, _) => {
-            Precedence::Comparison
+        crate::RawExpr::CmpChain(_)
+        | crate::RawExpr::Binop(Binop::ElementOf | Binop::InDomain, _, _) => Precedence::Comparison,
+        crate::RawExpr::Binop(Binop::SetUnion, _, _) => Precedence::SetUnion,
+        crate::RawExpr::Binop(Binop::SetIntersection | Binop::SetDifference, _, _) => {
+            Precedence::SetIntersection
         }
         crate::RawExpr::Finop(Finop::SeqLiteral, _) => Precedence::Sequence,
         crate::RawExpr::Finop(Finop::Plus, _) => Precedence::Addition,
@@ -378,6 +396,20 @@ fn binop<
             write!(f, ", ")?;
             e1(f)?;
             write!(f, r" \rangle")
+        }
+        Binop::SetIntersection | Binop::SetUnion | Binop::SetDifference => {
+            e0(f)?;
+            write!(
+                f,
+                "{}",
+                match op {
+                    Binop::SetIntersection => r" \cap ",
+                    Binop::SetUnion => r" \cup ",
+                    Binop::SetDifference => r" \setminus ",
+                    _ => unreachable!(),
+                }
+            )?;
+            e1(f)
         }
         Binop::Cast => {
             write!(f, r"\operatorname{{cast}}(")?;

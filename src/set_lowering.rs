@@ -1,12 +1,183 @@
 //! Exact elimination of direct membership in typed set comprehensions.
 
 use crate::{
-    Binop, Cmp, Expr, Finop, Logic, LogicChain, RawExpr, TypeExpr, Variable,
+    Binop, Cmp, Expr, Finop, Logic, LogicChain, Monop, RawExpr, TypeExpr, Variable,
     expression_utils::all_variables,
     formula::substitute_free_variable,
     type_resolver::{MaybeTyped, TypeError, TypedMetadata},
     visit_mut::{self, VisitContext, VisitMut},
 };
+
+fn set_algebra_operator(op: Binop) -> bool {
+    matches!(
+        op,
+        Binop::SetIntersection | Binop::SetUnion | Binop::SetDifference
+    )
+}
+
+#[derive(Default)]
+pub struct SetAlgebraMembershipLowering {
+    rewrites: usize,
+}
+
+impl SetAlgebraMembershipLowering {
+    pub fn finish(self) -> usize {
+        self.rewrites
+    }
+}
+
+impl VisitMut<TypedMetadata> for SetAlgebraMembershipLowering {
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
+        if let RawExpr::Binop(Binop::ElementOf, subject, set) = &node.raw
+            && let RawExpr::Binop(op, left, right) = &set.raw
+            && set_algebra_operator(*op)
+        {
+            let left_membership: Expr<()> = Expr::new(RawExpr::Binop(
+                Binop::ElementOf,
+                subject.with_default_metadata(),
+                set_operand(left),
+            ));
+            let right_membership: Expr<()> = Expr::new(RawExpr::Binop(
+                Binop::ElementOf,
+                subject.with_default_metadata(),
+                set_operand(right),
+            ));
+            let raw = match op {
+                Binop::SetIntersection => {
+                    RawExpr::Finop(Finop::And, vec![left_membership, right_membership])
+                }
+                Binop::SetUnion => {
+                    RawExpr::Finop(Finop::Or, vec![left_membership, right_membership])
+                }
+                Binop::SetDifference => RawExpr::Finop(
+                    Finop::And,
+                    vec![
+                        left_membership,
+                        Expr::new(RawExpr::Monop(Monop::Not, right_membership)),
+                    ],
+                ),
+                _ => unreachable!(),
+            };
+            *node = Expr::new(raw).with_default_metadata();
+            self.rewrites += 1;
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context, node);
+    }
+}
+
+#[derive(Default)]
+pub struct SetAlgebraComprehensionLowering {
+    rewrites: usize,
+    error: Option<TypeError>,
+}
+
+impl SetAlgebraComprehensionLowering {
+    pub fn finish(self) -> Result<usize, TypeError> {
+        self.error.map_or(Ok(self.rewrites), Err)
+    }
+}
+
+impl VisitMut<TypedMetadata> for SetAlgebraComprehensionLowering {
+    fn visit_expr_mut(&mut self, context: VisitContext, node: &mut Expr<TypedMetadata>) {
+        if self.error.is_some() || matches!(node.raw, RawExpr::SetComprehension { .. }) {
+            return;
+        }
+        visit_mut::visit_expr_mut(self, context, node);
+        let RawExpr::Binop(op, left, right) = &node.raw else {
+            return;
+        };
+        if !set_algebra_operator(*op) {
+            return;
+        }
+        let (
+            Some((left_binder, left_domain, left_predicate)),
+            Some((right_binder, right_domain, right_predicate)),
+        ) = (comprehension_operand(left), comprehension_operand(right))
+        else {
+            return;
+        };
+        match crate::type_resolver::same_type_structure(&left_domain, &right_domain) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.error = Some(TypeError::Invalid(
+                    "set algebra requires compatible element types",
+                ));
+                return;
+            }
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        }
+        let used = all_variables([left, right]);
+        let mut binder = Variable::new("x");
+        while used.contains(&binder) {
+            binder.annotations.push(crate::Annotation::Prime);
+        }
+        let subject = Expr::new(RawExpr::Variable(binder.clone()));
+        let left_predicate = substitute_free_variable(&left_predicate, &left_binder, &subject);
+        let right_predicate = substitute_free_variable(&right_predicate, &right_binder, &subject);
+        let domain_check = Expr::new(RawExpr::Binop(
+            Binop::InDomain,
+            subject,
+            Expr::new(RawExpr::Type(right_domain)),
+        ));
+        let combined = match op {
+            Binop::SetIntersection => Expr::new(RawExpr::Finop(
+                Finop::And,
+                vec![left_predicate, right_predicate],
+            )),
+            Binop::SetUnion => Expr::new(RawExpr::Finop(
+                Finop::Or,
+                vec![left_predicate, right_predicate],
+            )),
+            Binop::SetDifference => Expr::new(RawExpr::Finop(
+                Finop::And,
+                vec![
+                    left_predicate,
+                    Expr::new(RawExpr::Monop(Monop::Not, right_predicate)),
+                ],
+            )),
+            _ => unreachable!(),
+        };
+        let mut predicate: Expr<TypedMetadata> =
+            Expr::new(RawExpr::Finop(Finop::And, vec![domain_check, combined]))
+                .with_default_metadata();
+        predicate.get_mut().unwrap().meta.put_type(TypeExpr::Bool);
+        *node = Expr::with_metadata(
+            TypedMetadata::default(),
+            RawExpr::SetComprehension {
+                variable: binder,
+                domain: left_domain.with_default_metadata(),
+                predicate,
+            },
+        );
+        self.rewrites += 1;
+    }
+}
+
+fn comprehension_operand(
+    expression: &Expr<TypedMetadata>,
+) -> Option<(Variable, TypeExpr<()>, Expr<()>)> {
+    match &expression.raw {
+        RawExpr::SetComprehension {
+            variable,
+            domain,
+            predicate,
+        } => Some((
+            variable.clone(),
+            domain.with_default_metadata(),
+            predicate.with_default_metadata(),
+        )),
+        RawExpr::Type(domain) => Some((
+            Variable::new("x"),
+            domain.with_default_metadata(),
+            Expr::new(RawExpr::BoolLiteral(true)),
+        )),
+        _ => None,
+    }
+}
 
 #[derive(Default)]
 pub struct SetEqualityLowering {
@@ -36,12 +207,11 @@ impl VisitMut<TypedMetadata> for SetEqualityLowering {
             return;
         };
         let left = &chain.start;
-        let left_set = comprehension(left, right);
-        let right_set = comprehension(right, left);
-        let (
-            Some((left_binder, left_domain, left_predicate)),
-            Some((right_binder, right_domain, right_predicate)),
-        ) = (left_set, right_set)
+        if !representable_set(left) || !representable_set(right) {
+            return;
+        }
+        let (Some(left_domain), Some(right_domain)) =
+            (set_element_type(left), set_element_type(right))
         else {
             return;
         };
@@ -65,29 +235,40 @@ impl VisitMut<TypedMetadata> for SetEqualityLowering {
             binder.annotations.push(crate::Annotation::Prime);
         }
         let binder_expression = Expr::new(RawExpr::Variable(binder.clone()));
-        let left_predicate =
-            substitute_free_variable(&left_predicate, &left_binder, &binder_expression);
-        let right_predicate =
-            substitute_free_variable(&right_predicate, &right_binder, &binder_expression);
         let declaration = Expr::new(RawExpr::Binop(
             Binop::ElementOf,
             binder_expression.clone(),
             Expr::new(RawExpr::Type(left_domain.clone())),
         ));
-        let right_domain_check = Expr::new(RawExpr::Binop(
-            Binop::InDomain,
+        let left_membership = Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            binder_expression.clone(),
+            set_operand(left),
+        ));
+        let right_membership = Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
             binder_expression,
-            Expr::new(RawExpr::Type(right_domain)),
+            set_operand(right),
         ));
         let iff = Expr::new(RawExpr::LogicChain(LogicChain {
-            start: left_predicate,
-            assertions: vec![(Logic::Iff, right_predicate)],
+            start: left_membership,
+            assertions: vec![(Logic::Iff, right_membership)],
         }));
         *node = Expr::new(RawExpr::Finop(
             Finop::Forall,
             vec![
                 declaration,
-                Expr::new(RawExpr::Finop(Finop::And, vec![right_domain_check, iff])),
+                Expr::new(RawExpr::Finop(
+                    Finop::And,
+                    vec![
+                        Expr::new(RawExpr::Binop(
+                            Binop::InDomain,
+                            Expr::new(RawExpr::Variable(binder.clone())),
+                            Expr::new(RawExpr::Type(right_domain)),
+                        )),
+                        iff,
+                    ],
+                )),
             ],
         ))
         .with_default_metadata();
@@ -95,31 +276,39 @@ impl VisitMut<TypedMetadata> for SetEqualityLowering {
     }
 }
 
-fn comprehension(
-    expression: &Expr<TypedMetadata>,
-    other: &Expr<TypedMetadata>,
-) -> Option<(Variable, TypeExpr<()>, Expr<()>)> {
-    match &expression.raw {
-        RawExpr::SetComprehension {
-            variable,
-            domain,
-            predicate,
-        } => Some((
-            variable.clone(),
-            domain.with_default_metadata(),
-            predicate.with_default_metadata(),
-        )),
-        RawExpr::Type(domain)
-            if matches!(other.raw, RawExpr::SetComprehension { .. })
-                && matches!(domain, TypeExpr::Real | TypeExpr::Matrix(_, _)) =>
-        {
-            Some((
-                Variable::new("x"),
-                domain.with_default_metadata(),
-                Expr::new(RawExpr::BoolLiteral(true)),
-            ))
-        }
+fn set_element_type(expression: &Expr<TypedMetadata>) -> Option<TypeExpr<()>> {
+    if let RawExpr::Type(ty) = &expression.raw {
+        return Some(ty.with_default_metadata());
+    }
+    match expression.meta.get_type().ok()? {
+        TypeExpr::Set(element) => Some(*element),
         _ => None,
+    }
+}
+
+fn representable_set(expression: &Expr<TypedMetadata>) -> bool {
+    matches!(
+        expression.raw,
+        RawExpr::SetComprehension { .. }
+            | RawExpr::Type(_)
+            | RawExpr::EmptySet
+            | RawExpr::Monop(Monop::Nul | Monop::Range | Monop::SetLiteral, _)
+            | RawExpr::Binop(
+                Binop::SetIntersection | Binop::SetUnion | Binop::SetDifference,
+                _,
+                _
+            )
+    )
+}
+
+fn set_operand(expression: &Expr<TypedMetadata>) -> Expr<()> {
+    match &expression.raw {
+        RawExpr::Type(domain) => Expr::new(RawExpr::SetComprehension {
+            variable: Variable::new("x"),
+            domain: domain.with_default_metadata(),
+            predicate: Expr::new(RawExpr::BoolLiteral(true)),
+        }),
+        _ => expression.with_default_metadata(),
     }
 }
 
@@ -537,6 +726,86 @@ mod tests {
         )
         .unwrap();
         assert!(crate::to_z3::to_z3(&crate::Environment::default(), &inequality).is_err());
+    }
+
+    #[test]
+    fn set_algebra_distributes_membership_and_combines_comprehensions() {
+        let intersection = prepare(
+            r"z \in \left(\mathbb{R} \cap \{x, y\}\right)",
+            &[
+                r"x \in \mathbb{R}",
+                r"y \in \mathbb{R}",
+                r"z \in \mathbb{R}",
+            ],
+        )
+        .unwrap();
+        let rendered = intersection.expression.as_latex().to_string();
+        assert!(!rendered.contains(r"\cap"), "{rendered}");
+        assert!(rendered.contains(r"\operatorname{true}"), "{rendered}");
+
+        let union = prepare(
+            r"z \in \left(\{x\} \cup \{y\}\right)",
+            &[
+                r"x \in \mathbb{R}",
+                r"y \in \mathbb{R}",
+                r"z \in \mathbb{R}",
+            ],
+        )
+        .unwrap();
+        let rendered = union.expression.as_latex().to_string();
+        assert!(rendered.contains(r"\lor"), "{rendered}");
+        assert!(!rendered.contains(r"\cup"), "{rendered}");
+
+        let difference = prepare(
+            r"x \in \left(\{x, y\} \setminus \{y\}\right)",
+            &[r"x \in \mathbb{R}", r"y \in \mathbb{R}"],
+        )
+        .unwrap();
+        assert!(
+            !difference
+                .expression
+                .as_latex()
+                .to_string()
+                .contains(r"\setminus")
+        );
+
+        let combined = prepare(
+            r"\left\{x \in \mathbb{R} : x > 0\right\} \cap \left\{y \in \mathbb{R} : y < 2\right\}",
+            &[],
+        )
+        .unwrap();
+        let rendered = combined.expression.as_latex().to_string();
+        assert!(rendered.contains(r"\left\{"), "{rendered}");
+        assert!(rendered.contains(r"\land"), "{rendered}");
+        assert!(!rendered.contains(r"\cap"), "{rendered}");
+
+        let types = infer_symbolic_type_environment(&[
+            parse(r"S \in \operatorname{Set}(\mathbb{R})"),
+            parse(r"T \in \operatorname{Set}(\mathbb{R})"),
+        ])
+        .unwrap();
+        let opaque =
+            prepare_expression(&types, &parse(r"S \cap T"), VisitContext::positive()).unwrap();
+        assert!(crate::to_z3::to_z3(&crate::Environment::default(), &opaque).is_err());
+    }
+
+    #[test]
+    fn set_difference_exposes_negative_range_polarity() {
+        let prepared = prepare(
+            r"b \in \left(\{b\} \setminus \operatorname{Range}(A)\right)",
+            &[r"A \in \mathbb{R}^{m \times n}", r"b \in \mathbb{R}^{m}"],
+        )
+        .unwrap();
+        let rendered = prepared.expression.as_latex().to_string();
+        assert!(!rendered.contains("Range"), "{rendered}");
+        assert!(!crate::formula::contains_quantifier(&prepared.expression));
+        assert_eq!(prepared.side_conditions.len(), 1);
+        assert!(
+            prepared.side_conditions[0]
+                .introduced_variable
+                .name
+                .contains("counterexample")
+        );
     }
 
     #[test]

@@ -267,6 +267,9 @@ pub enum Binop {
     Power,
     // dotprod omitted
     InnerProd,
+    SetIntersection,
+    SetUnion,
+    SetDifference,
     Cast,
     ElementOf,
     /// Internal comprehension domain requirement; incompatible dimensions are errors.

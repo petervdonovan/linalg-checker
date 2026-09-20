@@ -1123,6 +1123,20 @@ WTS $x \notin \emptyset$
 No premises seemed necessary to show this.
 </details>
 
+# Range and transposed null space intersect trivially
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+WTS $\operatorname{Nul}(A^\top) \cap \operatorname{Range}(A) = \left\{\mathbb{0}\right\}$
+
+<details>
+<summary>✅ verified</summary>
+
+No premises seemed necessary to show this.
+</details>
+
 # Positive existential skolemization
 
 Given:

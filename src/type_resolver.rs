@@ -165,6 +165,9 @@ impl OperatorTypeRules {
         rules.register_monop(Monop::Not, boolean_identity_rule);
         rules.register_monop(Monop::Transpose, transpose_rule);
         rules.register_monop(Monop::Diag, diagonal_rule);
+        rules.register_monop(Monop::Nul, null_space_rule);
+        rules.register_monop(Monop::Range, range_space_rule);
+        rules.register_monop(Monop::SetLiteral, set_literal_rule);
         for op in [
             Monop::Trace,
             Monop::Det,
@@ -178,6 +181,9 @@ impl OperatorTypeRules {
         rules.register_binop(Binop::Div, division_rule);
         rules.register_binop(Binop::Power, first_value_rule);
         rules.register_binop(Binop::InnerProd, real_result_rule);
+        rules.register_binop(Binop::SetIntersection, set_algebra_rule);
+        rules.register_binop(Binop::SetUnion, set_algebra_rule);
+        rules.register_binop(Binop::SetDifference, set_algebra_rule);
         rules.register_binop(Binop::Cast, cast_rule);
         rules.register_binop(Binop::ElementOf, bool_result_rule);
         rules.register_binop(Binop::InDomain, bool_result_rule);
@@ -848,6 +854,57 @@ fn matrix_identity_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, Ty
         matrix @ TypeExpr::Matrix(_, _) => Ok(matrix),
         _ => Err(TypeError::Invalid("operation requires a matrix")),
     }
+}
+
+fn null_space_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    match exactly(operands, 1)?[0].value()? {
+        TypeExpr::Matrix(_, columns) => Ok(TypeExpr::Set(Box::new(TypeExpr::Matrix(
+            columns,
+            natural(1),
+        )))),
+        _ => Err(TypeError::Invalid("Nul requires a matrix operand")),
+    }
+}
+
+fn range_space_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    match exactly(operands, 1)?[0].value()? {
+        TypeExpr::Matrix(rows, _) => {
+            Ok(TypeExpr::Set(Box::new(TypeExpr::Matrix(rows, natural(1)))))
+        }
+        _ => Err(TypeError::Invalid("Range requires a matrix operand")),
+    }
+}
+
+fn set_literal_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let element = match exactly(operands, 1)?[0].value()? {
+        TypeExpr::Seq(element, _) => {
+            let RawExpr::Type(element) = &element.raw else {
+                return Err(TypeError::Invalid(
+                    "sequence element must be a type expression",
+                ));
+            };
+            element.clone()
+        }
+        ty => ty,
+    };
+    Ok(TypeExpr::Set(Box::new(element)))
+}
+
+fn set_algebra_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    let operands = exactly(operands, 2)?;
+    let element = |operand: &TypeRuleOperand| match operand {
+        TypeRuleOperand::Value(TypeExpr::Set(element)) => Ok((**element).clone()),
+        TypeRuleOperand::TypeExpression(ty) => Ok(ty.clone()),
+        _ => Err(TypeError::Invalid("set algebra requires set operands")),
+    };
+    let left = element(&operands[0])?;
+    let right = element(&operands[1])?;
+    if !same_type_structure(&left, &right)? {
+        return Err(TypeError::Invalid(
+            "set algebra requires compatible element types",
+        ));
+    }
+    Ok(TypeExpr::Set(Box::new(left)))
 }
 
 fn transpose_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {

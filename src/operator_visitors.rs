@@ -408,7 +408,10 @@ impl VisitMut<TypedMetadata> for QuantifierLowering {
         };
         let condition = SideCondition {
             introduced_variable: introduced_variable.clone(),
-            display_name: source.as_latex().to_string(),
+            // Generated quantifiers can contain unresolved symbolic dimensions
+            // until environment enumeration. Their diagnostic name must remain
+            // renderable during that symbolic phase.
+            display_name: source.as_latex_verbose().to_string(),
             introduced_type,
             active_ranges: context.active_ranges.clone(),
             defining_assertions: Vec::new(),

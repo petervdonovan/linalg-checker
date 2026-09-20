@@ -150,6 +150,35 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         rewrites += logic.rewrites();
 
+        let mut set_equalities = crate::set_lowering::SetEqualityLowering::default();
+        visit_forest(
+            &mut set_equalities,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let set_equality_rewrites = set_equalities.finish()?;
+        if set_equality_rewrites > 0 {
+            // Extensionality introduces a biconditional. Restart so logic
+            // normalization expands it before polarity-aware visitors run.
+            continue;
+        }
+
+        let mut algebra_memberships = crate::set_lowering::SetAlgebraMembershipLowering::default();
+        visit_forest(
+            &mut algebra_memberships,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let algebra_membership_rewrites = algebra_memberships.finish();
+        if algebra_membership_rewrites > 0 {
+            // Membership distribution creates fresh membership expressions.
+            // Give type resolution another iteration before surface set
+            // operators inspect their operands.
+            continue;
+        }
+
         let mut set_operators = SetOperatorLowering::default();
         visit_forest(
             &mut set_operators,
@@ -160,6 +189,16 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         let set_operator_rewrites = set_operators.finish()?;
         rewrites += set_operator_rewrites;
 
+        let mut algebra_comprehensions =
+            crate::set_lowering::SetAlgebraComprehensionLowering::default();
+        visit_forest(
+            &mut algebra_comprehensions,
+            context.clone(),
+            &mut expression,
+            &mut side_conditions,
+        );
+        let algebra_comprehension_rewrites = algebra_comprehensions.finish()?;
+
         let mut sets = crate::set_lowering::SetMembershipLowering::default();
         visit_forest(
             &mut sets,
@@ -168,15 +207,6 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
             &mut side_conditions,
         );
         let set_rewrites = sets.finish()?;
-
-        let mut set_equalities = crate::set_lowering::SetEqualityLowering::default();
-        visit_forest(
-            &mut set_equalities,
-            context.clone(),
-            &mut expression,
-            &mut side_conditions,
-        );
-        let set_equality_rewrites = set_equalities.finish()?;
 
         let mut quantifiers = QuantifierLowering::default();
         visit_forest(
@@ -187,7 +217,7 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         );
         let (quantifier_rewrites, conditions) = quantifiers.finish()?;
         merge_side_conditions(&mut side_conditions, conditions);
-        if set_rewrites > 0 || set_equality_rewrites > 0 || quantifier_rewrites > 0 {
+        if algebra_comprehension_rewrites > 0 || set_rewrites > 0 || quantifier_rewrites > 0 {
             // Resolve substituted syntax and newly introduced witnesses before
             // lowering other operators or running synthesis.
             continue;

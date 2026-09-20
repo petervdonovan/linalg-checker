@@ -163,7 +163,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr<()>, FromTexError> {
-        let start = self.parse_sequence_literal()?;
+        let start = self.parse_set_union()?;
         self.skip_ignorable();
         let current = self.nodes.get(self.position);
         if matches!(self.current_symbol_text(), Some(r"\in" | r"\notin"))
@@ -173,7 +173,7 @@ impl<'a> Cursor<'a> {
                 self.current_symbol_text() == Some(r"\notin") || current.is_some_and(is_not_in);
             self.position += 1;
             self.skip_ignorable();
-            let right = self.parse_sequence_literal()?;
+            let right = self.parse_set_union()?;
             self.skip_ignorable();
             if self.current_comparison_operator().is_some()
                 || matches!(self.current_symbol_text(), Some(r"\in" | r"\notin"))
@@ -195,7 +195,7 @@ impl<'a> Cursor<'a> {
 
         while let Some(op) = self.current_comparison_operator() {
             self.position += 1;
-            assertions.push((op, self.parse_sequence_literal()?));
+            assertions.push((op, self.parse_set_union()?));
         }
 
         if assertions.is_empty() {
@@ -203,6 +203,37 @@ impl<'a> Cursor<'a> {
         } else {
             Ok(Expr::new(RawExpr::CmpChain(CmpChain { start, assertions })))
         }
+    }
+
+    fn parse_set_union(&mut self) -> Result<Expr<()>, FromTexError> {
+        let mut expression = self.parse_set_intersection()?;
+        while self.current_symbol_text() == Some(r"\cup") {
+            self.position += 1;
+            expression = Expr::new(RawExpr::Binop(
+                Binop::SetUnion,
+                expression,
+                self.parse_set_intersection()?,
+            ));
+        }
+        Ok(expression)
+    }
+
+    fn parse_set_intersection(&mut self) -> Result<Expr<()>, FromTexError> {
+        let mut expression = self.parse_sequence_literal()?;
+        loop {
+            let op = match self.current_symbol_text() {
+                Some(r"\cap") => Binop::SetIntersection,
+                Some(r"\setminus") => Binop::SetDifference,
+                _ => break,
+            };
+            self.position += 1;
+            expression = Expr::new(RawExpr::Binop(
+                op,
+                expression,
+                self.parse_sequence_literal()?,
+            ));
+        }
+        Ok(expression)
     }
 
     fn parse_sequence_literal(&mut self) -> Result<Expr<()>, FromTexError> {
@@ -1477,6 +1508,23 @@ mod tests {
         assert_eq!(
             round_trip(r"\bigvee_{i=1}^{n}P_i").unwrap(),
             r"\bigvee_{i=1}^{n}P_{i}"
+        );
+    }
+
+    #[test]
+    fn parses_set_algebra_with_standard_precedence() {
+        assert_eq!(round_trip(r"S \cup T \cap U").unwrap(), r"S \cup T \cap U");
+        assert_eq!(
+            round_trip(r"(S \cup T) \cap U").unwrap(),
+            r"\left(S \cup T\right) \cap U"
+        );
+        assert_eq!(
+            round_trip(r"S \setminus (T \cup U)").unwrap(),
+            r"S \setminus \left(T \cup U\right)"
+        );
+        assert_eq!(
+            round_trip(r"S \cap (T \setminus U)").unwrap(),
+            r"S \cap \left(T \setminus U\right)"
         );
     }
 

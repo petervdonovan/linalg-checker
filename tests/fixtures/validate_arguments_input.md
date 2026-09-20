@@ -442,6 +442,14 @@ Given:
 
 WTS $x \notin \emptyset$
 
+# Range and transposed null space intersect trivially
+
+Given:
+
+- $A \in \mathbb{R}^{2 \times 2}$
+
+WTS $\operatorname{Nul}(A^\top) \cap \operatorname{Range}(A) = \left\{\mathbb{0}\right\}$
+
 # Positive existential skolemization
 
 Given:

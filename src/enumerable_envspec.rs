@@ -1359,6 +1359,15 @@ impl OperatorCompatibilityVisitor<'_, '_> {
                 }
             }
             RawExpr::Binop(Binop::InnerProd, _, _) => {}
+            RawExpr::Binop(
+                Binop::SetIntersection | Binop::SetUnion | Binop::SetDifference,
+                _,
+                _,
+            ) => {
+                return Err(ShapeError::Unsupported(
+                    "set algebra remains after preparation".to_owned(),
+                ));
+            }
             RawExpr::Finop(Finop::Plus, expressions) => {
                 let (first, rest) = expressions
                     .split_first()
