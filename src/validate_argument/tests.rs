@@ -36,6 +36,78 @@ fn pending_argument_round_trips() {
 }
 
 #[test]
+fn proof_sentence_ignores_surrounding_commentary() {
+    let commented = r#"# Commented proof
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x = x$
+
+1. **By reflexivity,** $x = x$, *as required.*
+2. This step has commentary after the claim: $x = x$ and nothing else."#;
+    let uncommented = r#"# Commented proof
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x = x$
+
+1. $x = x$
+2. $x = x$"#;
+
+    assert_eq!(
+        Argument::parse_str(commented),
+        Argument::parse_str(uncommented)
+    );
+}
+
+#[test]
+fn nested_proof_sentence_ignores_surrounding_commentary() {
+    let argument = Argument::parse_str(
+        r#"# Nested commented proof
+
+WTS $x = x$
+
+1. WTS $x = x$
+
+   1. Inside the child goal, $x = x$.
+2. Outside the child goal, $x = x$."#,
+    );
+    let ArgumentItem::Goal(child) = &argument.root.steps[0] else {
+        panic!("expected a nested goal")
+    };
+    assert!(matches!(child.steps[0], ArgumentItem::Sentence(_)));
+    assert!(matches!(argument.root.steps[1], ArgumentItem::Sentence(_)));
+}
+
+#[test]
+#[should_panic(expected = "proof sentence must contain exactly one inline math expression")]
+fn proof_sentence_rejects_multiple_math_spans() {
+    Argument::parse_str(
+        r#"# Ambiguous sentence
+
+WTS $x = x$
+
+1. The two claims $x = x$ and $x = 0$ are ambiguous."#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "proof sentence must contain exactly one inline math expression")]
+fn proof_sentence_rejects_commentary_without_math() {
+    Argument::parse_str(
+        r#"# Missing claim
+
+WTS $x = x$
+
+1. This sentence contains commentary but no mathematical claim."#,
+    );
+}
+
+#[test]
 fn induction_tactic_round_trips_and_establishes_a_goal() {
     let input = r#"# Reflexivity by induction
 

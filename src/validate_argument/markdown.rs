@@ -195,14 +195,46 @@ fn parse_argument_item(node: &Node) -> ArgumentItem {
     let Node::ListItem(ListItem { children, .. }) = node else {
         panic!("argument item must be a list item")
     };
-    if matches!(children.first(), Some(Node::Paragraph(Paragraph { children, .. })) if matches!(children.first(), Some(Node::InlineMath(_))))
-    {
+    if !is_goal_item(children.first()) {
         return ArgumentItem::Sentence(ArgumentStep {
-            sentence: parse_expression_item(node),
+            sentence: parse_step_expression_item(node),
             validation: StepValidationData::default(),
         });
     }
     ArgumentItem::Goal(parse_goal(children))
+}
+
+fn is_goal_item(node: Option<&Node>) -> bool {
+    is_wts_paragraph(node) || paragraph_is_label(node, "Given:")
+}
+
+fn is_wts_paragraph(node: Option<&Node>) -> bool {
+    matches!(
+        node,
+        Some(Node::Paragraph(Paragraph { children, .. }))
+            if matches!(children.first(), Some(Node::Text(text)) if text.value == "WTS ")
+    )
+}
+
+fn parse_step_expression_item(node: &Node) -> Expr<()> {
+    let Node::ListItem(ListItem { children, .. }) = node else {
+        panic!("expression list contains a non-list-item node")
+    };
+    let [Node::Paragraph(Paragraph { children, .. })] = children.as_slice() else {
+        panic!("proof sentence must contain one paragraph")
+    };
+    let math = children
+        .iter()
+        .filter_map(|child| match child {
+            Node::InlineMath(math) => Some(math),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [math] = math.as_slice() else {
+        panic!("proof sentence must contain exactly one inline math expression")
+    };
+    let parsed = ratex_parser::parse(&math.value).expect("invalid TeX in Markdown expression");
+    crate::from_tex::expr(&parsed).expect("unsupported TeX in Markdown expression")
 }
 
 fn goal_nodes(goal: &Goal, expressions: &[Expr<()>]) -> Vec<Node> {
