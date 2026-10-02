@@ -15,6 +15,7 @@ pub mod operator_visitors;
 pub mod preprocessing;
 pub mod rewriting_test_utils;
 pub mod set_lowering;
+pub mod timing;
 pub mod to_tex;
 pub mod to_z3;
 mod type_expr;

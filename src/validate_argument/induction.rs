@@ -1,4 +1,5 @@
 use super::*;
+use crate::timing::Timings;
 
 pub(super) struct InductionObligations {
     pub(super) base: Expr<()>,
@@ -59,6 +60,7 @@ pub(super) fn infer_induction_start(
     parent_types: &SymbolicTypeEnvironment,
     enclosing: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<Option<u64>, ArgumentValidationError> {
     for value in 0..=max_dimension {
         let replacement = Expr::new(RawExpr::NatLiteral(value));
@@ -74,11 +76,12 @@ pub(super) fn infer_induction_start(
             Err(ArgumentValidationError::Shape(ShapeError::InvalidTyping(_))) => continue,
             Err(error) => return Err(error),
         };
-        let prepared_givens = match prepare_givens(&types, &givens, enclosing, max_dimension) {
-            Ok(prepared) => prepared,
-            Err(TypeError::Invalid(_)) => continue,
-            Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
-        };
+        let prepared_givens =
+            match prepare_givens(&types, &givens, enclosing, max_dimension, timings) {
+                Ok(prepared) => prepared,
+                Err(TypeError::Invalid(_)) => continue,
+                Err(error) => return Err(ModelFindingError::from(ToZ3Error::from(error)).into()),
+            };
         let mut scope = enclosing.to_vec();
         scope.extend(prepared_givens.iter().cloned());
         let prepared_conclusion = match prepare_expression_with_premises(
@@ -87,6 +90,7 @@ pub(super) fn infer_induction_start(
             POSITIVE,
             &scope,
             max_dimension,
+            timings,
         ) {
             Ok(prepared) => prepared,
             Err(TypeError::Invalid(_)) => continue,
@@ -100,6 +104,7 @@ pub(super) fn infer_induction_start(
             std::slice::from_ref(&prepared_conclusion),
             &[],
             max_dimension,
+            timings,
         ) {
             Ok(iterator) => iterator,
             Err(ShapeError::Unsat(_) | ShapeError::InvalidTyping(_)) => continue,
@@ -130,11 +135,23 @@ pub(super) fn validate_tactic_fallback(
     let (mut types, _) = extend_symbolic_types(parent_types, &ordinary_givens)?;
     let Tactic::Induction { variable } = goal.tactic.as_ref().unwrap();
     types.types.insert(variable.clone(), TypeExpr::Nat);
-    let prepared_givens = prepare_givens(&types, &ordinary_givens, &run.givens, run.max_dimension)
-        .map_err(ToZ3Error::from)
-        .map_err(ModelFindingError::from)?;
-    let extensions =
-        goal_environment_extensions(&base, &types, &prepared_givens, &[], run.max_dimension)?;
+    let prepared_givens = prepare_givens(
+        &types,
+        &ordinary_givens,
+        &run.givens,
+        run.max_dimension,
+        &run.timings,
+    )
+    .map_err(ToZ3Error::from)
+    .map_err(ModelFindingError::from)?;
+    let extensions = goal_environment_extensions(
+        &base,
+        &types,
+        &prepared_givens,
+        &[],
+        run.max_dimension,
+        &run.timings,
+    )?;
     goal.validation.environments_exhaustive &= extensions.exhaustive;
     if extensions.environments.is_empty() {
         goal.validation
@@ -149,6 +166,7 @@ pub(super) fn validate_tactic_fallback(
     let mut all_validated = true;
     for extension in extensions.environments {
         let extension = Rc::new(extension);
+        let _environment_time = run.timings.environment(&extension, &types);
         solver.push();
         assert_natural_assignment(solver, &extension);
         let mut local_tracked = tracked.to_vec();
@@ -163,7 +181,7 @@ pub(super) fn validate_tactic_fallback(
                 alternatives: prepared.expression.meta.alternatives().to_vec(),
             });
         }
-        if matches!(solver.check(), SatResult::Sat) {
+        if matches!(run.timings.check(solver, "z3_real_ms"), SatResult::Sat) {
             let scope_len = run.givens.len();
             run.givens.extend(prepared_givens.iter().cloned());
             let result = validate_claim(

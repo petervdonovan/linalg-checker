@@ -20,11 +20,19 @@ fn argument_input_is_canonical_markdown() {
 #[test]
 fn validates_arguments_matching_committed_markdown() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    let timings = arguments.validate(
+        MAX_DIMENSION,
+        &linalg_sandbox::timing::Timings::new("", MAX_DIMENSION),
+    );
+    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/validate_arguments_output.md");
+    std::fs::write(
+        output.with_extension("timing.csv"),
+        linalg_sandbox::timing::to_csv(timings).expect("failed to serialize timings"),
+    )
+    .expect("failed to write timings");
     let actual = arguments.to_string();
     if std::env::var_os("UPDATE_EXPECT").is_some() {
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/validate_arguments_output.md");
         std::fs::write(output, format!("{actual}\n"))
             .expect("failed to update validate_arguments_output.md");
         return;
@@ -43,7 +51,7 @@ fn is_verified(validation: &StepValidationData) -> bool {
 #[test]
 fn validates_nested_proof_of_monotone_squaring() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    arguments.validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default());
     let argument = arguments
         .0
         .iter()
@@ -75,7 +83,7 @@ fn validates_nested_proof_of_monotone_squaring() {
 #[test]
 fn validates_nested_induction_obligations() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    arguments.validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default());
     let argument = arguments
         .0
         .iter()
@@ -109,7 +117,7 @@ fn validates_nested_induction_obligations() {
 #[test]
 fn validates_scoped_vector_induction_from_dimension_one() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    arguments.validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default());
     let argument = arguments
         .0
         .iter()
@@ -145,7 +153,7 @@ fn validates_scoped_vector_induction_from_dimension_one() {
 #[test]
 fn validates_quantified_steps_and_goal_evidence() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    arguments.validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default());
 
     let quantified = arguments
         .0
@@ -215,7 +223,7 @@ fn validates_quantified_steps_and_goal_evidence() {
 #[test]
 fn validates_determinant_of_a_diagonal_sequence() {
     let mut arguments = Arguments::parse_str(INPUT);
-    arguments.validate(MAX_DIMENSION);
+    arguments.validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default());
     let argument = arguments
         .0
         .iter()

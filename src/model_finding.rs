@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::{
     error::Error,
     fmt::{self, Display},
@@ -319,6 +320,7 @@ pub(crate) enum CounterexampleSearch {
 }
 
 pub(crate) struct CounterexampleProgram {
+    timings: Timings,
     symbolic_types: SymbolicTypeEnvironment,
     prepared_program: Vec<PreparedExpression>,
     required_context: Vec<PreparedExpression>,
@@ -335,8 +337,10 @@ impl CounterexampleProgram {
         required_context: Vec<PreparedExpression>,
         dimension_assumptions: Vec<PreparedExpression>,
         max_dimension: u64,
+        timings: &Timings,
     ) -> Self {
         Self {
+            timings: timings.clone(),
             symbolic_types: symbolic_types.clone(),
             prepared_program: premises.to_vec(),
             required_context,
@@ -362,6 +366,7 @@ impl CounterexampleProgram {
             &self.required_context,
             &[],
             self.max_dimension,
+            &self.timings,
         )
         .map_err(ModelFindingError::from)
     }
@@ -381,6 +386,7 @@ impl CounterexampleProgram {
             solver.assert(assertion.expression);
         }
         Ok(FixedEnvironmentCounterexampleChecker {
+            timings: self.timings.clone(),
             solver,
             environment,
             symbolic_types: &self.symbolic_types,
@@ -389,6 +395,7 @@ impl CounterexampleProgram {
 }
 
 pub(crate) struct FixedEnvironmentCounterexampleChecker<'a> {
+    timings: Timings,
     solver: Solver,
     environment: &'a Environment,
     symbolic_types: &'a SymbolicTypeEnvironment,
@@ -418,7 +425,7 @@ impl FixedEnvironmentCounterexampleChecker<'_> {
             .map(|claim| claim.expression.clone())
             .collect::<Vec<_>>();
         self.solver.assert(Bool::and(&expressions).not());
-        let result = match self.solver.check() {
+        let result = match self.timings.check(&self.solver, "z3_real_ms") {
             SatResult::Sat => CounterexampleSearch::Found,
             SatResult::Unknown => CounterexampleSearch::Unknown,
             SatResult::Unsat => CounterexampleSearch::NotFound,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::timing::Timings;
 
 pub(super) fn validate_quantified_claim(
     sentence: &Expr<()>,
@@ -42,7 +43,13 @@ pub(super) fn validate_quantified_claim(
     }
     match spec.kind {
         QuantifierKind::Exists => {
-            match find_existential_witness(&spec, symbolic_types, &environment, &inherited_facts) {
+            match find_existential_witness(
+                &spec,
+                symbolic_types,
+                &environment,
+                &inherited_facts,
+                &run.timings,
+            ) {
                 Some(witness) => {
                     validation.checks.push(StepCheck::ExistentialWitness {
                         assignments: witness.assignments.into_iter().collect(),
@@ -96,6 +103,7 @@ fn validate_universal_claim(
         &ordinary_premises,
         &run.givens,
         run.max_dimension,
+        &run.timings,
     )
     .map_err(ToZ3Error::from)
     .map_err(ModelFindingError::from)?;
@@ -111,6 +119,7 @@ fn validate_universal_claim(
                 POSITIVE,
                 &scope,
                 run.max_dimension,
+                &run.timings,
             )
             .map_err(ToZ3Error::from)
             .map_err(ModelFindingError::from)?,
@@ -122,12 +131,14 @@ fn validate_universal_claim(
         &prepared_premises,
         prepared_body.as_ref(),
         run.max_dimension,
+        &run.timings,
     )?;
     validation.environments_exhaustive &= extensions.exhaustive;
     let mut feasible = 0;
     let mut all_validated = true;
     for extension in extensions.environments {
         let extension = Rc::new(extension);
+        let _environment_time = run.timings.environment(&extension, &spec.types);
         solver.push();
         assert_natural_assignment(solver, &extension);
         let mut local_tracked = proof.tracked.to_vec();
@@ -144,7 +155,7 @@ fn validate_universal_claim(
                 alternatives: prepared.expression.meta.alternatives().to_vec(),
             });
         }
-        match solver.check() {
+        match run.timings.check(solver, "z3_real_ms") {
             SatResult::Sat => {
                 feasible += 1;
                 if is_quantifier(&spec.body) {
@@ -352,6 +363,7 @@ pub(super) fn find_existential_witness(
     active_types: &SymbolicTypeEnvironment,
     environment: &Environment,
     facts: &[Expr<()>],
+    timings: &Timings,
 ) -> Option<WitnessMatch> {
     let requirements = spec
         .premises
@@ -408,7 +420,7 @@ pub(super) fn find_existential_witness(
         spec.introduced
             .iter()
             .all(|v| candidate.assignments.contains_key(v))
-            && witness_dimensions_match(spec, environment, candidate)
+            && witness_dimensions_match(spec, environment, candidate, timings)
     })
 }
 
@@ -416,6 +428,7 @@ fn witness_dimensions_match(
     spec: &QuantifierSpec,
     environment: &Environment,
     witness: &WitnessMatch,
+    timings: &Timings,
 ) -> bool {
     let result: Result<bool, ArgumentValidationError> = (|| {
         let prepare = |expression: &Expr<()>| {
@@ -446,6 +459,7 @@ fn witness_dimensions_match(
             &spec.types,
             &assumptions,
             &required,
+            timings,
         )?;
         Ok(nonce_relationships_match(&mut query, &witness.nonce_pairs))
     })();
@@ -528,7 +542,13 @@ mod tests {
             .iter()
             .map(|expression| prepare_expression(&types, expression, POSITIVE).unwrap())
             .collect::<Vec<_>>();
-        crate::enumerable_envspec::dimension_equivalence_query(&types, &prepared, &[]).unwrap()
+        crate::enumerable_envspec::dimension_equivalence_query(
+            &types,
+            &prepared,
+            &[],
+            &Timings::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -594,8 +614,14 @@ mod tests {
             traced_equation("a", Finop::Times, ImplicitDimension::fresh()),
         ];
         assert!(
-            find_existential_witness(&spec, &active, &Environment::default(), &independent_facts,)
-                .is_none()
+            find_existential_witness(
+                &spec,
+                &active,
+                &Environment::default(),
+                &independent_facts,
+                &Timings::default()
+            )
+            .is_none()
         );
 
         let shared_dimension = ImplicitDimension::fresh();
@@ -604,8 +630,14 @@ mod tests {
             traced_equation("a", Finop::Times, shared_dimension),
         ];
         assert!(
-            find_existential_witness(&spec, &active, &Environment::default(), &shared_facts,)
-                .is_some()
+            find_existential_witness(
+                &spec,
+                &active,
+                &Environment::default(),
+                &shared_facts,
+                &Timings::default()
+            )
+            .is_some()
         );
     }
 }

@@ -16,7 +16,15 @@ fn validate_corpus(name: &str) -> (Arguments, String) {
     let fixture_path = manifest.join(format!("examples/validate_argument/{name}.output.md"));
     let input = std::fs::read_to_string(&input_path).expect("failed to read example corpus");
     let mut arguments = Arguments::parse_str(&input);
-    arguments.validate(MAX_DIMENSION);
+    let timings = arguments.validate(
+        MAX_DIMENSION,
+        &linalg_sandbox::timing::Timings::new("", MAX_DIMENSION),
+    );
+    std::fs::write(
+        fixture_path.with_extension("timing.csv"),
+        linalg_sandbox::timing::to_csv(timings).expect("failed to serialize timings"),
+    )
+    .expect("failed to write timings");
     let actual = arguments.to_string();
 
     if std::env::var_os("UPDATE_EXPECT").is_some() {

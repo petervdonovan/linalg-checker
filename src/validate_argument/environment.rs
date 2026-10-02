@@ -1,4 +1,5 @@
 use super::*;
+use crate::timing::Timings;
 
 pub(super) fn extend_symbolic_types(
     parent: &SymbolicTypeEnvironment,
@@ -150,6 +151,7 @@ pub(super) fn goal_environment_extensions(
     givens: &[PreparedExpression],
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let declarations = fixed_assignment_declarations(base, symbolic_types)?;
     let assumptions = declarations
@@ -162,6 +164,7 @@ pub(super) fn goal_environment_extensions(
         &assumptions,
         contextual_expressions,
         max_dimension,
+        timings,
     ) {
         Ok(iterator) => iterator,
         Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
@@ -186,6 +189,7 @@ pub(super) fn quantifier_environment_extensions(
     premises: &[PreparedExpression],
     required_body: Option<&PreparedExpression>,
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let declarations = fixed_assignment_declarations(base, symbolic_types)?;
     let assumptions = declarations
@@ -200,6 +204,7 @@ pub(super) fn quantifier_environment_extensions(
         required,
         &[],
         max_dimension,
+        timings,
     ) {
         Ok(iterator) => iterator,
         Err(ShapeError::Unsat(_) | ShapeError::InvalidTyping(_)) => {
@@ -223,6 +228,7 @@ pub(super) fn expression_environment_extensions(
     symbolic_types: &SymbolicTypeEnvironment,
     steps: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
     let declarations = fixed_assignment_declarations(base, symbolic_types)?;
     let iterator = match extract_prepared_environment_iterator(
@@ -230,6 +236,7 @@ pub(super) fn expression_environment_extensions(
         &declarations,
         steps,
         max_dimension,
+        timings,
     ) {
         Ok(iterator) => iterator,
         Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
@@ -321,6 +328,7 @@ pub(super) fn check_step_existence(
     environment: Rc<Environment>,
     symbolic_types: &SymbolicTypeEnvironment,
     side_conditions: &[LoweredSideCondition],
+    timings: &Timings,
 ) -> Result<Vec<StepCheck>, ModelFindingError> {
     let mut checks = Vec::new();
     for condition in side_conditions {
@@ -340,7 +348,7 @@ pub(super) fn check_step_existence(
                 for assertion in assertions {
                     solver.assert(z3_boolean(assertion)?);
                 }
-                let result = match solver.check() {
+                let result = match timings.check(solver, "z3_real_ms") {
                     SatResult::Unsat => None,
                     SatResult::Unknown => Some(StepCheck::Unknown {
                         environment: Some(Rc::clone(&environment)),

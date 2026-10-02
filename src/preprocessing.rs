@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::collections::HashMap;
 
 use crate::{
@@ -62,7 +63,7 @@ pub fn prepare_expression<Metadata, Lookup: TypeLookup>(
     expression: &Expr<Metadata>,
     context: VisitContext,
 ) -> Result<PreparedExpression, TypeError> {
-    prepare_expression_inner(types, expression, context, None)
+    prepare_expression_inner(types, expression, context, None, &Timings::default())
 }
 
 /// Prepare using fully prepared, ellipsis-free givens as interpretation premises.
@@ -72,12 +73,14 @@ pub fn prepare_expression_with_premises<Metadata>(
     context: VisitContext,
     premises: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<PreparedExpression, TypeError> {
     prepare_expression_inner(
         types,
         expression,
         context,
         Some((types, premises, max_dimension)),
+        timings,
     )
 }
 
@@ -87,6 +90,7 @@ pub fn prepare_givens(
     givens: &[Expr<()>],
     enclosing: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<Vec<PreparedExpression>, TypeError> {
     let mut scope = enclosing.to_vec();
     for given in givens {
@@ -96,6 +100,7 @@ pub fn prepare_givens(
             VisitContext::positive(),
             &scope,
             max_dimension,
+            timings,
         )?;
         scope.push(prepared);
     }
@@ -111,6 +116,7 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
         &[PreparedExpression],
         u64,
     )>,
+    timings: &Timings,
 ) -> Result<PreparedExpression, TypeError> {
     let mut expression: Expr<TypedMetadata> = expression.with_default_metadata();
     let core_rules = OperatorTypeRules::core();
@@ -269,6 +275,7 @@ fn prepare_expression_inner<Metadata, Lookup: TypeLookup>(
                 &synthesis_types,
                 premises,
                 max_dimension,
+                timings,
             );
             visit_forest(
                 &mut ellipses,
@@ -492,6 +499,7 @@ impl<Lookup: TypeLookup> TypeLookup for ExtendedTypeLookup<'_, Lookup> {
 
 #[cfg(test)]
 mod tests {
+    use crate::timing::Timings;
     use ratex_parser::parse;
 
     use super::prepare_expression;
@@ -741,8 +749,15 @@ mod tests {
     ) -> Result<super::PreparedExpression, crate::type_resolver::TypeError> {
         let givens = givens.iter().map(|tex| expression(tex)).collect::<Vec<_>>();
         let types = infer_symbolic_type_environment(&givens).unwrap();
-        let premises = super::prepare_givens(&types, &givens, &[], 3)?;
-        super::prepare_expression_with_premises(&types, &expression(tex), POSITIVE, &premises, 3)
+        let premises = super::prepare_givens(&types, &givens, &[], 3, &Timings::default())?;
+        super::prepare_expression_with_premises(
+            &types,
+            &expression(tex),
+            POSITIVE,
+            &premises,
+            3,
+            &Timings::default(),
+        )
     }
 
     #[test]
@@ -867,15 +882,21 @@ mod tests {
             expression(r"c \in \operatorname{Seq}_{n}(\mathbb{R})"),
         ];
         let types = infer_symbolic_type_environment(&givens).unwrap();
-        let premises = super::prepare_givens(&types, &givens, &[], 2).unwrap();
+        let premises = super::prepare_givens(&types, &givens, &[], 2, &Timings::default()).unwrap();
         let inner = expression(r"c_1, \ldots, c_n");
         let outer = Expr::new(RawExpr::Finop(
             Finop::SeqLiteral,
             vec![inner.clone(), Expr::new(RawExpr::Ellipsis), inner],
         ));
-        let prepared =
-            super::prepare_expression_with_premises(&types, &outer, POSITIVE, &premises, 2)
-                .unwrap();
+        let prepared = super::prepare_expression_with_premises(
+            &types,
+            &outer,
+            POSITIVE,
+            &premises,
+            2,
+            &Timings::default(),
+        )
+        .unwrap();
         assert!(!crate::ellipsis_elimination::contains_ellipses(
             &prepared.expression
         ));
@@ -892,7 +913,7 @@ mod tests {
             expression(r"c \in \operatorname{Seq}_{n}(\mathbb{R})"),
         ];
         let types = infer_symbolic_type_environment(&givens).unwrap();
-        let premises = super::prepare_givens(&types, &givens, &[], 2).unwrap();
+        let premises = super::prepare_givens(&types, &givens, &[], 2, &Timings::default()).unwrap();
         let mut main = expression("0 = 0").with_default_metadata();
         let mut conditions = vec![crate::visit_mut::SideCondition {
             introduced_variable: crate::Variable::new("root"),
@@ -907,7 +928,12 @@ mod tests {
         }];
         let rules = crate::type_resolver::OperatorTypeRules::core();
         super::resolve_forest(&types, &rules, POSITIVE, &mut main, &mut conditions).unwrap();
-        let mut pass = crate::ellipsis_elimination::EllipsisElimination::new(&types, &premises, 2);
+        let mut pass = crate::ellipsis_elimination::EllipsisElimination::new(
+            &types,
+            &premises,
+            2,
+            &Timings::default(),
+        );
         super::visit_forest(&mut pass, POSITIVE, &mut main, &mut conditions);
         assert_eq!(pass.finish().unwrap(), 1);
         super::resolve_forest(&types, &rules, POSITIVE, &mut main, &mut conditions).unwrap();

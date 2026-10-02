@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -217,11 +218,19 @@ fn reset_validation(validation: &mut StepValidationData, max_dimension: u64) {
 }
 
 impl Argument {
-    pub fn validate(&mut self, max_dimension: u64) -> Result<(), ArgumentValidationError> {
+    pub fn validate(
+        &mut self,
+        max_dimension: u64,
+        timings: &Timings,
+    ) -> Result<(), ArgumentValidationError> {
+        let _total = timings.scope("total_ms");
+        let before = timings.scope("before_preprocessing_complete_ms");
         self.error = None;
         self.root.reset(max_dimension);
 
         if self.root.tactic.is_some() {
+            drop(before);
+            let _after = timings.scope("after_preprocessing_complete_ms");
             set_exhaustive(&mut self.root, true);
             self.root.validation.givens_feasible = true;
             let environment = Rc::new(Environment::default());
@@ -229,6 +238,7 @@ impl Argument {
             let mut tracked = Vec::new();
             let mut scoped_statements = Vec::new();
             let mut run = ValidationRun {
+                timings: timings.clone(),
                 max_dimension,
                 next_tracker: 0,
                 givens: Vec::new(),
@@ -269,15 +279,24 @@ impl Argument {
         let symbolic_types = analyzed.symbolic_types;
         let ordinary_givens = analyzed.ordinary;
         let retained_givens = analyzed.retained;
-        let prepared_givens = prepare_givens(&symbolic_types, &ordinary_givens, &[], max_dimension)
-            .map_err(crate::to_z3::ToZ3Error::from)
-            .map_err(ModelFindingError::from)?;
+        let prepared_givens = prepare_givens(
+            &symbolic_types,
+            &ordinary_givens,
+            &[],
+            max_dimension,
+            timings,
+        )
+        .map_err(crate::to_z3::ToZ3Error::from)
+        .map_err(ModelFindingError::from)?;
 
+        drop(before);
+        let _after = timings.scope("after_preprocessing_complete_ms");
         let environments = match extract_prepared_environment_iterator(
             &symbolic_types,
             &prepared_givens,
             &[],
             max_dimension,
+            timings,
         ) {
             Ok(environments) => environments,
             Err(ShapeError::Unsat(_)) => {
@@ -305,6 +324,7 @@ impl Argument {
         let mut satisfiable_given_count = 0;
         let mut given_unknown = false;
         let mut run = ValidationRun {
+            timings: timings.clone(),
             max_dimension,
             next_tracker: 0,
             givens: prepared_givens.clone(),
@@ -322,6 +342,7 @@ impl Argument {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let _environment_time = timings.environment(&environment, &symbolic_types);
             let mut solver = Solver::new();
             assert_natural_assignment(&solver, &environment);
             let mut tracked = Vec::new();
@@ -336,7 +357,7 @@ impl Argument {
                     alternatives: prepared.expression.meta.alternatives().to_vec(),
                 });
             }
-            match solver.check() {
+            match timings.check(&solver, "z3_real_ms") {
                 SatResult::Sat => {
                     satisfiable_given_count += 1;
                     self.root.validation.givens_feasible = true;
@@ -375,12 +396,25 @@ impl Argument {
 }
 
 impl Arguments {
-    pub fn validate(&mut self, max_dimension: u64) {
+    /// The supplied collector controls whether this collection is timed.
+    /// Returned collectors are independent records, one per argument.
+    pub fn validate(&mut self, max_dimension: u64, timings: &Timings) -> Vec<Timings> {
+        let mut records = Vec::with_capacity(self.0.len());
         for argument in &mut self.0 {
-            if let Err(error) = argument.validate(max_dimension) {
+            let record = if timings.enabled() {
+                Timings::new(&argument.name, max_dimension)
+            } else {
+                let mut record = Timings::default();
+                record.test_case = argument.name.clone();
+                record.max_dimension = max_dimension;
+                record
+            };
+            if let Err(error) = argument.validate(max_dimension, &record) {
                 argument.error = Some(error);
             }
+            records.push(record);
         }
+        records
     }
 }
 
@@ -399,6 +433,7 @@ struct GoalExport {
 }
 
 struct ValidationRun {
+    timings: Timings,
     /// Prepared lexical givens only; accepted proof steps never enter this scope.
     givens: Vec<PreparedExpression>,
     max_dimension: u64,
@@ -538,6 +573,7 @@ fn validate_goal_contents(
                     symbolic_types,
                     &run.givens,
                     run.max_dimension,
+                    &run.timings,
                 )? {
                     Some(start) => Some((start, InductionObligations::new(goal, variable, start))),
                     None => {
@@ -799,6 +835,7 @@ fn validate_nested_goal(
         &ordinary_givens,
         &run.givens,
         run.max_dimension,
+        &run.timings,
     )
     .map_err(ToZ3Error::from)
     .map_err(ModelFindingError::from)
@@ -838,6 +875,7 @@ fn validate_nested_goal(
                 POSITIVE,
                 &scope,
                 run.max_dimension,
+                &run.timings,
             )
             .map_err(ModelFindingError::from_type);
             // The normal claim check records preparation failures locally.
@@ -854,6 +892,7 @@ fn validate_nested_goal(
         &environment_givens,
         implication_context,
         run.max_dimension,
+        &run.timings,
     )?;
     and_exhaustive(goal, extensions.exhaustive);
     if extensions.environments.is_empty() {
@@ -866,6 +905,7 @@ fn validate_nested_goal(
     let mut exported = Vec::new();
     for extension in extensions.environments {
         let extension = Rc::new(extension);
+        let _environment_time = run.timings.environment(&extension, &symbolic_types);
         solver.push();
         assert_natural_assignment(solver, &extension);
         let mut tracked = parent.tracked.to_vec();
@@ -887,7 +927,7 @@ fn validate_nested_goal(
             assert_definitions(solver, &assertion.side_conditions)?;
             solver.assert(assertion.expression);
         }
-        match solver.check() {
+        match run.timings.check(solver, "z3_real_ms") {
             SatResult::Sat => {
                 feasible += 1;
                 let scope_len = run.givens.len();
@@ -1065,6 +1105,7 @@ fn try_existential_elimination(
                 POSITIVE,
                 &run.givens,
                 run.max_dimension,
+                &run.timings,
             )
             .map_err(ModelFindingError::from_type)?;
             let lowered = lower_prepared_boolean(environment, &prepared)?;
@@ -1157,6 +1198,7 @@ fn validate_ordinary_claim(
         POSITIVE,
         &run.givens,
         run.max_dimension,
+        &run.timings,
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1173,6 +1215,7 @@ fn validate_ordinary_claim(
         NEGATIVE,
         &run.givens,
         run.max_dimension,
+        &run.timings,
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1193,6 +1236,7 @@ fn validate_ordinary_claim(
         symbolic_types,
         &contextual_forms,
         run.max_dimension,
+        &run.timings,
     )?;
     validation.environments_exhaustive &= extensions.exhaustive;
     if extensions.environments.is_empty() {
@@ -1215,12 +1259,13 @@ fn validate_ordinary_claim(
                 if !matches!(spec.kind, quantifier::QuantifierKind::Exists) {
                     return None;
                 }
-                find_existential_witness(&spec, symbolic_types, &environment, &facts)
+                find_existential_witness(&spec, symbolic_types, &environment, &facts, &run.timings)
             });
     if let Some(witness) = alternative_witness {
         let mut accepted = Vec::new();
         if require_positive {
             for extension in extensions.environments {
+                let _environment_time = run.timings.environment(&extension, symbolic_types);
                 accepted.push(lower_prepared_boolean(&extension, &positive)?);
             }
         }
@@ -1240,6 +1285,7 @@ fn validate_ordinary_claim(
     let mut accepted = Vec::new();
     for extension in extensions.environments {
         let extension = Rc::new(extension);
+        let _environment_time = run.timings.environment(&extension, symbolic_types);
         let negative_assertion = match lower_prepared_boolean(&extension, &negative) {
             Ok(assertion) => assertion,
             Err(error) => {
@@ -1254,7 +1300,7 @@ fn validate_ordinary_claim(
         assert_natural_assignment(solver, &extension);
         assert_definitions(solver, &negative_assertion.side_conditions)?;
         solver.assert(negative_assertion.expression.not());
-        match solver.check() {
+        match run.timings.check(solver, "z3_real_ms") {
             SatResult::Sat => {
                 let model = solver
                     .get_model()
@@ -1292,6 +1338,7 @@ fn validate_ordinary_claim(
                         Rc::clone(&extension),
                         symbolic_types,
                         &positive.side_conditions,
+                        &run.timings,
                     )?;
                     solver.pop(1);
                     if warnings.is_empty() {

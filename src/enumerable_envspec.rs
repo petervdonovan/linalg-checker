@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
@@ -220,6 +221,7 @@ type SymbolicTypes = BTreeMap<Variable, TypeExpr<()>>;
 type NaturalSymbols = BTreeMap<NaturalParameter, Int>;
 
 pub struct EnvironmentIterator {
+    timings: Timings,
     solver: Solver,
     parameters: Vec<(NaturalParameter, Int)>,
     parameter_values: Vec<Int>,
@@ -276,6 +278,7 @@ pub fn extract_environment_iterator_with_context<AssumptionMetadata, ContextMeta
         &assumptions,
         &contextual_expressions,
         max_dimension,
+        &Timings::default(),
     )
 }
 
@@ -284,6 +287,7 @@ pub fn extract_prepared_environment_iterator(
     assumptions: &[PreparedExpression],
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<EnvironmentIterator, ShapeError> {
     extract_prepared_environment_iterator_with_required_context(
         symbolic_types,
@@ -291,6 +295,7 @@ pub fn extract_prepared_environment_iterator(
         &[],
         contextual_expressions,
         max_dimension,
+        timings,
     )
 }
 
@@ -300,6 +305,7 @@ pub(crate) fn extract_prepared_environment_iterator_with_required_context(
     required_context: &[PreparedExpression],
     contextual_expressions: &[PreparedExpression],
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<EnvironmentIterator, ShapeError> {
     let inputs =
         collect_prepared_dimension_inputs(assumptions, required_context, contextual_expressions)?;
@@ -310,10 +316,12 @@ pub(crate) fn extract_prepared_environment_iterator_with_required_context(
         inputs.contextual,
         max_dimension,
         inputs.hidden_types,
+        timings,
     )
 }
 
 pub(crate) struct DimensionEquivalenceQuery {
+    timings: Timings,
     solver: Solver,
     natural_symbols: NaturalSymbols,
 }
@@ -335,7 +343,7 @@ impl DimensionEquivalenceQuery {
             .get(&NaturalParameter::ImplicitDimension(right))?;
         self.solver.push();
         self.solver.assert(left.eq(right).not());
-        let result = self.solver.check();
+        let result = self.timings.check(&self.solver, "z3_integer_ms");
         self.solver.pop(1);
         match result {
             SatResult::Unsat => Some(true),
@@ -349,6 +357,7 @@ pub(crate) fn dimension_equivalence_query(
     symbolic_types: &SymbolicTypeEnvironment,
     assumptions: &[PreparedExpression],
     required_context: &[PreparedExpression],
+    timings: &Timings,
 ) -> Result<DimensionEquivalenceQuery, ShapeError> {
     let inputs = collect_prepared_dimension_inputs(assumptions, required_context, &[])?;
     let system = build_dimension_constraint_system(
@@ -358,8 +367,10 @@ pub(crate) fn dimension_equivalence_query(
         &inputs.contextual,
         &inputs.hidden_types,
         None,
+        timings,
     )?;
     Ok(DimensionEquivalenceQuery {
+        timings: timings.clone(),
         solver: system.solver,
         natural_symbols: system.natural_symbols,
     })
@@ -431,6 +442,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
     contextual_expressions: Vec<Expr<Metadata>>,
     max_dimension: u64,
     hidden_types: BTreeMap<Variable, TypeExpr<()>>,
+    timings: &Timings,
 ) -> Result<EnvironmentIterator, ShapeError> {
     let DimensionConstraintSystem {
         mut solver,
@@ -444,6 +456,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         &contextual_expressions,
         &hidden_types,
         Some(max_dimension),
+        timings,
     )?;
 
     let structural_dimensions = lower_structural_dimensions(&variable_types, &natural_symbols)?;
@@ -459,6 +472,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         &exhaustiveness_values,
         &dependent_dimension_cases,
         max_dimension,
+        timings,
     );
     let max_dimension_value = Int::from_u64(max_dimension);
     for value in &parameter_values {
@@ -478,6 +492,7 @@ fn extract_typed_environment_iterator_with_hidden<Metadata: MaybeTyped>(
         ShapeError::Unsupported("maximum natural-parameter sum overflows u64".to_owned())
     })?;
     let mut iterator = EnvironmentIterator {
+        timings: timings.clone(),
         solver,
         parameters,
         parameter_values,
@@ -507,6 +522,7 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
     contextual_expressions: &[Expr<Metadata>],
     hidden_types: &BTreeMap<Variable, TypeExpr<()>>,
     max_dimension: Option<u64>,
+    timings: &Timings,
 ) -> Result<DimensionConstraintSystem, ShapeError> {
     let hidden_variables = hidden_types.keys().cloned().collect::<BTreeSet<_>>();
     if let Some(collision) = hidden_variables
@@ -552,10 +568,10 @@ fn build_dimension_constraint_system<Metadata: MaybeTyped>(
         }
         run_dimension_constraint_visitors(&mut context, assumptions)?;
         run_dimension_constraint_visitors(&mut context, required_context)?;
-        check_base_constraints(context.solver)?;
+        check_base_constraints(context.solver, timings)?;
         context.mode = ConstraintMode::Contextual;
         run_dimension_constraint_visitors(&mut context, contextual_expressions)?;
-        check_contextual_constraints(context.solver)?;
+        check_contextual_constraints(context.solver, timings)?;
     }
 
     Ok(DimensionConstraintSystem {
@@ -571,6 +587,7 @@ fn dimension_bound_is_exhaustive(
     dimensions: &[Int],
     dependent_dimensions: &[(Bool, Int)],
     max_dimension: u64,
+    timings: &Timings,
 ) -> bool {
     if dimensions.is_empty() && dependent_dimensions.is_empty() {
         return true;
@@ -588,7 +605,7 @@ fn dimension_bound_is_exhaustive(
     );
     solver.push();
     solver.assert(Bool::or(&exceeds_bound));
-    let result = solver.check();
+    let result = timings.check(solver, "z3_integer_ms");
     solver.pop(1);
     matches!(result, SatResult::Unsat)
 }
@@ -708,8 +725,8 @@ fn assert_positive_structural_dimensions(
     Ok(())
 }
 
-fn check_base_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
-    match solver.check() {
+fn check_base_constraints(solver: &mut Solver, timings: &Timings) -> Result<(), ShapeError> {
+    match timings.check(solver, "z3_integer_ms") {
         SatResult::Sat => Ok(()),
         SatResult::Unsat => Err(ShapeError::Unsat(
             "the permanent shape constraints have no model".to_owned(),
@@ -722,8 +739,8 @@ fn check_base_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
     }
 }
 
-fn check_contextual_constraints(solver: &mut Solver) -> Result<(), ShapeError> {
-    match solver.check() {
+fn check_contextual_constraints(solver: &mut Solver, timings: &Timings) -> Result<(), ShapeError> {
+    match timings.check(solver, "z3_integer_ms") {
         SatResult::Sat => Ok(()),
         SatResult::Unsat => Err(ShapeError::InvalidTyping(
             "contextual implicit matrix dimensions are inconsistent".to_owned(),
@@ -783,7 +800,7 @@ impl Iterator for EnvironmentIterator {
                 return None;
             }
             self.dimensionless_yielded = true;
-            return match self.solver.check() {
+            return match self.timings.check(&self.solver, "z3_integer_ms") {
                 SatResult::Sat => Some(
                     self.environment_from_model(
                         &self
@@ -808,7 +825,7 @@ impl Iterator for EnvironmentIterator {
         }
 
         loop {
-            match self.solver.check() {
+            match self.timings.check(&self.solver, "z3_integer_ms") {
                 SatResult::Sat => {
                     let model = self
                         .solver
@@ -2145,6 +2162,7 @@ fn model_u64(model: &z3::Model, expression: &Int) -> Result<u64, ShapeError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::timing::Timings;
     use std::collections::BTreeSet;
 
     use ratex_parser::parse;
@@ -2199,7 +2217,8 @@ mod tests {
             .iter()
             .map(|expression| prepare_expression(&types, expression, positive.clone()).unwrap())
             .collect::<Vec<_>>();
-        let mut query = dimension_equivalence_query(&types, &[], &unconstrained).unwrap();
+        let mut query =
+            dimension_equivalence_query(&types, &[], &unconstrained, &Timings::default()).unwrap();
         assert_eq!(
             query.necessarily_equal(left_dimension, right_dimension),
             Some(false)
@@ -2220,7 +2239,8 @@ mod tests {
             .iter()
             .map(|expression| prepare_expression(&types, expression, positive.clone()).unwrap())
             .collect::<Vec<_>>();
-        let mut query = dimension_equivalence_query(&types, &[], &constrained).unwrap();
+        let mut query =
+            dimension_equivalence_query(&types, &[], &constrained, &Timings::default()).unwrap();
         assert_eq!(
             query.necessarily_equal(left_dimension, right_dimension),
             Some(true)
@@ -2422,10 +2442,11 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let environments =
+            extract_prepared_environment_iterator(&types, &prepared, &[], 2, &Timings::default())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         assert_eq!(environments.len(), 2);
         assert!(environments.iter().all(|environment| {
             matches!(matrix_dimensions(&concrete_type(environment, &types, &Variable::new("A"))), Some((rows, cols)) if rows == cols)
@@ -2445,10 +2466,11 @@ mod tests {
                 prepare_expression(&types, expression, VisitContext::positive()).unwrap()
             })
             .collect::<Vec<_>>();
-        let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let environments =
+            extract_prepared_environment_iterator(&types, &prepared, &[], 2, &Timings::default())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         assert_eq!(
             environments
                 .iter()
@@ -2478,10 +2500,11 @@ mod tests {
         };
         let assertion = expression(r"\sum_{i=1}^{n}\det(A_i) = 0");
         let prepared = prepare_expression(&types, &assertion, VisitContext::positive()).unwrap();
-        let environments = extract_prepared_environment_iterator(&types, &[prepared], &[], 2)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let environments =
+            extract_prepared_environment_iterator(&types, &[prepared], &[], 2, &Timings::default())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         assert_eq!(environments.len(), 1);
         assert_eq!(natural(&environments[0], "n"), 1);
     }
@@ -2508,10 +2531,16 @@ mod tests {
                     .unwrap()
                 })
                 .collect::<Vec<_>>();
-            let environments = extract_prepared_environment_iterator(&types, &prepared, &[], 2)
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
+            let environments = extract_prepared_environment_iterator(
+                &types,
+                &prepared,
+                &[],
+                2,
+                &Timings::default(),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
             assert_eq!(environments.len(), 2);
             assert!(environments.iter().all(|environment| {
                 matches!(

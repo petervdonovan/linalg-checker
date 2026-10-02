@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::fmt::{self, Display};
 
 use markdown::mdast::{Heading, Node, Root};
@@ -175,6 +176,7 @@ impl TestCase<NotSolvedYet> {
             &prepared_assumptions,
             &prepared_sentences,
             max_dimension,
+            &Timings::default(),
         ) {
             Err(ShapeError::Unsat(_)) => ModelOrUnsat::Unsat,
             Err(ShapeError::Unknown(_)) => ModelOrUnsat::Unknown,

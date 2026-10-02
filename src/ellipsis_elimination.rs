@@ -1,5 +1,6 @@
 //! Rewrite pass over expressions that eliminates anchored range ellipses.
 
+use crate::timing::Timings;
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use z3::{
@@ -95,7 +96,8 @@ pub fn eliminate_ellipses<Metadata: Clone + Default>(
         )
         .resolve(&mut rewritten, VisitContext::positive())
         .map_err(ModelFindingError::from_type)?;
-        let mut pass = EllipsisElimination::new(&types, &premises, max_dimension);
+        let mut pass =
+            EllipsisElimination::new(&types, &premises, max_dimension, &Timings::default());
         pass.visit_expr_mut(VisitContext::positive(), &mut rewritten);
         pass.finish()?;
         output.push(if contains_ellipses(expression) {
@@ -154,6 +156,7 @@ fn has_anchor<Metadata>(expression: &Expr<Metadata>) -> bool {
 /// forest has run the preceding preparation passes. Only premises are asserted
 /// as evidence. Newly generated syntax is typed without re-entering synthesis.
 pub(crate) struct EllipsisElimination<'a> {
+    timings: Timings,
     types: &'a crate::type_resolver::SymbolicTypeEnvironment,
     premises: &'a [crate::preprocessing::PreparedExpression],
     max_dimension: u64,
@@ -166,8 +169,10 @@ impl<'a> EllipsisElimination<'a> {
         types: &'a crate::type_resolver::SymbolicTypeEnvironment,
         premises: &'a [crate::preprocessing::PreparedExpression],
         max_dimension: u64,
+        timings: &Timings,
     ) -> Self {
         Self {
+            timings: timings.clone(),
             types,
             premises,
             max_dimension,
@@ -227,6 +232,7 @@ impl VisitMut<crate::type_resolver::TypedMetadata> for EllipsisElimination<'_> {
                 self.premises,
                 &context,
                 self.max_dimension,
+                &self.timings,
             ) {
                 Ok(candidate) => {
                     *node = candidate.with_default_metadata();
@@ -244,6 +250,7 @@ fn synthesize(
     premises: &[crate::preprocessing::PreparedExpression],
     context: &VisitContext,
     max_dimension: u64,
+    timings: &Timings,
 ) -> Result<Expr<()>, EllipsisEliminationError> {
     let target = supported_target(std::slice::from_ref(expression))?;
     let mut symbolic_types = types.clone();
@@ -315,6 +322,7 @@ fn synthesize(
                 vec![prepared_candidate],
                 dimension_assumptions,
                 max_dimension,
+                timings,
             );
             let environments = match search.environments() {
                 Ok(environments) => environments,
@@ -351,7 +359,14 @@ fn synthesize(
                     candidate_valid = false;
                     break;
                 };
-                match validate_positionings(&target, endpoint_value, &index, body, &mut checker) {
+                match validate_positionings(
+                    &target,
+                    endpoint_value,
+                    &index,
+                    body,
+                    &mut checker,
+                    timings,
+                ) {
                     Ok(CounterexampleSearch::NotFound) => {}
                     Ok(CounterexampleSearch::Unknown) => {
                         saw_unknown = true;
@@ -491,6 +506,7 @@ fn validate_positionings(
     index: &Variable,
     body: &Expr<()>,
     checker: &mut FixedEnvironmentCounterexampleChecker<'_>,
+    timings: &Timings,
 ) -> Result<CounterexampleSearch, ModelFindingError> {
     let anchors = target.anchors();
     let positions = (0..anchors.len())
@@ -519,7 +535,7 @@ fn validate_positionings(
 
     let mut saw_unknown = false;
     loop {
-        match solver.check() {
+        match timings.check(&solver, "z3_integer_ms") {
             SatResult::Unsat => {
                 return Ok(if saw_unknown {
                     CounterexampleSearch::Unknown

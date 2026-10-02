@@ -1,3 +1,4 @@
+use crate::timing::Timings;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
@@ -126,7 +127,7 @@ WTS $n = n$ by induction on $n$
         Some(Tactic::Induction { ref variable }) if variable.name == "n"
     ));
 
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     assert!(
         argument
             .root
@@ -145,7 +146,7 @@ fn incomplete_induction_falls_back_to_bounded_validation() {
 
 WTS $n = n$ by induction on $n$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     let StepCheck::IncompleteSubgoals { expected } = argument
         .root
         .validation
@@ -187,7 +188,7 @@ fn tactic_bound_natural_appears_in_counterexamples() {
 
 WTS $n = 0$ by induction on $n$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     let StepCheck::Counterexample { model, .. } = argument
         .root
         .validation
@@ -218,7 +219,7 @@ WTS $q = q$ by induction on $q$
 
    WTS $q + 1 = q + 1$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
         StepCheck::Error { .. }
@@ -246,7 +247,7 @@ WTS $n = n$
 
 1. WTS $n = n$ by induction on $n$"#,
     );
-    collision.validate(2).unwrap();
+    collision.validate(2, &Timings::default()).unwrap();
     let ArgumentItem::Goal(nested) = &collision.root.steps[0] else {
         panic!("expected nested induction goal")
     };
@@ -260,7 +261,7 @@ WTS $n = n$
 
 WTS $0 = 0$ by induction on $n$"#,
     );
-    absent.validate(2).unwrap();
+    absent.validate(2, &Timings::default()).unwrap();
     assert!(matches!(
         absent.root.validation.checks[0],
         StepCheck::InvalidTactic { .. }
@@ -281,6 +282,7 @@ fn induction_start_uses_structural_and_given_constraints_not_truth() {
             &SymbolicTypeEnvironment::default(),
             &[],
             max_dimension,
+            &Timings::default(),
         )
         .unwrap()
     }
@@ -324,7 +326,7 @@ WTS $0 = 0$
 
    WTS $0 = 0$"#,
     );
-    argument.validate(1).unwrap();
+    argument.validate(1, &Timings::default()).unwrap();
     let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
         panic!("expected nested goal")
     };
@@ -344,7 +346,7 @@ WTS $\forall x \in \mathbb{R}, x x \ge 0$
 
 1. $\forall x \in \mathbb{R}, x x \ge 0$"#,
     );
-    argument.validate(1).unwrap();
+    argument.validate(1, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
         StepCheck::Unsat { .. }
@@ -359,7 +361,7 @@ WTS $\forall x \in \mathbb{R}, x x \ge 0$
 
 WTS $\forall x \in \mathbb{R}, x x > 0$"#,
     );
-    false_claim.validate(1).unwrap();
+    false_claim.validate(1, &Timings::default()).unwrap();
     let StepCheck::Counterexample { model, .. } = &false_claim.root.validation.checks[0] else {
         panic!("expected a universal counterexample")
     };
@@ -377,7 +379,7 @@ fn universal_naturals_are_bounded_and_empty_domains_are_inconclusive() {
 
 WTS $\forall n \in \mathbb{N}, n = n$"#,
     );
-    bounded.validate(2).unwrap();
+    bounded.validate(2, &Timings::default()).unwrap();
     assert!(
         bounded
             .root
@@ -393,7 +395,7 @@ WTS $\forall n \in \mathbb{N}, n = n$"#,
 
 WTS $\forall n > n, n = n$"#,
     );
-    vacuous.validate(2).unwrap();
+    vacuous.validate(2, &Timings::default()).unwrap();
     assert!(
         vacuous
             .root
@@ -411,7 +413,7 @@ fn universal_vectors_enumerate_local_dimensions() {
 
 WTS $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
 
     assert!(
         argument
@@ -441,6 +443,7 @@ fn existential_matching_joins_assignments_across_requirements() {
             &active,
             &Environment::default(),
             &facts,
+            &Timings::default()
         )
         .is_some(),
         "direct matching failed for spec {:?} and facts {:?}",
@@ -460,7 +463,7 @@ Given:
 
 WTS $\exists x > 0, x < y$"#,
     );
-    witness.validate(1).unwrap();
+    witness.validate(1, &Timings::default()).unwrap();
     let StepCheck::ExistentialWitness { assignments, .. } = witness
         .root
         .validation
@@ -485,7 +488,7 @@ WTS $\exists x > 0, y > 0, x < y, x > y$
 3. $1 < 2$
 4. $3 > 2$"#,
     );
-    incompatible.validate(1).unwrap();
+    incompatible.validate(1, &Timings::default()).unwrap();
     assert!(
         incompatible
             .root
@@ -511,7 +514,7 @@ WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, y = y\right)$
 1. $\exists y \in \mathbb{R}, y = y$
 2. $\exists y \in \mathbb{R}, y = y$"#,
     );
-    argument.validate(1).unwrap();
+    argument.validate(1, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
         StepCheck::EstablishedByFact { .. }
@@ -567,6 +570,8 @@ fn contextual_existential_elimination_supports_multiple_fresh_binders() {
     };
     let mut validation = StepValidationData::default();
     let run = super::ValidationRun {
+        timings: Timings::default(),
+
         givens: Vec::new(),
         max_dimension: 2,
         next_tracker: 0,
@@ -634,6 +639,7 @@ fn existential_witness_matching_sees_through_contextual_conjunctions() {
         &active,
         &Environment::default(),
         &facts,
+        &Timings::default(),
     )
     .unwrap();
     assert_eq!(witness.assignments[&Variable::new("w")], expression("a"));
@@ -655,7 +661,7 @@ WTS $u = u$
 
 1. $x = A u$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks.as_slice(),
         [StepCheck::ExistentialElimination { .. }]
@@ -685,7 +691,7 @@ WTS $\exists x > 0, x < y$
 1. WTS $1 > 0$
 2. WTS $1 < y$"#,
     );
-    direct.validate(1).unwrap();
+    direct.validate(1, &Timings::default()).unwrap();
     assert!(
         direct
             .root
@@ -705,7 +711,7 @@ WTS $\exists x > 0, x = x$
    1. $1 > 0$
    2. $1 = 1$"#,
     );
-    hidden.validate(1).unwrap();
+    hidden.validate(1, &Timings::default()).unwrap();
     assert!(
         hidden
             .root
@@ -727,7 +733,7 @@ Given:
 
 WTS $\forall x \in \mathbb{R}, x = x$"#,
     );
-    shadowed.validate(1).unwrap();
+    shadowed.validate(1, &Timings::default()).unwrap();
     assert!(
         shadowed
             .root
@@ -742,7 +748,7 @@ WTS $\forall x \in \mathbb{R}, x = x$"#,
 
 WTS $\exists 0 = 0, x = x$"#,
     );
-    body_only.validate(1).unwrap();
+    body_only.validate(1, &Timings::default()).unwrap();
     assert!(
         body_only
             .root
@@ -756,7 +762,7 @@ WTS $\exists 0 = 0, x = x$"#,
 #[test]
 fn failed_children_do_not_invalidate_the_goal() {
     let mut argument = Argument::parse_str(ARGUMENT);
-    argument.validate(0).unwrap();
+    argument.validate(0, &Timings::default()).unwrap();
 
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
@@ -793,7 +799,7 @@ WTS $x = x$
    WTS $y = y$"#;
     let mut argument = Argument::parse_str(input);
     assert_eq!(argument.to_string(), input);
-    argument.validate(0).unwrap();
+    argument.validate(0, &Timings::default()).unwrap();
 
     let ArgumentItem::Goal(first) = &argument.root.steps[0] else {
         panic!("expected nested goal")
@@ -830,7 +836,7 @@ WTS $n = n$
 
 1. $n = 0$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     assert!(matches!(
         argument.root.validation.checks[0],
         StepCheck::InconsistentGivens {
@@ -854,7 +860,7 @@ WTS $x = x$
 1. $y = y$
 2. $x = x$"#,
     );
-    argument.validate(0).unwrap();
+    argument.validate(0, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
         StepCheck::Error { .. }
@@ -887,7 +893,7 @@ WTS $x = x$
    WTS $x \le 0$
 2. $x = 0$"#,
     );
-    argument.validate(0).unwrap();
+    argument.validate(0, &Timings::default()).unwrap();
     let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
         panic!("expected nested goal")
     };
@@ -915,7 +921,7 @@ WTS $A = A$
 
    WTS $A = A$"#,
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
         panic!("expected nested goal")
     };
@@ -938,7 +944,7 @@ WTS $A = A$
 #[should_panic(expected = "goal body must be an ordered list")]
 fn annotated_output_is_not_parseable_as_input() {
     let mut argument = Argument::parse_str(ARGUMENT);
-    argument.validate(0).unwrap();
+    argument.validate(0, &Timings::default()).unwrap();
     Argument::parse_str(&argument.to_string());
 }
 
@@ -955,7 +961,7 @@ WTS $A = A$"#,
     );
     let valid = Argument::parse_str(ARGUMENT);
     let mut arguments = Arguments(vec![invalid, valid]);
-    arguments.validate(0);
+    arguments.validate(0, &Timings::default());
     assert!(arguments.0[0].error.is_some());
     assert!(arguments.0[1].error.is_none());
     assert!(!arguments.0[1].root.validation.checks.is_empty());
@@ -981,7 +987,7 @@ WTS $0 = 0$
    WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
 2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$",
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     let ArgumentItem::Goal(child) = &argument.root.steps[0] else {
         panic!("expected goal")
     };
@@ -1021,7 +1027,7 @@ Given:
 
 WTS $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$",
     );
-    argument.validate(2).unwrap();
+    argument.validate(2, &Timings::default()).unwrap();
     // Synthesis needs two anchor positions, but the interpreted map also has a
     // perfectly meaningful one-element instance in the main validation loop.
     assert_eq!(
