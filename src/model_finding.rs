@@ -375,7 +375,7 @@ impl CounterexampleProgram {
         &'a self,
         environment: &'a Environment,
     ) -> Result<FixedEnvironmentCounterexampleChecker<'a>, ModelFindingError> {
-        let solver = Solver::new();
+        let solver = crate::z3_utils::value_solver();
         assert_natural_assignment(&solver, environment);
         for assertion in &self.prepared_program {
             if !matches!(assertion.expression.meta.get_type(), Ok(TypeExpr::Bool)) {

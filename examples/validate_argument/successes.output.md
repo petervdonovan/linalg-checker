@@ -14,7 +14,7 @@ WTS $x^{2} \le y^{2}$
 
 This follows from the following facts:
 
-- $0 \le \left(y - x\right) \left(x + y\right)$
+- $x^{2} \le y^{2}$
 </details>
 
 1. $0 \le y$
@@ -81,6 +81,7 @@ WTS $\left(A + B\right)^\top = A + B$
 
 This follows from the following facts:
 
+- $B^\top = B$
 - $A^\top + B^\top = A + B$
 </details>
 
@@ -108,6 +109,7 @@ This follows from the following facts:
 
    This follows from the following facts:
 
+   - $B^\top = B$
    - $A^\top + B^\top = A + B$
    </details>
 
@@ -267,6 +269,8 @@ Matched facts:
 
    This follows from the following facts:
 
+   - $x \in \operatorname{Range}(A)$
+   - $y \in \operatorname{Range}(A)$
    - $x = A u$
    - $y = A v$
    </details>
@@ -403,7 +407,7 @@ WTS $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
 
 This follows from the following facts:
 
-- $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+- $y + 1 > 0$
 </details>
 
 1. $y > 0$
@@ -431,7 +435,7 @@ This follows from the following facts:
 
    This follows from the following facts:
 
-   - $y \in \left\{x \in \mathbb{R} : x > 0\right\}$
+   - $y + 1 > 0$
    </details>
 
 # A tempting but invalid zero-product cancellation
@@ -449,7 +453,7 @@ WTS $x = 0$
 
 The negation of $x = 0$ is satisfied by:
 
-- $x = 2$
+- $x = -1$
 - $y = 0$
 </details>
 
@@ -469,7 +473,7 @@ The negation of $x = 0$ is satisfied by:
 
    The negation of $x = 0$ is satisfied by:
 
-   - $x = 2$
+   - $x = -1$
    - $y = 0$
    </details>
 
@@ -527,7 +531,7 @@ WTS $x = 0 \iff x \le 0 \implies x = x$
 
 This follows from the following facts:
 
-- $x = 0 \iff x \le 0$
+- $x = 0$
 </details>
 
 1. $x \le 0$
@@ -547,7 +551,6 @@ This follows from the following facts:
    This follows from the following facts:
 
    - $x = 0$
-   - $x \le 0$
    </details>
 3. $x = x$
 

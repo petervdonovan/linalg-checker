@@ -119,7 +119,7 @@ WTS $b = \mathbb{0}$
 The negation of $b = \mathbb{0}$ is satisfied by:
 
 - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-- $b = \begin{bmatrix}\square \\ 2\end{bmatrix}$
+- $b = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
 </details>
 
 1. $b = \mathbb{0}$
@@ -130,7 +130,7 @@ The negation of $b = \mathbb{0}$ is satisfied by:
    The negation of $b = \mathbb{0}$ is satisfied by:
 
    - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-   - $b = \begin{bmatrix}\square \\ 2\end{bmatrix}$
+   - $b = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
    </details>
 
 # An existential witness requiring arithmetic reasoning

@@ -7,6 +7,27 @@ use crate::{
     RawExpr, visit::Visit,
 };
 
+/// Value queries are commonly nonlinear real polynomial identities. The default
+/// combined solver switches to general incremental SMT after push/pop, which can
+/// spend minutes on these identities. Use a tactic solver, selecting NLSAT only
+/// after eliminating fixed dimension assignments and checking the query's logic.
+pub(crate) fn value_solver() -> z3::Solver {
+    let real = z3::Tactic::new("qfnra-nlsat");
+    let general = z3::Tactic::new("smt");
+    let solver = z3::Tactic::new("simplify")
+        .and_then(&z3::Tactic::new("solve-eqs"))
+        .and_then(&z3::Tactic::cond(
+            &z3::Probe::new("is-qfnra"),
+            &real.or_else(&general),
+            &general,
+        ))
+        .solver();
+    let mut params = z3::Params::new();
+    params.set_bool("unsat_core", true);
+    solver.set_params(&params);
+    solver
+}
+
 pub(crate) fn compare_int(left: &Int, comparison: Cmp, right: &Int) -> Bool {
     match comparison {
         Cmp::Eq => left.eq(right),
@@ -255,6 +276,47 @@ mod tests {
 
     fn variable(name: &str) -> Expr<()> {
         Expr::new(RawExpr::Variable(Variable::new(name)))
+    }
+
+    #[test]
+    fn value_solver_preserves_models_scopes_and_tracked_cores() {
+        use z3::{
+            SatResult,
+            ast::{Bool, Real},
+        };
+        let solver = super::value_solver();
+        let x = Real::new_const("value_solver_x");
+        let given = Bool::new_const("value_solver_positive");
+        solver.assert_and_track(x.gt(Real::from_rational(0, 1)), &given);
+        assert_eq!(solver.check(), SatResult::Sat);
+        solver.push();
+        solver.assert(x.le(Real::from_rational(0, 1)));
+        assert_eq!(solver.check(), SatResult::Unsat);
+        assert!(solver.get_unsat_core().contains(&given));
+        solver.pop(1);
+        solver.assert(x.eq(Real::from_rational(2, 1)));
+        assert_eq!(solver.check(), SatResult::Sat);
+        assert_eq!(
+            solver
+                .get_model()
+                .unwrap()
+                .eval(&x, true)
+                .unwrap()
+                .as_rational(),
+            Some((2, 1))
+        );
+    }
+
+    #[test]
+    fn value_solver_retains_integer_semantics_for_mixed_queries() {
+        use z3::{SatResult, ast::Real};
+        let solver = super::value_solver();
+        let n = Int::new_const("value_solver_integer");
+        let x = Real::new_const("value_solver_real");
+        solver.assert(x.eq(n.to_real()));
+        solver.assert(x.gt(Real::from_rational(0, 1)));
+        solver.assert(x.lt(Real::from_rational(1, 1)));
+        assert_eq!(solver.check(), SatResult::Unsat);
     }
 
     #[test]

@@ -26,7 +26,7 @@ No premises seemed necessary to show this.
 
    The negation of $x = 0$ is satisfied by:
 
-   - $x = 2$
+   - $x = -1$
    </details>
 
 # Matrix argument
@@ -42,7 +42,7 @@ WTS $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
 The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by:
 
-- $A = \begin{bmatrix}2 & \square \\ \square & \square\end{bmatrix}$
+- $A = \begin{bmatrix}0 & -1 \\ -1 & 0\end{bmatrix}$
 </details>
 
 1. $A = A$
@@ -68,7 +68,7 @@ The negation of $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} = 0$ is satisfied by
 
 - $d = 1$
 - $n = 1$
-- $\vec{z}_{1} = \begin{bmatrix}2\end{bmatrix}$
+- $\vec{z}_{1} = \begin{bmatrix}-1\end{bmatrix}$
 </details>
 
 1. $\sum_{i=1}^{n}\vec{z}_{i}^\top \vec{z}_{i} \ge 0$
@@ -155,7 +155,7 @@ WTS $U U^\top = I$
 
 The negation of $U U^\top = I$ is satisfied by:
 
-- $U = \begin{bmatrix}\left(\frac{15}{16}\right)^{\frac{1}{2}} \\ \frac{1}{4}\end{bmatrix}$
+- $U = \begin{bmatrix}0 \\ -1\end{bmatrix}$
 </details>
 
 # Logic-chain preprocessing
@@ -337,7 +337,7 @@ No premises seemed necessary to show this.
 
       The negation of $x = 0$ is satisfied by:
 
-      - $x = 2$
+      - $x = -1$
       </details>
    2. $x = x$
 
@@ -375,7 +375,7 @@ No premises seemed necessary to show this.
 
    The negation of $y = 0$ is satisfied by:
 
-   - $y = 2$
+   - $y = -1$
    </details>
 2. Given:
 
@@ -405,7 +405,7 @@ WTS $x x \le y y$
 
 This follows from the following facts:
 
-- $\left(y - x\right) \left(x + y\right) \ge 0$
+- $x x \le y y$
 </details>
 
 1. WTS $0 \le y$
@@ -837,10 +837,10 @@ No premises seemed necessary to show this.
 
    The negation of $\operatorname{diag}(c) = \operatorname{diag}(d)$ is satisfied by:
 
-   - $c_{1} = 2$
-   - $c_{2} = \square$
-   - $d_{1} = 3$
-   - $d_{2} = \square$
+   - $c_{1} = \square$
+   - $c_{2} = 2$
+   - $d_{1} = \square$
+   - $d_{2} = 3$
    - $n = 2$
    </details>
 2. $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
@@ -1078,6 +1078,8 @@ Matched facts:
 
    This follows from the following facts:
 
+   - $x \in \operatorname{Range}(A)$
+   - $y \in \operatorname{Range}(A)$
    - $x = A u$
    - $y = A v$
    </details>

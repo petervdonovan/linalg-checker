@@ -323,6 +323,13 @@ search.
 
 ### Incremental value solving
 
+Value-query solvers use `simplify` and `solve-eqs` to eliminate fixed dimension
+assignments before selecting a solving tactic. Quantifier-free real-arithmetic
+queries use `qfnra-nlsat`; integer, mixed-arithmetic, and other queries use `smt`.
+The real tactic also falls back to `smt` if it fails. Unsat-core production is
+explicitly enabled so tracked premises remain available for supporting-fact
+explanations. Dimension enumeration continues to use integer solvers.
+
 For each base environment, root givens are asserted once and tracked for unsat
 cores. Goal bodies use pushed scopes. Validation processes body items in order,
 asserting only successful claims, then checks the goal conclusion from the facts

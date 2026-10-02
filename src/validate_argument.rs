@@ -234,7 +234,7 @@ impl Argument {
             set_exhaustive(&mut self.root, true);
             self.root.validation.givens_feasible = true;
             let environment = Rc::new(Environment::default());
-            let mut solver = Solver::new();
+            let mut solver = crate::z3_utils::value_solver();
             let mut tracked = Vec::new();
             let mut scoped_statements = Vec::new();
             let mut run = ValidationRun {
@@ -343,7 +343,7 @@ impl Argument {
                 Err(error) => return Err(error.into()),
             };
             let _environment_time = timings.environment(&environment, &symbolic_types);
-            let mut solver = Solver::new();
+            let mut solver = crate::z3_utils::value_solver();
             assert_natural_assignment(&solver, &environment);
             let mut tracked = Vec::new();
             for (given, prepared) in ordinary_givens.iter().zip(&prepared_givens) {
