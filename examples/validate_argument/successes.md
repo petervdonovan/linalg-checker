@@ -35,49 +35,49 @@ WTS $\left(A + B\right)^\top = A + B$
 Given:
 
 - $U \in \mathbb{R}^{n \times n}$
-- $x \in \mathbb{R}^{n}$
+- $\vec{x} \in \mathbb{R}^{n}$
 - $U^\top U = I$
 
-WTS $\left\lVert U x \right\rVert_{2}^2 = \left\lVert x \right\rVert_{2}^2$
+WTS $\left\lVert U \vec{x} \right\rVert_{2}^2 = \left\lVert \vec{x} \right\rVert_{2}^2$
 
-1. Expand the transpose of the product: $\left(U x\right)^\top \left(U x\right) = x^\top U^\top U x$.
-2. Use orthogonality in the middle: $x^\top U^\top U x = x^\top I x$.
-3. The identity acts neutrally: $x^\top I x = x^\top x$.
+1. Expand the transpose of the product: $\left(U \vec{x}\right)^\top \left(U \vec{x}\right) = \vec{x}^\top U^\top U \vec{x}$.
+2. Use orthogonality in the middle: $\vec{x}^\top U^\top U \vec{x} = \vec{x}^\top I \vec{x}$.
+3. The identity acts neutrally: $\vec{x}^\top I \vec{x} = \vec{x}^\top \vec{x}$.
 
 # Scalar multiples of null-space vectors remain in the null space
 
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
 - $c \in \mathbb{R}$
-- $x \in \operatorname{Nul}(A)$
+- $\vec{x} \in \operatorname{Nul}(A)$
 
-WTS $c x \in \operatorname{Nul}(A)$
+WTS $c \vec{x} \in \operatorname{Nul}(A)$
 
-1. Null-space membership means the matrix kills the vector: $A x = \mathbb{0}$.
-2. Pull the scalar through the matrix product: $A \left(c x\right) = c \left(A x\right)$.
-3. Substitute the zero result: $A \left(c x\right) = \mathbb{0}$.
-4. Therefore the scalar multiple is in the null space: $c x \in \operatorname{Nul}(A)$.
+1. Null-space membership means the matrix kills the vector: $A \vec{x} = \mathbb{0}$.
+2. Pull the scalar through the matrix product: $A \left(c \vec{x}\right) = c \left(A \vec{x}\right)$.
+3. Substitute the zero result: $A \left(c \vec{x}\right) = \mathbb{0}$.
+4. Therefore the scalar multiple is in the null space: $c \vec{x} \in \operatorname{Nul}(A)$.
 
 # Linear combinations of range vectors remain in the range
 
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
-- $y \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
+- $\vec{y} \in \mathbb{R}^{2}$
 - $a \in \mathbb{R}$
 - $b \in \mathbb{R}$
-- $x \in \operatorname{Range}(A)$
-- $y \in \operatorname{Range}(A)$
+- $\vec{x} \in \operatorname{Range}(A)$
+- $\vec{y} \in \operatorname{Range}(A)$
 
-WTS $a x + b y \in \operatorname{Range}(A)$
+WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
-1. Choose a preimage for the first range vector: $x = A u$.
-2. Choose a preimage for the second range vector: $y = A v$.
-3. Substitute both preimages and distribute: $a x + b y = A \left(a u + b v\right)$.
-4. This is the definition of range membership: $a x + b y \in \operatorname{Range}(A)$.
+1. Choose a preimage for the first range vector: $\vec{x} = A \vec{u}$.
+2. Choose a preimage for the second range vector: $\vec{y} = A \vec{v}$.
+3. Substitute both preimages and distribute: $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$.
+4. This is the definition of range membership: $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$.
 
 # Powers of two by explicit induction obligations
 

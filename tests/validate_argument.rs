@@ -142,7 +142,7 @@ fn validates_scoped_vector_induction_from_dimension_one() {
     assert!(is_verified(&step.validation));
     assert_eq!(
         base.givens[0].as_latex().to_string(),
-        r"x \in \mathbb{R}^{1}"
+        r"\vec{x} \in \mathbb{R}^{1}"
     );
     assert!(matches!(
         &step.givens[0].raw,

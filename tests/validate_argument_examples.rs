@@ -120,7 +120,7 @@ fn failure_examples_match_current_validation() {
         ),
         (
             "The Gram matrix proof needs an explicitly introduced arbitrary vector",
-            "missing type for x",
+            r"missing type for \vec{x}",
         ),
         (
             "A linear-independence definition with quantified coefficients",

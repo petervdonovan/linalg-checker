@@ -108,29 +108,29 @@ quantifiers embedded beneath another operator are unsupported
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $b \in \mathbb{R}^{2}$
-- $\forall x \in \mathbb{R}^{2}, A x = b$
+- $\vec{b} \in \mathbb{R}^{2}$
+- $\forall \vec{x} \in \mathbb{R}^{2}, A \vec{x} = \vec{b}$
 
-WTS $b = \mathbb{0}$
+WTS $\vec{b} = \mathbb{0}$
 
 <details>
 <summary>❌ counterexample found</summary>
 
-The negation of $b = \mathbb{0}$ is satisfied by:
+The negation of $\vec{b} = \mathbb{0}$ is satisfied by:
 
 - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-- $b = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
+- $\vec{b} = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
 </details>
 
-1. $b = \mathbb{0}$
+1. $\vec{b} = \mathbb{0}$
 
    <details>
    <summary>❌ counterexample found</summary>
 
-   The negation of $b = \mathbb{0}$ is satisfied by:
+   The negation of $\vec{b} = \mathbb{0}$ is satisfied by:
 
    - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-   - $b = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
+   - $\vec{b} = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
    </details>
 
 # An existential witness requiring arithmetic reasoning
@@ -220,25 +220,25 @@ WTS $\operatorname{Nul}(A^\top A) = \operatorname{Nul}(A)$
 No premises seemed necessary to show this.
 </details>
 
-1. $A^\top A x = \mathbb{0} \implies A x = \mathbb{0}$
+1. $A^\top A \vec{x} = \mathbb{0} \implies A \vec{x} = \mathbb{0}$
 
    <details>
    <summary>Unsupported step</summary>
 
-   missing type for x
+   missing type for \vec{x}
    </details>
 
 # A linear-independence definition with quantified coefficients
 
 Given:
 
-- $v_{1} \in \mathbb{R}^{2}$
-- $v_{2} \in \mathbb{R}^{2}$
-- $\det(\begin{bmatrix}v_{1} & v_{2}\end{bmatrix}) \ne 0$
+- $\vec{v}_{1} \in \mathbb{R}^{2}$
+- $\vec{v}_{2} \in \mathbb{R}^{2}$
+- $\det(\begin{bmatrix}\vec{v}_{1} & \vec{v}_{2}\end{bmatrix}) \ne 0$
 
-WTS $\forall a \in \mathbb{R}, b \in \mathbb{R}, a v_{1} + b v_{2} = \mathbb{0} \implies a = 0 \land b = 0$
+WTS $\forall a \in \mathbb{R}, b \in \mathbb{R}, a \vec{v}_{1} + b \vec{v}_{2} = \mathbb{0} \implies a = 0 \land b = 0$
 
-1. $a v_{1} + b v_{2} = \mathbb{0} \implies a = 0 \land b = 0$
+1. $a \vec{v}_{1} + b \vec{v}_{2} = \mathbb{0} \implies a = 0 \land b = 0$
 
 ## Error
 
@@ -270,13 +270,13 @@ No premises seemed necessary to show this.
 
 Given:
 
-- $x \in \mathbb{R}^{2}$
-- $y \in \mathbb{R}^{2}$
-- $x < y$
+- $\vec{x} \in \mathbb{R}^{2}$
+- $\vec{y} \in \mathbb{R}^{2}$
+- $\vec{x} < \vec{y}$
 
-WTS $x < y$
+WTS $\vec{x} < \vec{y}$
 
-1. $x < y$
+1. $\vec{x} < \vec{y}$
 
 ## Error
 

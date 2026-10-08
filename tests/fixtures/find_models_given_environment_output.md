@@ -125,14 +125,14 @@ Model
 
 - $C \in \mathbb{R}^{2 \times 2}$
 - $P \in \mathbb{R}^{2 \times 2}$
-- $v \in \mathbb{R}^{2}$
+- $\vec{v} \in \mathbb{R}^{2}$
 - $k = 2$
 
 ## Sentences
 
 - $P^{k} = P$
 - $P C = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-- $P v \ne v$
+- $P \vec{v} \ne \vec{v}$
 
 ## Conclusion
 

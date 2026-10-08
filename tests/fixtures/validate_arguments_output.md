@@ -222,25 +222,25 @@ No premises seemed necessary to show this.
 
 Given:
 
-- $A \in \mathbb{R}^{2}$
+- $\vec{A} \in \mathbb{R}^{2}$
 
-WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
+WTS $\vec{A}^{\frac{1}{2}} = \vec{A}^{\frac{1}{2}}$
 
 <details>
 <summary>⚠️ dimensionally invalid</summary>
 
 This step is not dimensionally meaningful in the following environment:
 
-- $A \in \mathbb{R}^{2}$
+- $\vec{A} \in \mathbb{R}^{2}$
 </details>
 
 # Vector two-norm
 
 Given:
 
-- $v \in \mathbb{R}^{2}$
+- $\vec{v} \in \mathbb{R}^{2}$
 
-WTS $\left\lVert v \right\rVert_{2} \ge 0$
+WTS $\left\lVert \vec{v} \right\rVert_{2} \ge 0$
 
 <details>
 <summary>✅ verified</summary>
@@ -547,9 +547,9 @@ The induction base and step were validated up to a maximum dimension of 2.
 
 Given:
 
-- $x \in \mathbb{R}^{n}$
+- $\vec{x} \in \mathbb{R}^{n}$
 
-WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$ by induction on $n$
+WTS $\left\lVert \vec{x} \right\rVert_{2}^{2} \ge 0$ by induction on $n$
 
 <details>
 <summary>✅ likely</summary>
@@ -559,9 +559,9 @@ The induction base and step were validated up to a maximum dimension of 2.
 
 1. Given:
 
-   - $x \in \mathbb{R}^{1}$
+   - $\vec{x} \in \mathbb{R}^{1}$
 
-   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+   WTS $\left\lVert \vec{x} \right\rVert_{2}^{2} \ge 0$
 
    <details>
    <summary>✅ verified</summary>
@@ -570,10 +570,10 @@ The induction base and step were validated up to a maximum dimension of 2.
    </details>
 2. Given:
 
-   - $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$
-   - $x \in \mathbb{R}^{n + 1}$
+   - $\forall \vec{x} \in \mathbb{R}^{n}, \left\lVert \vec{x} \right\rVert_{2}^{2} \ge 0$
+   - $\vec{x} \in \mathbb{R}^{n + 1}$
 
-   WTS $\left\lVert x \right\rVert_{2}^{2} \ge 0$
+   WTS $\left\lVert \vec{x} \right\rVert_{2}^{2} \ge 0$
 
    <details>
    <summary>✅ likely</summary>
@@ -912,9 +912,9 @@ This follows from the following facts:
 
 Given:
 
-- $A \in \mathbb{R}^{2}$
+- $\vec{A} \in \mathbb{R}^{2}$
 
-WTS $A = A$
+WTS $\vec{A} = \vec{A}$
 
 <details>
 <summary>✅ verified</summary>
@@ -922,21 +922,21 @@ WTS $A = A$
 No premises seemed necessary to show this.
 </details>
 
-1. $A \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
+1. $\vec{A} \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
 
    <details>
    <summary>Unsupported step</summary>
 
    set membership subject has incompatible domain dimensions or type
    </details>
-2. $A \in \left\{X \in \mathbb{R}^{2} : X\right\}$
+2. $\vec{A} \in \left\{\vec{X} \in \mathbb{R}^{2} : \vec{X}\right\}$
 
    <details>
    <summary>Unsupported step</summary>
 
    set comprehension predicate must be Boolean
    </details>
-3. $A = A$
+3. $\vec{A} = \vec{A}$
 
    <details>
    <summary>✅ verified</summary>
@@ -949,20 +949,20 @@ No premises seemed necessary to show this.
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
-- $y \in \mathbb{R}^{2}$
-- $x \in \operatorname{Nul}(A)$
-- $y \in \operatorname{Nul}(A)$
+- $\vec{x} \in \mathbb{R}^{2}$
+- $\vec{y} \in \mathbb{R}^{2}$
+- $\vec{x} \in \operatorname{Nul}(A)$
+- $\vec{y} \in \operatorname{Nul}(A)$
 
-WTS $x + y \in \operatorname{Nul}(A)$
+WTS $\vec{x} + \vec{y} \in \operatorname{Nul}(A)$
 
 <details>
 <summary>✅ verified</summary>
 
 This follows from the following facts:
 
-- $x \in \operatorname{Nul}(A)$
-- $y \in \operatorname{Nul}(A)$
+- $\vec{x} \in \operatorname{Nul}(A)$
+- $\vec{y} \in \operatorname{Nul}(A)$
 </details>
 
 # Gram matrix has the same null space
@@ -994,10 +994,10 @@ No premises seemed necessary to show this.
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
 - $\det(A) \ne 0$
 
-WTS $x \in \operatorname{Range}(A)$
+WTS $\vec{x} \in \operatorname{Range}(A)$
 
 <details>
 <summary>✅ verified</summary>
@@ -1012,19 +1012,19 @@ This follows from the following facts:
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $z \in \mathbb{R}^{2}$
-- $A^\top z = \mathbb{0}$
-- $z \ne \mathbb{0}$
+- $\vec{z} \in \mathbb{R}^{2}$
+- $A^\top \vec{z} = \mathbb{0}$
+- $\vec{z} \ne \mathbb{0}$
 
-WTS $z \notin \operatorname{Range}(A)$
+WTS $\vec{z} \notin \operatorname{Range}(A)$
 
 <details>
 <summary>✅ verified</summary>
 
 This follows from the following facts:
 
-- $A^\top z = \mathbb{0}$
-- $z \ne \mathbb{0}$
+- $A^\top \vec{z} = \mathbb{0}$
+- $\vec{z} \ne \mathbb{0}$
 </details>
 
 # Range is closed under linear combinations
@@ -1032,69 +1032,69 @@ This follows from the following facts:
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
-- $y \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
+- $\vec{y} \in \mathbb{R}^{2}$
 - $a \in \mathbb{R}$
 - $b \in \mathbb{R}$
-- $x \in \operatorname{Range}(A)$
-- $y \in \operatorname{Range}(A)$
+- $\vec{x} \in \operatorname{Range}(A)$
+- $\vec{y} \in \operatorname{Range}(A)$
 
-WTS $a x + b y \in \operatorname{Range}(A)$
+WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
 <summary>✅ witness found</summary>
 
 Witness:
 
-- $w_{preimage of A} = a u + b v$
+- $w_{preimage of A} = a \vec{u} + b \vec{v}$
 
 Matched facts:
 
-- $a x + b y = A \left(a u + b v\right)$
+- $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 </details>
 
-1. $x = A u$
+1. $\vec{x} = A \vec{u}$
 
    <details>
    <summary>✅ witness introduced</summary>
 
-   From $x \in \operatorname{Range}(A)$:
+   From $\vec{x} \in \operatorname{Range}(A)$:
 
-   - $u$ as a witness for $w_{preimage of A}$
+   - $\vec{u}$ as a witness for $w_{preimage of A}$
    </details>
-2. $y = A v$
+2. $\vec{y} = A \vec{v}$
 
    <details>
    <summary>✅ witness introduced</summary>
 
-   From $y \in \operatorname{Range}(A)$:
+   From $\vec{y} \in \operatorname{Range}(A)$:
 
-   - $v$ as a witness for $w_{preimage of A}$
+   - $\vec{v}$ as a witness for $w_{preimage of A}$
    </details>
-3. $a x + b y = A \left(a u + b v\right)$
+3. $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 
    <details>
    <summary>✅ verified</summary>
 
    This follows from the following facts:
 
-   - $x \in \operatorname{Range}(A)$
-   - $y \in \operatorname{Range}(A)$
-   - $x = A u$
-   - $y = A v$
+   - $\vec{x} \in \operatorname{Range}(A)$
+   - $\vec{y} \in \operatorname{Range}(A)$
+   - $\vec{x} = A \vec{u}$
+   - $\vec{y} = A \vec{v}$
    </details>
-4. $a x + b y \in \operatorname{Range}(A)$
+4. $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
    <details>
    <summary>✅ witness found</summary>
 
    Witness:
 
-   - $w_{preimage of A} = a u + b v$
+   - $w_{preimage of A} = a \vec{u} + b \vec{v}$
 
    Matched facts:
 
-   - $a x + b y = A \left(a u + b v\right)$
+   - $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
    </details>
 
 # Sequence entries form a finite set

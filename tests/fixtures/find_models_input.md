@@ -22,14 +22,14 @@ Not solved yet
 - $A \in \mathbb{R}^{2 \times 2}$
 - $B \in \mathbb{R}$
 - $C \in \mathbb{R}^{2 \times 2}$
-- $D \in \mathbb{R}^{2}$
+- $\vec{D} \in \mathbb{R}^{2}$
 
 ## Sentences
 
 - $A = I$
 - $B = I$
 - $C = \mathbb{0}$
-- $D = \mathbb{0}$
+- $\vec{D} = \mathbb{0}$
 
 ## Conclusion
 
@@ -39,15 +39,15 @@ Not solved yet
 
 ## Assumptions
 
-- $A B = C$
+- $A \vec{B} = \vec{C}$
 - $A \in \mathbb{R}^{2 \times 2}$
-- $C \in \mathbb{R}^{2}$
+- $\vec{C} \in \mathbb{R}^{2}$
 
 ## Sentences
 
 - $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
-- $B = \begin{bmatrix}3 \\ 4\end{bmatrix}$
-- $C = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+- $\vec{B} = \begin{bmatrix}3 \\ 4\end{bmatrix}$
+- $\vec{C} = \begin{bmatrix}3 \\ 4\end{bmatrix}$
 
 ## Conclusion
 
@@ -57,7 +57,7 @@ Not solved yet
 
 ## Assumptions
 
-- $A \in \mathbb{R}^{n}$
+- $\vec{A} \in \mathbb{R}^{n}$
 - $n = 0$
 
 ## Sentences
@@ -115,12 +115,12 @@ Not solved yet
 
 ## Assumptions
 
-- $A \in \mathbb{R}^{2}$
+- $\vec{A} \in \mathbb{R}^{2}$
 - $B \in \mathbb{R}^{1 \times 2}$
 
 ## Sentences
 
-- $\operatorname{tr}(A B) \ne \operatorname{tr}(B A)$
+- $\operatorname{tr}(\vec{A} B) \ne \operatorname{tr}(B \vec{A})$
 
 ## Conclusion
 
@@ -188,11 +188,11 @@ Not solved yet
 
 ## Assumptions
 
-- $v \in \mathbb{R}^{2}$
+- $\vec{v} \in \mathbb{R}^{2}$
 
 ## Sentences
 
-- $\left\lVert v \right\rVert_{2}^{2} < 0$
+- $\left\lVert \vec{v} \right\rVert_{2}^{2} < 0$
 
 ## Conclusion
 
@@ -202,11 +202,11 @@ Not solved yet
 
 ## Assumptions
 
-- $v \in \mathbb{R}^{2}$
+- $\vec{v} \in \mathbb{R}^{2}$
 
 ## Sentences
 
-- $\left\lVert v \right\rVert_{2} < 0$
+- $\left\lVert \vec{v} \right\rVert_{2} < 0$
 
 ## Conclusion
 
@@ -217,13 +217,13 @@ Not solved yet
 ## Assumptions
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $b \in \mathbb{R}^{2}$
-- $c \in \mathbb{R}^{2}$
+- $\vec{b} \in \mathbb{R}^{2}$
+- $\vec{c} \in \mathbb{R}^{2}$
 - $d \in \mathbb{R}$
 
 ## Sentences
 
-- $\begin{bmatrix}A & b \\ c^\top & d\end{bmatrix} = \begin{bmatrix}1 & 2 & 3 \\ 4 & 5 & 6 \\ 7 & 8 & 9\end{bmatrix}$
+- $\begin{bmatrix}A & \vec{b} \\ \vec{c}^\top & d\end{bmatrix} = \begin{bmatrix}1 & 2 & 3 \\ 4 & 5 & 6 \\ 7 & 8 & 9\end{bmatrix}$
 
 ## Conclusion
 

@@ -118,10 +118,10 @@ This follows from the following facts:
 Given:
 
 - $U \in \mathbb{R}^{n \times n}$
-- $x \in \mathbb{R}^{n}$
+- $\vec{x} \in \mathbb{R}^{n}$
 - $U^\top U = I$
 
-WTS $\left\lVert U x \right\rVert_{2}^{2} = \left\lVert x \right\rVert_{2}^{2}$
+WTS $\left\lVert U \vec{x} \right\rVert_{2}^{2} = \left\lVert \vec{x} \right\rVert_{2}^{2}$
 
 <details>
 <summary>✅ likely</summary>
@@ -131,10 +131,10 @@ No counterexamples found up to a maximum dimension of 2.
 This may follow from the following facts:
 
 - $U^\top U = I$
-- $x^\top U^\top U x = x^\top I x$
+- $\vec{x}^\top U^\top U \vec{x} = \vec{x}^\top I \vec{x}$
 </details>
 
-1. $\left(U x\right)^\top U x = x^\top U^\top U x$
+1. $\left(U \vec{x}\right)^\top U \vec{x} = \vec{x}^\top U^\top U \vec{x}$
 
    <details>
    <summary>✅ likely</summary>
@@ -143,7 +143,7 @@ This may follow from the following facts:
 
    No premises seemed necessary to show this.
    </details>
-2. $x^\top U^\top U x = x^\top I x$
+2. $\vec{x}^\top U^\top U \vec{x} = \vec{x}^\top I \vec{x}$
 
    <details>
    <summary>✅ likely</summary>
@@ -154,7 +154,7 @@ This may follow from the following facts:
 
    - $U^\top U = I$
    </details>
-3. $x^\top I x = x^\top x$
+3. $\vec{x}^\top I \vec{x} = \vec{x}^\top \vec{x}$
 
    <details>
    <summary>✅ likely</summary>
@@ -169,53 +169,53 @@ This may follow from the following facts:
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
 - $c \in \mathbb{R}$
-- $x \in \operatorname{Nul}(A)$
+- $\vec{x} \in \operatorname{Nul}(A)$
 
-WTS $c x \in \operatorname{Nul}(A)$
+WTS $c \vec{x} \in \operatorname{Nul}(A)$
 
 <details>
 <summary>✅ verified</summary>
 
 This follows from the following facts:
 
-- $A c x = \mathbb{0}$
+- $A c \vec{x} = \mathbb{0}$
 </details>
 
-1. $A x = \mathbb{0}$
+1. $A \vec{x} = \mathbb{0}$
 
    <details>
    <summary>✅ verified</summary>
 
    This follows from the following facts:
 
-   - $x \in \operatorname{Nul}(A)$
+   - $\vec{x} \in \operatorname{Nul}(A)$
    </details>
-2. $A c x = c A x$
+2. $A c \vec{x} = c A \vec{x}$
 
    <details>
    <summary>✅ verified</summary>
 
    No premises seemed necessary to show this.
    </details>
-3. $A c x = \mathbb{0}$
+3. $A c \vec{x} = \mathbb{0}$
 
    <details>
    <summary>✅ verified</summary>
 
    This follows from the following facts:
 
-   - $x \in \operatorname{Nul}(A)$
+   - $\vec{x} \in \operatorname{Nul}(A)$
    </details>
-4. $c x \in \operatorname{Nul}(A)$
+4. $c \vec{x} \in \operatorname{Nul}(A)$
 
    <details>
    <summary>✅ verified</summary>
 
    This follows from the following facts:
 
-   - $A c x = \mathbb{0}$
+   - $A c \vec{x} = \mathbb{0}$
    </details>
 
 # Linear combinations of range vectors remain in the range
@@ -223,69 +223,69 @@ This follows from the following facts:
 Given:
 
 - $A \in \mathbb{R}^{2 \times 2}$
-- $x \in \mathbb{R}^{2}$
-- $y \in \mathbb{R}^{2}$
+- $\vec{x} \in \mathbb{R}^{2}$
+- $\vec{y} \in \mathbb{R}^{2}$
 - $a \in \mathbb{R}$
 - $b \in \mathbb{R}$
-- $x \in \operatorname{Range}(A)$
-- $y \in \operatorname{Range}(A)$
+- $\vec{x} \in \operatorname{Range}(A)$
+- $\vec{y} \in \operatorname{Range}(A)$
 
-WTS $a x + b y \in \operatorname{Range}(A)$
+WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
 <summary>✅ witness found</summary>
 
 Witness:
 
-- $w_{preimage of A} = a u + b v$
+- $w_{preimage of A} = a \vec{u} + b \vec{v}$
 
 Matched facts:
 
-- $a x + b y = A \left(a u + b v\right)$
+- $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 </details>
 
-1. $x = A u$
+1. $\vec{x} = A \vec{u}$
 
    <details>
    <summary>✅ witness introduced</summary>
 
-   From $x \in \operatorname{Range}(A)$:
+   From $\vec{x} \in \operatorname{Range}(A)$:
 
-   - $u$ as a witness for $w_{preimage of A}$
+   - $\vec{u}$ as a witness for $w_{preimage of A}$
    </details>
-2. $y = A v$
+2. $\vec{y} = A \vec{v}$
 
    <details>
    <summary>✅ witness introduced</summary>
 
-   From $y \in \operatorname{Range}(A)$:
+   From $\vec{y} \in \operatorname{Range}(A)$:
 
-   - $v$ as a witness for $w_{preimage of A}$
+   - $\vec{v}$ as a witness for $w_{preimage of A}$
    </details>
-3. $a x + b y = A \left(a u + b v\right)$
+3. $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 
    <details>
    <summary>✅ verified</summary>
 
    This follows from the following facts:
 
-   - $x \in \operatorname{Range}(A)$
-   - $y \in \operatorname{Range}(A)$
-   - $x = A u$
-   - $y = A v$
+   - $\vec{x} \in \operatorname{Range}(A)$
+   - $\vec{y} \in \operatorname{Range}(A)$
+   - $\vec{x} = A \vec{u}$
+   - $\vec{y} = A \vec{v}$
    </details>
-4. $a x + b y \in \operatorname{Range}(A)$
+4. $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
    <details>
    <summary>✅ witness found</summary>
 
    Witness:
 
-   - $w_{preimage of A} = a u + b v$
+   - $w_{preimage of A} = a \vec{u} + b \vec{v}$
 
    Matched facts:
 
-   - $a x + b y = A \left(a u + b v\right)$
+   - $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
    </details>
 
 # Powers of two by explicit induction obligations
