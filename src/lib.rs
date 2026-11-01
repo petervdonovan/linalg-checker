@@ -11,6 +11,7 @@ mod formula;
 pub mod from_tex;
 pub mod logic_lowering;
 mod model_finding;
+pub mod natural_deduction;
 pub mod operator_visitors;
 pub mod preprocessing;
 pub mod rewriting_test_utils;

@@ -1,497 +1,307 @@
 use super::*;
-use crate::timing::Timings;
 
-pub(super) fn validate_quantified_claim(
-    sentence: &Expr<()>,
-    validation: &mut StepValidationData,
-    solver: &mut Solver,
-    environment: Rc<Environment>,
-    symbolic_types: &SymbolicTypeEnvironment,
-    proof: ProofContext<'_>,
-    run: &mut ValidationRun,
-) -> Result<ClaimResult, ArgumentValidationError> {
-    let spec = match analyze_quantifier(sentence, symbolic_types) {
-        Ok(spec) => spec,
-        Err(message) => {
-            validation
-                .checks
-                .push(StepCheck::QuantifierInconclusive { message });
-            return Ok(ClaimResult::default());
-        }
-    };
-    if !spec.questionable.is_empty() {
-        validation.checks.push(StepCheck::QuestionableQuantifier {
-            premises: spec.questionable.clone(),
-        });
-    }
-    let inherited_facts = proof_facts(proof.tracked, proof.retained);
-    if let Some(fact) = inherited_facts
-        .iter()
-        .find(|fact| *fact == sentence)
-        .cloned()
-    {
-        validation
-            .checks
-            .push(StepCheck::EstablishedByFact { fact });
-        return Ok(ClaimResult {
-            assertions: Vec::new(),
-            retained: vec![sentence.clone()],
-            introduced_types: BTreeMap::new(),
-            alternatives: Vec::new(),
-            validated: true,
-        });
-    }
-    match spec.kind {
-        QuantifierKind::Exists => {
-            match find_existential_witness(
-                &spec,
-                symbolic_types,
-                &environment,
-                &inherited_facts,
-                &run.timings,
-            ) {
-                Some(witness) => {
-                    validation.checks.push(StepCheck::ExistentialWitness {
-                        assignments: witness.assignments.into_iter().collect(),
-                        supporting_facts: witness.supporting_facts,
-                    });
-                    Ok(ClaimResult {
-                        assertions: Vec::new(),
-                        retained: vec![sentence.clone()],
-                        introduced_types: BTreeMap::new(),
-                        alternatives: Vec::new(),
-                        validated: true,
-                    })
-                }
-                None => {
-                    validation.checks.push(StepCheck::QuantifierInconclusive {
-                        message: "no common syntactic witness was established".to_owned(),
-                    });
-                    Ok(ClaimResult::default())
-                }
-            }
-        }
-        QuantifierKind::Forall => {
-            validate_universal_claim(sentence, spec, validation, solver, environment, proof, run)
-        }
-    }
-}
-
-fn validate_universal_claim(
-    sentence: &Expr<()>,
-    spec: QuantifierSpec,
-    validation: &mut StepValidationData,
-    solver: &mut Solver,
-    environment: Rc<Environment>,
-    proof: ProofContext<'_>,
-    run: &mut ValidationRun,
-) -> Result<ClaimResult, ArgumentValidationError> {
-    let ordinary_premises = spec
-        .premises
-        .iter()
-        .filter(|premise| !is_quantifier(premise) && !spec.is_binder_declaration(premise))
-        .cloned()
-        .collect::<Vec<_>>();
-    let retained_premises = spec
-        .premises
-        .iter()
-        .filter(|premise| is_quantifier(premise))
-        .cloned()
-        .collect::<Vec<_>>();
-    let prepared_premises = prepare_givens(
-        &spec.types,
-        &ordinary_premises,
-        &run.givens,
-        run.max_dimension,
-        &run.timings,
-    )
-    .map_err(ToZ3Error::from)
-    .map_err(ModelFindingError::from)?;
-    let mut scope = run.givens.clone();
-    scope.extend(prepared_premises.iter().cloned());
-    let prepared_body = if is_quantifier(&spec.body) {
-        None
-    } else {
-        Some(
-            prepare_expression_with_premises(
-                &spec.types,
-                &spec.body,
-                POSITIVE,
-                &scope,
-                run.max_dimension,
-                &run.timings,
-            )
-            .map_err(ToZ3Error::from)
-            .map_err(ModelFindingError::from)?,
-        )
-    };
-    let extensions = quantifier_environment_extensions(
-        &environment,
-        &spec.types,
-        &prepared_premises,
-        prepared_body.as_ref(),
-        run.max_dimension,
-        &run.timings,
-    )?;
-    validation.environments_exhaustive &= extensions.exhaustive;
-    let mut feasible = 0;
-    let mut all_validated = true;
-    for extension in extensions.environments {
-        let extension = Rc::new(extension);
-        let _environment_time = run.timings.environment(&extension, &spec.types);
-        solver.push();
-        assert_natural_assignment(solver, &extension);
-        let mut local_tracked = proof.tracked.to_vec();
-        let mut local_retained = proof.retained.to_vec();
-        local_retained.extend(retained_premises.iter().cloned());
-        for (premise, prepared) in ordinary_premises.iter().zip(&prepared_premises) {
-            let assertion = lower_prepared_boolean(&extension, prepared)?;
-            assert_definitions(solver, &assertion.side_conditions)?;
-            let tracker = fresh_tracker(&mut run.next_tracker);
-            solver.assert_and_track(assertion.expression, &tracker);
-            local_tracked.push(TrackedFact {
-                tracker,
-                sentence: premise.clone(),
-                alternatives: prepared.expression.meta.alternatives().to_vec(),
-            });
-        }
-        match run.timings.check(solver, "z3_real_ms") {
-            SatResult::Sat => {
-                feasible += 1;
-                if is_quantifier(&spec.body) {
-                    let facts = proof_facts(&local_tracked, &local_retained);
-                    if let Some(fact) = facts.into_iter().find(|fact| fact == &spec.body) {
-                        validation
-                            .checks
-                            .push(StepCheck::EstablishedByFact { fact });
-                    } else {
-                        validation.checks.push(StepCheck::QuantifierInconclusive {
-                            message: "a nested quantified body requires an exact contextual fact"
-                                .to_owned(),
-                        });
-                        all_validated = false;
-                    }
-                } else {
-                    let scope_len = run.givens.len();
-                    run.givens.extend(prepared_premises.iter().cloned());
-                    let result = validate_ordinary_claim(
-                        &spec.body,
-                        validation,
-                        solver,
-                        Rc::clone(&extension),
-                        &spec.types,
-                        &local_tracked,
-                        run,
-                        false,
-                    );
-                    run.givens.truncate(scope_len);
-                    let result = result?;
-                    all_validated &= result.validated;
-                }
-            }
-            SatResult::Unknown => {
-                validation.checks.push(StepCheck::Unknown {
-                    environment: Some(Rc::clone(&extension)),
-                });
-                all_validated = false;
-            }
-            SatResult::Unsat => {}
-        }
-        solver.pop(1);
-        if !all_validated {
-            break;
-        }
-    }
-    if feasible == 0 {
-        validation.checks.push(StepCheck::VacuousQuantifier);
-        return Ok(ClaimResult::default());
-    }
-    if all_validated {
-        Ok(ClaimResult {
-            assertions: Vec::new(),
-            retained: vec![sentence.clone()],
-            introduced_types: BTreeMap::new(),
-            alternatives: Vec::new(),
-            validated: true,
-        })
-    } else {
-        Ok(ClaimResult::default())
-    }
-}
-
-pub(super) enum QuantifierKind {
-    Forall,
-    Exists,
-}
-
-pub(super) struct QuantifierSpec {
-    pub(super) kind: QuantifierKind,
-    pub(super) premises: Vec<Expr<()>>,
-    pub(super) body: Expr<()>,
-    pub(super) introduced: BTreeSet<Variable>,
-    pub(super) questionable: Vec<Expr<()>>,
-    pub(super) types: SymbolicTypeEnvironment,
-}
-
-impl QuantifierSpec {
-    pub(super) fn is_binder_declaration(&self, expression: &Expr<()>) -> bool {
-        match &expression.raw {
-            RawExpr::Variable(variable) => self.introduced.contains(variable),
-            RawExpr::Binop(Binop::ElementOf, left, right) => {
-                matches!(&left.raw, RawExpr::Variable(variable) if self.introduced.contains(variable))
-                    && matches!(right.raw, RawExpr::Type(_))
-            }
-            _ => false,
-        }
-    }
-}
-
-fn quantifier_kind(expression: &Expr<()>) -> Option<QuantifierKind> {
-    match expression.raw {
-        RawExpr::Finop(Finop::Forall, _) => Some(QuantifierKind::Forall),
-        RawExpr::Finop(Finop::Exists, _) => Some(QuantifierKind::Exists),
-        _ => None,
-    }
-}
-
-pub(super) fn analyze_quantifier(
-    expression: &Expr<()>,
-    active_types: &SymbolicTypeEnvironment,
-) -> Result<QuantifierSpec, String> {
-    let kind = quantifier_kind(expression)
-        .ok_or_else(|| "expression is not a supported quantifier".to_owned())?;
-    let RawExpr::Finop(_, expressions) = &expression.raw else {
-        unreachable!()
-    };
-    if expressions.len() < 2 {
-        return Err("a quantifier requires at least one premise and a body".to_owned());
-    }
-    let premises = expressions[..expressions.len() - 1].to_vec();
-    let body = expressions.last().unwrap().clone();
-    let premise_variables = premises
-        .iter()
-        .map(|premise| free_variables(std::iter::once(premise)))
-        .collect::<Vec<_>>();
-    let introduced = premise_variables
-        .iter()
-        .flatten()
-        .filter(|variable| !active_types.types.contains_key(*variable))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if introduced.is_empty() {
-        return Err(
-            "a quantifier must introduce at least one fresh variable in its premises".to_owned(),
-        );
-    }
-    let questionable = premises
-        .iter()
-        .zip(&premise_variables)
-        .filter(|(_, variables)| variables.is_disjoint(&introduced))
-        .map(|(premise, _)| premise.clone())
-        .collect::<Vec<_>>();
-
-    let inferred = infer_symbolic_type_environment(&premises).map_err(|error| error.to_string())?;
-    let mut types = active_types.clone();
-    for variable in &introduced {
-        let ty = inferred.types.get(variable).cloned().ok_or_else(|| {
-            format!(
-                "missing inferred type for quantified variable {}",
-                variable.z3_name()
-            )
-        })?;
-        types.types.insert(variable.clone(), ty);
-    }
-    if let Some(variable) = free_variables(std::iter::once(&body))
-        .into_iter()
-        .find(|variable| !types.types.contains_key(variable))
-    {
-        return Err(format!(
-            "quantifier body contains unbound variable {}",
-            variable.z3_name()
-        ));
-    }
-    for child in expressions {
-        if is_quantifier(child) {
-            analyze_quantifier(child, &types)?;
-        } else if contains_quantifier(child) {
-            return Err("quantifiers embedded beneath another operator are unsupported".to_owned());
-        } else if crate::ellipsis_elimination::contains_ellipses(child) {
-            // Analysis establishes scope; interpretation needs the prepared
-            // preceding givens available during validation.
-            let mut typed = child.with_default_metadata::<crate::type_resolver::TypedMetadata>();
-            crate::type_resolver::TypeResolver::new(
-                &types,
-                &crate::type_resolver::OperatorTypeRules::core(),
-            )
-            .resolve(&mut typed, POSITIVE)
-            .map_err(|error| error.to_string())?;
-        } else {
-            prepare_expression(&types, child, POSITIVE).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(QuantifierSpec {
-        kind,
-        premises,
-        body,
-        introduced,
-        questionable,
-        types,
-    })
-}
-
-pub(super) fn proof_facts(tracked: &[TrackedFact], retained: &[Expr<()>]) -> Vec<Expr<()>> {
-    tracked
-        .iter()
-        .flat_map(|fact| {
-            std::iter::once(fact.sentence.clone()).chain(fact.alternatives.iter().cloned())
-        })
-        .chain(retained.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct WitnessMatch {
-    pub(super) assignments: BTreeMap<Variable, Expr<()>>,
-    pub(super) supporting_facts: Vec<Expr<()>>,
+struct WitnessMatch {
+    assignments: BTreeMap<Variable, Expr<()>>,
+    supporting_facts: Vec<Expr<()>>,
     nonce_pairs: BTreeSet<(crate::ImplicitDimension, crate::ImplicitDimension)>,
 }
 
-pub(super) fn find_existential_witness(
-    spec: &QuantifierSpec,
-    active_types: &SymbolicTypeEnvironment,
-    environment: &Environment,
-    facts: &[Expr<()>],
-    timings: &Timings,
-) -> Option<WitnessMatch> {
-    let requirements = spec
-        .premises
-        .iter()
-        .filter(|premise| !spec.is_binder_declaration(premise))
-        .chain(std::iter::once(&spec.body));
-    let accessible = active_types.types.keys().cloned().collect::<BTreeSet<_>>();
-    let mut matches = BTreeSet::from([WitnessMatch {
-        assignments: BTreeMap::new(),
-        supporting_facts: Vec::new(),
-        nonce_pairs: BTreeSet::new(),
-    }]);
-    for requirement in requirements {
-        let mut next = BTreeSet::new();
-        for state in &matches {
-            for fact in facts {
-                for candidate in crate::formula::conjunction_views(fact) {
-                    let mut unifier = Unifier {
-                        metavariables: &spec.introduced,
-                        assignments: state.assignments.clone(),
-                        pattern_accessible: accessible
-                            .iter()
-                            .chain(spec.introduced.iter())
-                            .cloned()
-                            .collect(),
-                        candidate_accessible: accessible.clone(),
-                        pattern_bound: BTreeSet::new(),
-                        candidate_bound: BTreeSet::new(),
-                        bound_forward: BTreeMap::new(),
-                        bound_reverse: BTreeMap::new(),
-                        nonce_pairs: state.nonce_pairs.clone(),
+pub(super) struct DimensionChecks<'a> {
+    pub context: &'a crate::natural_deduction::ProofContext,
+    pub givens: &'a [PreparedExpression],
+    pub timings: &'a Timings,
+    pub evidence: Vec<crate::natural_deduction::DerivationId>,
+}
+impl crate::natural_deduction::SideConditionChecker for DimensionChecks<'_> {
+    fn premise_derivations(&self) -> &[crate::natural_deduction::DerivationId] {
+        &self.evidence
+    }
+    fn check_instantiation(
+        &mut self,
+        spec: &QuantifierSpec,
+        assignments: &BTreeMap<Variable, Expr<()>>,
+        nonce_pairs: &BTreeSet<(crate::ImplicitDimension, crate::ImplicitDimension)>,
+        supporting_facts: &[Expr<()>],
+    ) -> crate::natural_deduction::SideConditionResult {
+        self.evidence.clear();
+        // Identical types and scalar promotions require no contextual dimension
+        // assumptions and therefore add no scope dependencies.
+        if nonce_pairs.is_empty()
+            && assignments.iter().all(|(v, term)| {
+                let Ok(analyzed) =
+                    crate::type_resolver::analyze_expression(&self.context.types, term)
+                else {
+                    return false;
+                };
+                let Ok(actual) = analyzed.meta.get_type() else {
+                    return false;
+                };
+                let expected = &spec.bindings[v];
+                *expected == actual
+                    || matches!(
+                        (expected, actual),
+                        (TypeExpr::Real, TypeExpr::Nat | TypeExpr::Int)
+                            | (TypeExpr::Int, TypeExpr::Nat)
+                    )
+            })
+        {
+            return crate::natural_deduction::SideConditionResult::Valid;
+        }
+        let natural_symbols = self
+            .context
+            .types
+            .types
+            .iter()
+            .filter(|(_, t)| **t == TypeExpr::Nat)
+            .map(|(v, _)| {
+                (
+                    NaturalParameter::Variable(v.clone()),
+                    z3::ast::Int::new_const(v.z3_name()),
+                )
+            })
+            .collect();
+        let mut assumptions = self.givens.to_vec();
+        for fact in self.context.facts() {
+            let is_assumption = fact.derivations.iter().any(|d| {
+                matches!(
+                    d.proof,
+                    crate::natural_deduction::NaturalDeductionProof::Assumption { .. }
+                )
+            });
+            let natural_constraints = crate::formula::conjunction_views(&fact.expression)
+                .into_iter()
+                .filter(|expression| {
+                    let RawExpr::CmpChain(chain) = &expression.raw else {
+                        return false;
                     };
-                    if !unifier.expression(requirement, candidate) {
-                        continue;
-                    }
-                    let mut supporting_facts = state.supporting_facts.clone();
-                    if !supporting_facts.contains(fact) {
-                        supporting_facts.push(fact.clone());
-                    }
-                    next.insert(WitnessMatch {
-                        assignments: unifier.assignments,
-                        supporting_facts,
-                        nonce_pairs: unifier.nonce_pairs,
-                    });
+                    std::iter::once(&chain.start)
+                        .chain(chain.assertions.iter().map(|(_, e)| e))
+                        .all(|term| {
+                            matches!(
+                                crate::z3_utils::classify_presburger(term, &natural_symbols),
+                                crate::z3_utils::PresburgerClassification::Valid
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            let is_natural = !natural_constraints.is_empty();
+            for expression in natural_constraints {
+                if let Ok(prepared) = prepare_expression(&self.context.types, expression, POSITIVE)
+                {
+                    assumptions.push(prepared);
                 }
             }
+            if (is_assumption || is_natural)
+                && let Some(d) = fact.derivations.first()
+            {
+                self.evidence.push(d.id);
+            }
         }
-        matches = next;
-        if matches.is_empty() {
-            return None;
+        let witness = WitnessMatch {
+            assignments: assignments.clone(),
+            supporting_facts: supporting_facts.to_vec(),
+            nonce_pairs: nonce_pairs.clone(),
+        };
+        use crate::natural_deduction::SideConditionResult;
+        match witness_dimension_result(
+            spec,
+            &self.context.types,
+            &assumptions,
+            &witness,
+            self.timings,
+        ) {
+            Ok(true) => SideConditionResult::Valid,
+            Ok(false)
+            | Err(ArgumentValidationError::Shape(
+                ShapeError::Unsat(_) | ShapeError::InvalidTyping(_),
+            )) => SideConditionResult::Invalid,
+            Err(error) => SideConditionResult::Inconclusive(error.to_string()),
         }
     }
-    matches.into_iter().find(|candidate| {
-        spec.introduced
+}
+
+fn witness_dimension_result(
+    spec: &QuantifierSpec,
+    active_types: &SymbolicTypeEnvironment,
+    givens: &[PreparedExpression],
+    witness: &WitnessMatch,
+    timings: &Timings,
+) -> Result<bool, ArgumentValidationError> {
+    let mut types = active_types.clone();
+    types.types.extend(spec.bindings.clone());
+    let prepare = |expression: &Expr<()>| {
+        prepare_expression(&types, expression, POSITIVE)
+            .map_err(ToZ3Error::from)
+            .map_err(ModelFindingError::from)
+            .map_err(ArgumentValidationError::from)
+    };
+    let mut assumptions = givens.to_vec();
+    assumptions.extend(
+        spec.premises
             .iter()
-            .all(|v| candidate.assignments.contains_key(v))
-            && witness_dimensions_match(spec, environment, candidate, timings)
+            .map(&prepare)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    // Compatibility must follow from the symbolic scope, not from assuming
+    // the very binder/term equality whose dimensions we are checking.
+    let mut type_query =
+        crate::enumerable_envspec::dimension_equivalence_query(&types, &assumptions, &[], timings)?;
+    let mut rigid = active_types.types.keys().cloned().collect::<BTreeSet<_>>();
+    for ty in active_types.types.values() {
+        rigid.extend(free_variables(std::iter::once(&Expr::new(RawExpr::Type(
+            ty.clone(),
+        )))));
+    }
+    rigid.extend(spec.introduced.iter().cloned());
+    let flexible = spec
+        .bindings
+        .values()
+        .flat_map(|ty| free_variables(std::iter::once(&Expr::new(RawExpr::Type(ty.clone())))))
+        .filter(|v| !rigid.contains(v))
+        .collect::<BTreeSet<_>>();
+    let mut dimensions = BTreeMap::new();
+    for (variable, term) in &witness.assignments {
+        let actual = crate::type_resolver::analyze_expression(active_types, term)
+            .map_err(ModelFindingError::from_type)?
+            .meta
+            .get_type()
+            .map_err(ModelFindingError::from_type)?;
+        let mut expected = Expr::new(RawExpr::Type(spec.bindings[variable].clone()));
+        for (binder, value) in &witness.assignments {
+            expected = substitute_free_variable(&expected, binder, value);
+        }
+        let RawExpr::Type(expected) = &expected.raw else {
+            unreachable!()
+        };
+        if !compatible_types(
+            expected,
+            &actual,
+            &mut type_query,
+            &flexible,
+            &mut dimensions,
+        )? {
+            return Ok(false);
+        }
+    }
+    if witness.nonce_pairs.is_empty() {
+        return Ok(true);
+    }
+    for (variable, expression) in &witness.assignments {
+        let equality = Expr::new(RawExpr::CmpChain(CmpChain {
+            start: Expr::new(RawExpr::Variable(variable.clone())),
+            assertions: vec![(Cmp::Eq, expression.clone())],
+        }));
+        assumptions.push(prepare(&equality)?);
+    }
+    let required = std::iter::once(&spec.body)
+        .chain(witness.supporting_facts.iter())
+        .map(prepare)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut query = crate::enumerable_envspec::dimension_equivalence_query(
+        &types,
+        &assumptions,
+        &required,
+        timings,
+    )?;
+    nonce_relationships_result(&mut query, &witness.nonce_pairs).ok_or_else(|| {
+        ShapeError::Unknown("could not decide dimension relationships".to_owned()).into()
     })
 }
 
-fn witness_dimensions_match(
-    spec: &QuantifierSpec,
-    environment: &Environment,
-    witness: &WitnessMatch,
-    timings: &Timings,
-) -> bool {
-    let result: Result<bool, ArgumentValidationError> = (|| {
-        let prepare = |expression: &Expr<()>| {
-            prepare_expression(&spec.types, expression, POSITIVE)
-                .map_err(ToZ3Error::from)
-                .map_err(ModelFindingError::from)
-                .map_err(ArgumentValidationError::from)
-        };
-        let mut assumptions = fixed_assignment_declarations(environment, &spec.types)?;
-        assumptions.extend(
-            spec.premises
-                .iter()
-                .map(&prepare)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        for (variable, expression) in &witness.assignments {
-            let equality = Expr::new(RawExpr::CmpChain(CmpChain {
-                start: Expr::new(RawExpr::Variable(variable.clone())),
-                assertions: vec![(Cmp::Eq, expression.clone())],
-            }));
-            assumptions.push(prepare(&equality)?);
+fn compatible_types(
+    expected: &TypeExpr<()>,
+    actual: &TypeExpr<()>,
+    query: &mut crate::enumerable_envspec::DimensionEquivalenceQuery,
+    flexible: &BTreeSet<Variable>,
+    dimensions: &mut BTreeMap<Variable, Expr<()>>,
+) -> Result<bool, ArgumentValidationError> {
+    fn equal(
+        a: &Expr<()>,
+        b: &Expr<()>,
+        q: &mut crate::enumerable_envspec::DimensionEquivalenceQuery,
+        flexible: &BTreeSet<Variable>,
+        dimensions: &mut BTreeMap<Variable, Expr<()>>,
+    ) -> Result<bool, ArgumentValidationError> {
+        if let RawExpr::Variable(v) = &a.raw
+            && flexible.contains(v)
+        {
+            if let Some(previous) = dimensions.get(v).cloned() {
+                return equal(&previous, b, q, &BTreeSet::new(), dimensions);
+            }
+            dimensions.insert(v.clone(), b.clone());
+            return Ok(true);
         }
-        let required = std::iter::once(&spec.body)
-            .chain(witness.supporting_facts.iter())
-            .map(prepare)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut query = crate::enumerable_envspec::dimension_equivalence_query(
-            &spec.types,
-            &assumptions,
-            &required,
-            timings,
-        )?;
-        Ok(nonce_relationships_match(&mut query, &witness.nonce_pairs))
-    })();
-    result.unwrap_or(false)
+        match q.necessarily_equal_expressions(a, b) {
+            Some(true) => Ok(true),
+            Some(false)
+                if free_variables(std::iter::once(a).chain(std::iter::once(b))).is_empty() =>
+            {
+                Ok(false)
+            }
+            _ => Err(ShapeError::Unknown(
+                "dimension compatibility is not established by the symbolic context".into(),
+            )
+            .into()),
+        }
+    }
+    if expected == actual {
+        return Ok(true);
+    }
+    match (expected, actual) {
+        (TypeExpr::Real, TypeExpr::Int | TypeExpr::Nat) | (TypeExpr::Int, TypeExpr::Nat) => {
+            Ok(true)
+        }
+        (TypeExpr::Matrix(a, b), TypeExpr::Matrix(c, d)) => {
+            Ok(equal(a, c, query, flexible, dimensions)?
+                && equal(b, d, query, flexible, dimensions)?)
+        }
+        (TypeExpr::Matrix(a, b), TypeExpr::Real | TypeExpr::Int | TypeExpr::Nat)
+        | (TypeExpr::Real, TypeExpr::Matrix(a, b)) => {
+            let one = Expr::new(RawExpr::NatLiteral(1));
+            Ok(equal(a, &one, query, flexible, dimensions)?
+                && equal(b, &one, query, flexible, dimensions)?)
+        }
+        (TypeExpr::Set(a), TypeExpr::Set(b)) => compatible_types(a, b, query, flexible, dimensions),
+        (TypeExpr::Seq(a, n), TypeExpr::Seq(b, m)) => {
+            let (RawExpr::Type(a), RawExpr::Type(b)) = (&a.raw, &b.raw) else {
+                return Ok(false);
+            };
+            Ok(equal(n, m, query, flexible, dimensions)?
+                && compatible_types(a, b, query, flexible, dimensions)?)
+        }
+        _ => Ok(false),
+    }
 }
 
+#[cfg(test)]
 fn nonce_relationships_match(
     query: &mut crate::enumerable_envspec::DimensionEquivalenceQuery,
     pairs: &BTreeSet<(crate::ImplicitDimension, crate::ImplicitDimension)>,
 ) -> bool {
+    nonce_relationships_result(query, pairs).unwrap_or(false)
+}
+
+fn nonce_relationships_result(
+    query: &mut crate::enumerable_envspec::DimensionEquivalenceQuery,
+    pairs: &BTreeSet<(crate::ImplicitDimension, crate::ImplicitDimension)>,
+) -> Option<bool> {
     let pairs = pairs.iter().copied().collect::<Vec<_>>();
     for (index, (pattern, candidate)) in pairs.iter().enumerate() {
         for (other_pattern, other_candidate) in &pairs[index + 1..] {
-            let Some(pattern_equal) = query.necessarily_equal(*pattern, *other_pattern) else {
-                return false;
-            };
-            let Some(candidate_equal) = query.necessarily_equal(*candidate, *other_candidate)
-            else {
-                return false;
-            };
+            let pattern_equal = query.necessarily_equal(*pattern, *other_pattern)?;
+            let candidate_equal = query.necessarily_equal(*candidate, *other_candidate)?;
             if pattern_equal != candidate_equal {
-                return false;
+                return Some(false);
             }
         }
     }
-    true
+    Some(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Finop, ImplicitDimension, Monop};
+    use crate::ImplicitDimension;
 
     fn dimension(dimension: ImplicitDimension) -> Expr<()> {
         Expr::new(RawExpr::ImplicitDimension(dimension))
@@ -501,25 +311,6 @@ mod tests {
         Expr::new(RawExpr::CmpChain(CmpChain {
             start: dimension(left),
             assertions: vec![(Cmp::Eq, dimension(right))],
-        }))
-    }
-
-    fn traced_equation(scalar: &str, op: Finop, dimension: ImplicitDimension) -> Expr<()> {
-        Expr::new(RawExpr::CmpChain(CmpChain {
-            start: Expr::new(RawExpr::Finop(
-                op,
-                vec![
-                    Expr::new(RawExpr::Variable(Variable::new(scalar))),
-                    Expr::new(RawExpr::Monop(
-                        Monop::Trace,
-                        Expr::new(RawExpr::IdentityMatrix { dimension }),
-                    )),
-                ],
-            )),
-            assertions: vec![(
-                Cmp::Eq,
-                Expr::new(RawExpr::Variable(Variable::new("result"))),
-            )],
         }))
     }
 
@@ -580,64 +371,5 @@ mod tests {
             &mut incomplete_query,
             &independent_pairs,
         ));
-    }
-
-    #[test]
-    fn existential_matching_carries_nonce_correspondence_across_requirements() {
-        let x = Variable::new("x");
-        let a = Variable::new("a");
-        let result = Variable::new("result");
-        let pattern_dimension = ImplicitDimension::fresh();
-        let spec = QuantifierSpec {
-            kind: QuantifierKind::Exists,
-            premises: vec![traced_equation("x", Finop::Plus, pattern_dimension)],
-            body: traced_equation("x", Finop::Times, pattern_dimension),
-            introduced: BTreeSet::from([x.clone()]),
-            questionable: Vec::new(),
-            types: SymbolicTypeEnvironment {
-                types: [
-                    (x, TypeExpr::Real),
-                    (a.clone(), TypeExpr::Real),
-                    (result.clone(), TypeExpr::Real),
-                ]
-                .into_iter()
-                .collect(),
-            },
-        };
-        let active = SymbolicTypeEnvironment {
-            types: [(a, TypeExpr::Real), (result, TypeExpr::Real)]
-                .into_iter()
-                .collect(),
-        };
-        let independent_facts = vec![
-            traced_equation("a", Finop::Plus, ImplicitDimension::fresh()),
-            traced_equation("a", Finop::Times, ImplicitDimension::fresh()),
-        ];
-        assert!(
-            find_existential_witness(
-                &spec,
-                &active,
-                &Environment::default(),
-                &independent_facts,
-                &Timings::default()
-            )
-            .is_none()
-        );
-
-        let shared_dimension = ImplicitDimension::fresh();
-        let shared_facts = vec![
-            traced_equation("a", Finop::Plus, shared_dimension),
-            traced_equation("a", Finop::Times, shared_dimension),
-        ];
-        assert!(
-            find_existential_witness(
-                &spec,
-                &active,
-                &Environment::default(),
-                &shared_facts,
-                &Timings::default()
-            )
-            .is_some()
-        );
     }
 }

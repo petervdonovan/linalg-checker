@@ -54,6 +54,7 @@ pub(crate) fn conjunction_views<Metadata>(expression: &Expr<Metadata>) -> Vec<&E
 
 struct FreeVariableCollector {
     variables: BTreeSet<Variable>,
+    accessible: BTreeSet<Variable>,
     bound: HashSet<Variable>,
 }
 
@@ -104,7 +105,10 @@ impl<Metadata> Visit<Metadata> for FreeVariableCollector {
         let mut introduced = BTreeSet::new();
         for premise in premises {
             for variable in free_variables(std::iter::once(premise)) {
-                if !self.variables.contains(&variable) && !self.bound.contains(&variable) {
+                if !self.variables.contains(&variable)
+                    && !self.bound.contains(&variable)
+                    && !self.accessible.contains(&variable)
+                {
                     introduced.insert(variable);
                 }
             }
@@ -121,8 +125,18 @@ impl<Metadata> Visit<Metadata> for FreeVariableCollector {
 pub(crate) fn free_variables<'a, Metadata: 'a>(
     expressions: impl Iterator<Item = &'a Expr<Metadata>>,
 ) -> BTreeSet<Variable> {
+    free_variables_in_context(expressions, &BTreeSet::new())
+}
+
+/// Quantifier premises introduce only names absent from their lexical context.
+/// In particular, an existing dimension variable in a binder's type stays free.
+pub(crate) fn free_variables_in_context<'a, Metadata: 'a>(
+    expressions: impl Iterator<Item = &'a Expr<Metadata>>,
+    accessible: &BTreeSet<Variable>,
+) -> BTreeSet<Variable> {
     let mut collector = FreeVariableCollector {
         variables: BTreeSet::new(),
+        accessible: accessible.clone(),
         bound: HashSet::new(),
     };
     for expression in expressions {

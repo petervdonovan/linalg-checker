@@ -85,7 +85,7 @@ WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, x = y\right) \lan
 <details>
 <summary>Inconclusive</summary>
 
-quantifiers embedded beneath another operator are unsupported
+the SMT backend cannot lower this quantified formula
 </details>
 
 1. $\exists y \in \mathbb{R}, x = y$
@@ -93,7 +93,7 @@ quantifiers embedded beneath another operator are unsupported
    <details>
    <summary>Inconclusive</summary>
 
-   quantifier body contains unbound variable x
+   missing type for x
    </details>
 2. $x = x$
 
@@ -119,7 +119,7 @@ WTS $\vec{b} = \mathbb{0}$
 The negation of $\vec{b} = \mathbb{0}$ is satisfied by:
 
 - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-- $\vec{b} = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
+- $\vec{b} = \begin{bmatrix}\square \\ 2\end{bmatrix}$
 </details>
 
 1. $\vec{b} = \mathbb{0}$
@@ -130,7 +130,7 @@ The negation of $\vec{b} = \mathbb{0}$ is satisfied by:
    The negation of $\vec{b} = \mathbb{0}$ is satisfied by:
 
    - $A = \begin{bmatrix}\square & \square \\ \square & \square\end{bmatrix}$
-   - $\vec{b} = \begin{bmatrix}-1 \\ -1\end{bmatrix}$
+   - $\vec{b} = \begin{bmatrix}\square \\ 2\end{bmatrix}$
    </details>
 
 # An existential witness requiring arithmetic reasoning
@@ -167,7 +167,9 @@ WTS $z_{0} \in \mathbb{R}$
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $z_{0} \in \mathbb{R}$
 </details>
 
 1. $z_{0} \in \mathbb{R}$
@@ -238,11 +240,13 @@ Given:
 
 WTS $\forall a \in \mathbb{R}, b \in \mathbb{R}, a \vec{v}_{1} + b \vec{v}_{2} = \mathbb{0} \implies a = 0 \land b = 0$
 
-1. $a \vec{v}_{1} + b \vec{v}_{2} = \mathbb{0} \implies a = 0 \land b = 0$
-
-## Error
+<details>
+<summary>Inconclusive</summary>
 
 subscripted expression is not a sequence
+</details>
+
+1. $a \vec{v}_{1} + b \vec{v}_{2} = \mathbb{0} \implies a = 0 \land b = 0$
 
 # A matrix square-root identity with unverified existence
 
@@ -253,9 +257,9 @@ Given:
 WTS $A^{\frac{1}{2}} A^{\frac{1}{2}} = A$
 
 <details>
-<summary>✅ verified</summary>
+<summary>⚠️ conditional</summary>
 
-No premises seemed necessary to show this.
+The existence of $A^{\frac{1}{2}}$ was assumed without checking.
 </details>
 
 1. $A^{\frac{1}{2}} A^{\frac{1}{2}} = A$

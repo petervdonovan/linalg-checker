@@ -25,75 +25,6 @@ pub(super) fn extend_symbolic_types(
     Ok((extended, introduced))
 }
 
-pub(super) struct AnalyzedGivens {
-    pub(super) ordinary: Vec<Expr<()>>,
-    pub(super) retained: Vec<Expr<()>>,
-    pub(super) symbolic_types: SymbolicTypeEnvironment,
-    pub(super) introduced: BTreeSet<Variable>,
-    pub(super) questionable: Vec<Expr<()>>,
-}
-
-pub(super) fn analyze_goal_givens(
-    parent: &SymbolicTypeEnvironment,
-    givens: &[Expr<()>],
-    forced_natural: Option<&Variable>,
-) -> Result<AnalyzedGivens, String> {
-    let mut result = AnalyzedGivens {
-        ordinary: Vec::new(),
-        retained: Vec::new(),
-        symbolic_types: parent.clone(),
-        introduced: BTreeSet::new(),
-        questionable: Vec::new(),
-    };
-    let mut forced_inserted = false;
-    for given in givens {
-        if is_quantifier(given) {
-            let spec = analyze_quantifier(given, &result.symbolic_types)?;
-            result.questionable.extend(spec.questionable);
-            result.retained.push(given.clone());
-            continue;
-        }
-        if let Some(variable) = forced_natural
-            && !forced_inserted
-        {
-            if result.symbolic_types.types.contains_key(variable) {
-                return Err(format!(
-                    "induction-step binder {} collides with its enclosing scope",
-                    variable.z3_name()
-                ));
-            }
-            result
-                .symbolic_types
-                .types
-                .insert(variable.clone(), TypeExpr::Nat);
-            result.introduced.insert(variable.clone());
-            forced_inserted = true;
-        }
-        let (types, introduced) =
-            extend_symbolic_types(&result.symbolic_types, std::slice::from_ref(given))
-                .map_err(|error| error.to_string())?;
-        result.symbolic_types = types;
-        result.introduced.extend(introduced);
-        result.ordinary.push(given.clone());
-    }
-    if let Some(variable) = forced_natural
-        && !forced_inserted
-    {
-        if result.symbolic_types.types.contains_key(variable) {
-            return Err(format!(
-                "induction-step binder {} collides with its enclosing scope",
-                variable.z3_name()
-            ));
-        }
-        result
-            .symbolic_types
-            .types
-            .insert(variable.clone(), TypeExpr::Nat);
-        result.introduced.insert(variable.clone());
-    }
-    Ok(result)
-}
-
 pub(super) fn ensure_expression_bound(
     expression: &Expr<()>,
     types: &SymbolicTypeEnvironment,
@@ -168,46 +99,6 @@ pub(super) fn goal_environment_extensions(
     ) {
         Ok(iterator) => iterator,
         Err(ShapeError::Unsat(_)) | Err(ShapeError::InvalidTyping(_)) => {
-            return Ok(StepEnvironmentExtensions {
-                environments: Vec::new(),
-                exhaustive: true,
-            });
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let exhaustive = iterator.dimension_bound_is_exhaustive();
-    let environments = iterator.collect::<Result<Vec<_>, _>>()?;
-    Ok(StepEnvironmentExtensions {
-        environments,
-        exhaustive,
-    })
-}
-
-pub(super) fn quantifier_environment_extensions(
-    base: &Environment,
-    symbolic_types: &SymbolicTypeEnvironment,
-    premises: &[PreparedExpression],
-    required_body: Option<&PreparedExpression>,
-    max_dimension: u64,
-    timings: &Timings,
-) -> Result<StepEnvironmentExtensions, ArgumentValidationError> {
-    let declarations = fixed_assignment_declarations(base, symbolic_types)?;
-    let assumptions = declarations
-        .iter()
-        .chain(premises)
-        .cloned()
-        .collect::<Vec<_>>();
-    let required = required_body.map(std::slice::from_ref).unwrap_or_default();
-    let iterator = match extract_prepared_environment_iterator_with_required_context(
-        symbolic_types,
-        &assumptions,
-        required,
-        &[],
-        max_dimension,
-        timings,
-    ) {
-        Ok(iterator) => iterator,
-        Err(ShapeError::Unsat(_) | ShapeError::InvalidTyping(_)) => {
             return Ok(StepEnvironmentExtensions {
                 environments: Vec::new(),
                 exhaustive: true,

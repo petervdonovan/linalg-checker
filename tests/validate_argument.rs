@@ -42,10 +42,14 @@ fn validates_arguments_matching_committed_markdown() {
 
 fn is_verified(validation: &StepValidationData) -> bool {
     !validation.checks.is_empty()
-        && validation
-            .checks
-            .iter()
-            .all(|check| matches!(check, StepCheck::Unsat { .. }))
+        && validation.checks.iter().all(|check| {
+            matches!(
+                check,
+                StepCheck::Unsat { .. }
+                    | StepCheck::EstablishedByFact { .. }
+                    | StepCheck::NaturalDeduction { .. }
+            )
+        })
 }
 
 #[test]
@@ -99,18 +103,18 @@ fn validates_nested_induction_obligations() {
             .iter()
             .any(|check| matches!(check, StepCheck::TacticEstablished))
     );
-    assert!(!argument.root.validation.environments_exhaustive);
+    assert!(argument.root.validation.environments_exhaustive);
     assert_eq!(argument.root.steps.len(), 2);
     for item in &argument.root.steps {
         let ArgumentItem::Goal(goal) = item else {
             panic!("induction obligations must be direct child goals")
         };
-        assert!(
-            goal.validation
-                .checks
-                .iter()
-                .any(|check| matches!(check, StepCheck::Unsat { .. }))
-        );
+        assert!(goal.validation.checks.iter().any(|check| matches!(
+            check,
+            StepCheck::Unsat { .. }
+                | StepCheck::EstablishedByFact { .. }
+                | StepCheck::NaturalDeduction { .. }
+        )));
     }
 }
 
@@ -133,7 +137,7 @@ fn validates_scoped_vector_induction_from_dimension_one() {
             .iter()
             .any(|check| matches!(check, StepCheck::TacticEstablished))
     );
-    assert!(!argument.root.validation.environments_exhaustive);
+    assert!(argument.root.validation.environments_exhaustive);
     let [ArgumentItem::Goal(base), ArgumentItem::Goal(step)] = argument.root.steps.as_slice()
     else {
         panic!("expected direct base and successor goals")
@@ -207,12 +211,9 @@ fn validates_quantified_steps_and_goal_evidence() {
         )
     };
     assert!(
-        inferred_dimensions
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(witness_is_b)
+        inferred_dimensions.root.validation.checks.iter().any(
+            |check| witness_is_b(check) || matches!(check, StepCheck::EstablishedByFact { .. })
+        )
     );
     let ArgumentItem::Sentence(existential) = &inferred_dimensions.root.steps[1] else {
         panic!("expected existential sentence")

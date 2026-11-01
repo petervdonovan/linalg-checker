@@ -1194,7 +1194,7 @@ mod tests {
                 Finop::Or,
                 vec![Expr::new(RawExpr::NatLiteral(1))],
             )),
-            ToZ3Error::InvalidOperands("logical operations require Boolean operands"),
+            ToZ3Error::Type(TypeError::Invalid("logical operands must be Boolean")),
         );
     }
 

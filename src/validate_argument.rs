@@ -28,7 +28,6 @@ use crate::{
     },
     to_z3::{LoweredExistence, LoweredSideCondition, ToZ3Error},
     type_resolver::{MaybeTyped, SymbolicTypeEnvironment, TypeError},
-    unification::Unifier,
     visit_mut::VisitContext,
 };
 
@@ -74,6 +73,10 @@ impl From<ModelFindingError> for ArgumentValidationError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepCheck {
+    NaturalDeduction {
+        proof: crate::natural_deduction::NaturalDeductionProof,
+        supporting_facts: Vec<Expr<()>>,
+    },
     Unsat {
         environment: Rc<Environment>,
         supporting_facts: Vec<Expr<()>>,
@@ -180,23 +183,7 @@ pub struct Argument {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Arguments(pub Vec<Argument>);
 
-impl ArgumentStep {
-    fn has_counterexample(&self) -> bool {
-        self.validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Counterexample { .. }))
-    }
-}
-
 impl Goal {
-    fn has_counterexample(&self) -> bool {
-        self.validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Counterexample { .. }))
-    }
-
     fn reset(&mut self, max_dimension: u64) {
         reset_validation(&mut self.validation, max_dimension);
         for item in &mut self.steps {
@@ -227,170 +214,18 @@ impl Argument {
         let before = timings.scope("before_preprocessing_complete_ms");
         self.error = None;
         self.root.reset(max_dimension);
-
-        if self.root.tactic.is_some() {
-            drop(before);
-            let _after = timings.scope("after_preprocessing_complete_ms");
-            set_exhaustive(&mut self.root, true);
-            self.root.validation.givens_feasible = true;
-            let environment = Rc::new(Environment::default());
-            let mut solver = crate::z3_utils::value_solver();
-            let mut tracked = Vec::new();
-            let mut scoped_statements = Vec::new();
-            let mut run = ValidationRun {
-                timings: timings.clone(),
-                max_dimension,
-                next_tracker: 0,
-                givens: Vec::new(),
-            };
-            validate_goal_contents(
-                &mut self.root,
-                &mut solver,
-                environment,
-                &SymbolicTypeEnvironment::default(),
-                &mut tracked,
-                &mut scoped_statements,
-                &mut run,
-                false,
-            )?;
-            return Ok(());
-        }
-
-        let analyzed =
-            match analyze_goal_givens(&SymbolicTypeEnvironment::default(), &self.root.givens, None)
-            {
-                Ok(analyzed) => analyzed,
-                Err(message) => {
-                    self.root
-                        .validation
-                        .checks
-                        .push(StepCheck::QuantifierInconclusive { message });
-                    return Ok(());
-                }
-            };
-        if !analyzed.questionable.is_empty() {
-            self.root
-                .validation
-                .checks
-                .push(StepCheck::QuestionableQuantifier {
-                    premises: analyzed.questionable.clone(),
-                });
-        }
-        let symbolic_types = analyzed.symbolic_types;
-        let ordinary_givens = analyzed.ordinary;
-        let retained_givens = analyzed.retained;
-        let prepared_givens = prepare_givens(
-            &symbolic_types,
-            &ordinary_givens,
-            &[],
-            max_dimension,
-            timings,
-        )
-        .map_err(crate::to_z3::ToZ3Error::from)
-        .map_err(ModelFindingError::from)?;
-
-        drop(before);
-        let _after = timings.scope("after_preprocessing_complete_ms");
-        let environments = match extract_prepared_environment_iterator(
-            &symbolic_types,
-            &prepared_givens,
-            &[],
-            max_dimension,
-            timings,
-        ) {
-            Ok(environments) => environments,
-            Err(ShapeError::Unsat(_)) => {
-                self.root
-                    .validation
-                    .checks
-                    .push(StepCheck::InconsistentGivens {
-                        max_dimension: None,
-                    });
-                return Ok(());
-            }
-            Err(ShapeError::Unknown(_)) => {
-                self.root
-                    .validation
-                    .checks
-                    .push(StepCheck::Unknown { environment: None });
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        let environments_exhaustive = environments.dimension_bound_is_exhaustive();
-        set_exhaustive(&mut self.root, environments_exhaustive);
-
-        let mut satisfiable_given_count = 0;
-        let mut given_unknown = false;
+        let mut context = crate::natural_deduction::ProofContext::default();
         let mut run = ValidationRun {
             timings: timings.clone(),
             max_dimension,
             next_tracker: 0,
-            givens: prepared_givens.clone(),
+            givens: Vec::new(),
+            lexical_expressions: Vec::new(),
+            interpretations: BTreeMap::new(),
         };
-        for environment in environments {
-            let environment = match environment {
-                Ok(environment) => Rc::new(environment),
-                Err(ShapeError::Unknown(_)) => {
-                    given_unknown = true;
-                    self.root
-                        .validation
-                        .checks
-                        .push(StepCheck::Unknown { environment: None });
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let _environment_time = timings.environment(&environment, &symbolic_types);
-            let mut solver = crate::z3_utils::value_solver();
-            assert_natural_assignment(&solver, &environment);
-            let mut tracked = Vec::new();
-            for (given, prepared) in ordinary_givens.iter().zip(&prepared_givens) {
-                let assertion = lower_prepared_boolean(&environment, prepared)?;
-                assert_definitions(&solver, &assertion.side_conditions)?;
-                let tracker = fresh_tracker(&mut run.next_tracker);
-                solver.assert_and_track(assertion.expression, &tracker);
-                tracked.push(TrackedFact {
-                    tracker,
-                    sentence: given.clone(),
-                    alternatives: prepared.expression.meta.alternatives().to_vec(),
-                });
-            }
-            match timings.check(&solver, "z3_real_ms") {
-                SatResult::Sat => {
-                    satisfiable_given_count += 1;
-                    self.root.validation.givens_feasible = true;
-                    let mut scoped_statements = retained_givens.clone();
-                    validate_goal_contents(
-                        &mut self.root,
-                        &mut solver,
-                        Rc::clone(&environment),
-                        &symbolic_types,
-                        &mut tracked,
-                        &mut scoped_statements,
-                        &mut run,
-                        false,
-                    )?;
-                }
-                SatResult::Unknown => {
-                    given_unknown = true;
-                    self.root.validation.checks.push(StepCheck::Unknown {
-                        environment: Some(environment),
-                    });
-                }
-                SatResult::Unsat => {}
-            }
-        }
-
-        if satisfiable_given_count == 0 && !given_unknown {
-            self.root
-                .validation
-                .checks
-                .push(StepCheck::InconsistentGivens {
-                    max_dimension: (!environments_exhaustive).then_some(max_dimension),
-                });
-        }
+        drop(before);
+        let _after = timings.scope("after_preprocessing_complete_ms");
+        natural_deduction::validate_goal(&mut self.root, &mut context, &mut run, None)?;
         Ok(())
     }
 }
@@ -420,50 +255,23 @@ impl Arguments {
 
 #[derive(Default)]
 struct ClaimResult {
-    assertions: Vec<crate::model_finding::LoweredBoolean>,
-    retained: Vec<Expr<()>>,
-    introduced_types: BTreeMap<Variable, TypeExpr<()>>,
-    alternatives: Vec<Expr<()>>,
     validated: bool,
 }
-
-struct GoalExport {
-    statement: Expr<()>,
-    assertions: Vec<crate::model_finding::LoweredBoolean>,
-}
-
 struct ValidationRun {
     timings: Timings,
-    /// Prepared lexical givens only; accepted proof steps never enter this scope.
     givens: Vec<PreparedExpression>,
+    lexical_expressions: Vec<Expr<()>>,
+    interpretations: BTreeMap<crate::natural_deduction::FactId, PreparedExpression>,
     max_dimension: u64,
     next_tracker: usize,
 }
-
 #[derive(Clone)]
 struct TrackedFact {
     tracker: Bool,
     sentence: Expr<()>,
-    alternatives: Vec<Expr<()>>,
 }
-
-#[derive(Clone, Copy)]
-struct ProofContext<'a> {
-    tracked: &'a [TrackedFact],
-    retained: &'a [Expr<()>],
-}
-
-struct ParentGoalScope<'a> {
-    symbolic_types: &'a SymbolicTypeEnvironment,
-    tracked: &'a [TrackedFact],
-    scoped_statements: &'a [Expr<()>],
-    forced_natural: Option<(&'a Variable, u64)>,
-}
-
 mod induction;
-use induction::{
-    InductionObligations, infer_induction_start, natural_lower_bound, validate_tactic_fallback,
-};
+use induction::{InductionObligations, infer_induction_start, natural_lower_bound};
 fn scoped_goal_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
     if givens.is_empty() {
         return deep_clone(conclusion);
@@ -472,707 +280,43 @@ fn scoped_goal_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()
     expressions.push(deep_clone(conclusion));
     Expr::new(RawExpr::Finop(Finop::Forall, expressions))
 }
-
 fn exported_goal_expression(
-    introduced_variables: &BTreeSet<Variable>,
+    introduced: &BTreeSet<Variable>,
     givens: &[Expr<()>],
     conclusion: &Expr<()>,
 ) -> Expr<()> {
-    if introduced_variables.is_empty() {
+    if introduced.is_empty() {
         scoped_statement_expression(givens, conclusion)
     } else {
         scoped_goal_expression(givens, conclusion)
     }
 }
-
-fn set_exhaustive(goal: &mut Goal, exhaustive: bool) {
-    goal.validation.environments_exhaustive = exhaustive;
-    for item in &mut goal.steps {
-        match item {
-            ArgumentItem::Sentence(step) => step.validation.environments_exhaustive = exhaustive,
-            ArgumentItem::Goal(goal) => set_exhaustive(goal, exhaustive),
-        }
-    }
-}
-
-fn and_exhaustive(goal: &mut Goal, exhaustive: bool) {
-    goal.validation.environments_exhaustive &= exhaustive;
-    for item in &mut goal.steps {
-        match item {
-            ArgumentItem::Sentence(step) => step.validation.environments_exhaustive &= exhaustive,
-            ArgumentItem::Goal(goal) => and_exhaustive(goal, exhaustive),
-        }
-    }
-}
-
-fn fresh_tracker(next_tracker: &mut usize) -> Bool {
-    let tracker = Bool::new_const(format!("argument_fact_{}", *next_tracker));
-    *next_tracker += 1;
+fn fresh_tracker(next: &mut usize) -> Bool {
+    let tracker = Bool::new_const(format!("argument_fact_{}", *next));
+    *next += 1;
     tracker
 }
-
 fn track_assertions(
     solver: &mut Solver,
     assertions: &[crate::model_finding::LoweredBoolean],
     sentence: Expr<()>,
-    alternatives: Vec<Expr<()>>,
     tracked: &mut Vec<TrackedFact>,
-    next_tracker: &mut usize,
+    next: &mut usize,
 ) -> Result<(), ModelFindingError> {
     let mut expressions = Vec::new();
     for assertion in assertions {
         assert_definitions(solver, &assertion.side_conditions)?;
         expressions.push(assertion.expression.clone());
     }
-    let tracker = fresh_tracker(next_tracker);
+    let tracker = fresh_tracker(next);
     solver.assert_and_track(Bool::and(&expressions), &tracker);
-    tracked.push(TrackedFact {
-        tracker,
-        sentence,
-        alternatives,
-    });
+    tracked.push(TrackedFact { tracker, sentence });
     Ok(())
 }
-
-#[allow(clippy::too_many_arguments)]
-fn validate_goal_contents(
-    goal: &mut Goal,
-    solver: &mut Solver,
-    environment: Rc<Environment>,
-    symbolic_types: &SymbolicTypeEnvironment,
-    tracked: &mut Vec<TrackedFact>,
-    scoped_statements: &mut Vec<Expr<()>>,
-    run: &mut ValidationRun,
-    export_conclusion: bool,
-) -> Result<ClaimResult, ArgumentValidationError> {
-    let induction = match &goal.tactic {
-        Some(Tactic::Induction { variable }) => {
-            if symbolic_types.types.contains_key(variable) {
-                goal.validation.checks.push(StepCheck::InvalidTactic {
-                    message: format!(
-                        "the induction variable {} is already active; rename it",
-                        variable.z3_name()
-                    ),
-                });
-                None
-            } else if !free_variables(goal.givens.iter().chain(std::iter::once(&goal.conclusion)))
-                .contains(variable)
-            {
-                goal.validation.checks.push(StepCheck::InvalidTactic {
-                    message: format!(
-                        "the induction variable {} does not occur freely in the goal",
-                        variable.z3_name()
-                    ),
-                });
-                None
-            } else {
-                match infer_induction_start(
-                    goal,
-                    variable,
-                    &environment,
-                    symbolic_types,
-                    &run.givens,
-                    run.max_dimension,
-                    &run.timings,
-                )? {
-                    Some(start) => Some((start, InductionObligations::new(goal, variable, start))),
-                    None => {
-                        goal.validation.checks.push(StepCheck::InvalidTactic {
-                            message: format!(
-                                "no admissible starting value for {} was found up to {}",
-                                variable.z3_name(),
-                                run.max_dimension
-                            ),
-                        });
-                        None
-                    }
-                }
-            }
-        }
-        None => None,
-    };
-    let tactic_is_invalid = goal.tactic.is_some() && induction.is_none();
-    let mut base_valid = false;
-    let mut base_exhaustive = false;
-    let mut step_valid = false;
-    let mut step_exhaustive = false;
-    let mut proof_types = symbolic_types.clone();
-    let mut existential_locals = BTreeSet::new();
-
-    for item in &mut goal.steps {
-        match item {
-            ArgumentItem::Sentence(step) => {
-                if step.has_counterexample() {
-                    continue;
-                }
-                let result = validate_claim(
-                    &step.sentence,
-                    &mut step.validation,
-                    solver,
-                    Rc::clone(&environment),
-                    &proof_types,
-                    ProofContext {
-                        tracked,
-                        retained: scoped_statements,
-                    },
-                    run,
-                    true,
-                )?;
-                if result.validated {
-                    for (variable, ty) in &result.introduced_types {
-                        proof_types.types.insert(variable.clone(), ty.clone());
-                        existential_locals.insert(variable.clone());
-                    }
-                    if !result.assertions.is_empty() {
-                        track_assertions(
-                            solver,
-                            &result.assertions,
-                            step.sentence.clone(),
-                            result.alternatives,
-                            tracked,
-                            &mut run.next_tracker,
-                        )?;
-                    }
-                    scoped_statements.extend(result.retained);
-                }
-            }
-            ArgumentItem::Goal(child) => {
-                let is_base = induction
-                    .as_ref()
-                    .is_some_and(|(_, obligations)| obligations.matches_base(child));
-                let is_step = induction
-                    .as_ref()
-                    .is_some_and(|(_, obligations)| obligations.matches_step(child));
-                let forced_natural = is_step.then(|| {
-                    let Tactic::Induction { variable } = goal.tactic.as_ref().unwrap();
-                    (variable, induction.as_ref().unwrap().0)
-                });
-                let export = validate_nested_goal(
-                    child,
-                    solver,
-                    Rc::clone(&environment),
-                    ParentGoalScope {
-                        symbolic_types: &proof_types,
-                        tracked,
-                        scoped_statements,
-                        forced_natural,
-                    },
-                    run,
-                )?;
-                if export.is_some() {
-                    if is_base {
-                        base_valid = true;
-                        base_exhaustive |= child.validation.environments_exhaustive;
-                    }
-                    if is_step {
-                        step_valid = true;
-                        step_exhaustive |= child.validation.environments_exhaustive;
-                    }
-                }
-                if let Some(export) = export {
-                    scoped_statements.push(export.statement);
-                    if !export.assertions.is_empty() {
-                        track_assertions(
-                            solver,
-                            &export.assertions,
-                            child.conclusion.clone(),
-                            Vec::new(),
-                            tracked,
-                            &mut run.next_tracker,
-                        )?;
-                    }
-                }
-            }
-        }
-    }
-
-    if tactic_is_invalid {
-        return Ok(ClaimResult::default());
-    }
-    if let Some((_, obligations)) = &induction {
-        if base_valid && step_valid {
-            goal.validation.environments_exhaustive &= base_exhaustive && step_exhaustive;
-            goal.validation.checks.push(StepCheck::TacticEstablished);
-            return Ok(ClaimResult {
-                assertions: Vec::new(),
-                retained: vec![deep_clone(&goal.conclusion)],
-                introduced_types: BTreeMap::new(),
-                alternatives: Vec::new(),
-                validated: true,
-            });
-        }
-        if !goal
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::IncompleteSubgoals { .. }))
-        {
-            let mut expected = Vec::new();
-            if !base_valid {
-                expected.push(deep_clone(&obligations.base));
-            }
-            if !step_valid {
-                expected.push(deep_clone(&obligations.step));
-            }
-            goal.validation
-                .checks
-                .push(StepCheck::IncompleteSubgoals { expected });
-        }
-    }
-
-    if goal.has_counterexample() {
-        return Ok(ClaimResult::default());
-    }
-    if goal.tactic.is_some() {
-        return validate_tactic_fallback(
-            goal,
-            solver,
-            environment,
-            &proof_types,
-            tracked,
-            scoped_statements,
-            run,
-        );
-    }
-    if free_variables(std::iter::once(&goal.conclusion))
-        .iter()
-        .any(|variable| existential_locals.contains(variable))
-    {
-        goal.validation
-            .checks
-            .push(StepCheck::InvalidExistentialElimination {
-                message: "an existential witness cannot occur freely in the goal conclusion"
-                    .to_owned(),
-            });
-        return Ok(ClaimResult::default());
-    }
-    validate_claim(
-        &goal.conclusion,
-        &mut goal.validation,
-        solver,
-        environment,
-        &proof_types,
-        ProofContext {
-            tracked,
-            retained: scoped_statements,
-        },
-        run,
-        export_conclusion,
-    )
-}
-
-fn validate_nested_goal(
-    goal: &mut Goal,
-    solver: &mut Solver,
-    parent_environment: Rc<Environment>,
-    parent: ParentGoalScope<'_>,
-    run: &mut ValidationRun,
-) -> Result<Option<GoalExport>, ArgumentValidationError> {
-    if goal.has_counterexample() {
-        return Ok(None);
-    }
-
-    if goal.tactic.is_some() {
-        let introduced_variables =
-            free_variables(goal.givens.iter().chain(std::iter::once(&goal.conclusion)))
-                .into_iter()
-                .filter(|variable| !parent.symbolic_types.types.contains_key(variable))
-                .collect();
-        let mut tracked = parent.tracked.to_vec();
-        let mut scoped_statements = parent.scoped_statements.to_vec();
-        let result = validate_goal_contents(
-            goal,
-            solver,
-            Rc::clone(&parent_environment),
-            parent.symbolic_types,
-            &mut tracked,
-            &mut scoped_statements,
-            run,
-            true,
-        )?;
-        return Ok(result.validated.then(|| GoalExport {
-            statement: exported_goal_expression(
-                &introduced_variables,
-                &goal.givens,
-                &goal.conclusion,
-            ),
-            assertions: Vec::new(),
-        }));
-    }
-
-    let analyzed = match analyze_goal_givens(
-        parent.symbolic_types,
-        &goal.givens,
-        parent.forced_natural.map(|(variable, _)| variable),
-    ) {
-        Ok(analyzed) => analyzed,
-        Err(message) => {
-            goal.validation
-                .checks
-                .push(StepCheck::QuantifierInconclusive { message });
-            return Ok(None);
-        }
-    };
-    if !analyzed.questionable.is_empty()
-        && !goal
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::QuestionableQuantifier { .. }))
-    {
-        goal.validation
-            .checks
-            .push(StepCheck::QuestionableQuantifier {
-                premises: analyzed.questionable.clone(),
-            });
-    }
-    let ordinary_givens = analyzed.ordinary;
-    let symbolic_types = analyzed.symbolic_types;
-    let introduced_variables = analyzed.introduced;
-    let retained_givens = analyzed.retained;
-    let prepared_givens = match prepare_givens(
-        &symbolic_types,
-        &ordinary_givens,
-        &run.givens,
-        run.max_dimension,
-        &run.timings,
-    )
-    .map_err(ToZ3Error::from)
-    .map_err(ModelFindingError::from)
-    {
-        Ok(givens) => givens,
-        Err(error) => {
-            goal.validation.checks.push(StepCheck::Error {
-                environment: parent_environment,
-                error,
-            });
-            return Ok(None);
-        }
-    };
-
-    let forced_lower_bound = parent
-        .forced_natural
-        .map(|(variable, start)| natural_lower_bound(variable, start))
-        .map(|bound| {
-            prepare_expression(&symbolic_types, &bound, POSITIVE)
-                .map(|prepared| (bound, prepared))
-                .map_err(ToZ3Error::from)
-                .map_err(ModelFindingError::from)
-        })
-        .transpose()?;
-    let mut environment_givens = prepared_givens.clone();
-    if let Some((_, prepared)) = &forced_lower_bound {
-        environment_givens.push(prepared.clone());
-    }
-
-    let prepared_implication =
-        if introduced_variables.is_empty() && !goal.givens.iter().any(is_quantifier) {
-            let mut scope = run.givens.clone();
-            scope.extend(prepared_givens.iter().cloned());
-            let conclusion = prepare_expression_with_premises(
-                &symbolic_types,
-                &goal.conclusion,
-                POSITIVE,
-                &scope,
-                run.max_dimension,
-                &run.timings,
-            )
-            .map_err(ModelFindingError::from_type);
-            // The normal claim check records preparation failures locally.
-            conclusion
-                .ok()
-                .map(|conclusion| conclusion.under_givens(&prepared_givens))
-        } else {
-            None
-        };
-    let implication_context = prepared_implication.as_slice();
-    let extensions = goal_environment_extensions(
-        &parent_environment,
-        &symbolic_types,
-        &environment_givens,
-        implication_context,
-        run.max_dimension,
-        &run.timings,
-    )?;
-    and_exhaustive(goal, extensions.exhaustive);
-    if extensions.environments.is_empty() {
-        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
-        return Ok(None);
-    }
-
-    let mut feasible = 0;
-    let mut all_validated = true;
-    let mut exported = Vec::new();
-    for extension in extensions.environments {
-        let extension = Rc::new(extension);
-        let _environment_time = run.timings.environment(&extension, &symbolic_types);
-        solver.push();
-        assert_natural_assignment(solver, &extension);
-        let mut tracked = parent.tracked.to_vec();
-        let mut scoped_statements = parent.scoped_statements.to_vec();
-        scoped_statements.extend(retained_givens.iter().cloned());
-        for (given, prepared) in ordinary_givens.iter().zip(&prepared_givens) {
-            let assertion = lower_prepared_boolean(&extension, prepared)?;
-            assert_definitions(solver, &assertion.side_conditions)?;
-            let tracker = fresh_tracker(&mut run.next_tracker);
-            solver.assert_and_track(assertion.expression, &tracker);
-            tracked.push(TrackedFact {
-                tracker,
-                sentence: given.clone(),
-                alternatives: prepared.expression.meta.alternatives().to_vec(),
-            });
-        }
-        if let Some((_, prepared)) = &forced_lower_bound {
-            let assertion = lower_prepared_boolean(&extension, prepared)?;
-            assert_definitions(solver, &assertion.side_conditions)?;
-            solver.assert(assertion.expression);
-        }
-        match run.timings.check(solver, "z3_real_ms") {
-            SatResult::Sat => {
-                feasible += 1;
-                let scope_len = run.givens.len();
-                run.givens.extend(prepared_givens.iter().cloned());
-                let result = validate_goal_contents(
-                    goal,
-                    solver,
-                    Rc::clone(&extension),
-                    &symbolic_types,
-                    &mut tracked,
-                    &mut scoped_statements,
-                    run,
-                    true,
-                );
-                run.givens.truncate(scope_len);
-                let result = result?;
-                all_validated &= result.validated;
-                if result.validated
-                    && let Some(prepared) = &prepared_implication
-                {
-                    exported.push(lower_prepared_boolean(&extension, prepared)?);
-                }
-            }
-            SatResult::Unknown => {
-                all_validated = false;
-                goal.validation.checks.push(StepCheck::Unknown {
-                    environment: Some(Rc::clone(&extension)),
-                });
-            }
-            SatResult::Unsat => {}
-        }
-        solver.pop(1);
-    }
-
-    if feasible == 0 {
-        record_inconsistent_givens(goal, extensions.exhaustive, run.max_dimension);
-        return Ok(None);
-    }
-    goal.validation.givens_feasible = true;
-    goal.validation
-        .checks
-        .retain(|check| !matches!(check, StepCheck::InconsistentGivens { .. }));
-    if all_validated {
-        Ok(Some(GoalExport {
-            statement: exported_goal_expression(
-                &introduced_variables,
-                &goal.givens,
-                &goal.conclusion,
-            ),
-            assertions: exported,
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
 fn record_inconsistent_givens(goal: &mut Goal, exhaustive: bool, max_dimension: u64) {
-    if !goal.validation.givens_feasible
-        && !goal
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::InconsistentGivens { .. }))
-    {
-        goal.validation.checks.push(StepCheck::InconsistentGivens {
-            max_dimension: (!exhaustive).then_some(max_dimension),
-        });
-    }
-}
-
-fn existential_payload(spec: &quantifier::QuantifierSpec) -> Expr<()> {
-    let mut expressions = spec
-        .premises
-        .iter()
-        .filter(|premise| !spec.is_binder_declaration(premise))
-        .cloned()
-        .collect::<Vec<_>>();
-    expressions.push(spec.body.clone());
-    if expressions.len() == 1 {
-        expressions.pop().unwrap()
-    } else {
-        Expr::new(RawExpr::Finop(Finop::And, expressions))
-    }
-}
-
-fn try_existential_elimination(
-    sentence: &Expr<()>,
-    validation: &mut StepValidationData,
-    environment: &Environment,
-    symbolic_types: &SymbolicTypeEnvironment,
-    proof: ProofContext<'_>,
-    run: &ValidationRun,
-) -> Result<Option<ClaimResult>, ArgumentValidationError> {
-    let unbound = free_variables(std::iter::once(sentence))
-        .into_iter()
-        .filter(|variable| !symbolic_types.types.contains_key(variable))
-        .collect::<BTreeSet<_>>();
-    if unbound.is_empty() {
-        return Ok(None);
-    }
-    let accessible = symbolic_types
-        .types
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for fact in proof.tracked {
-        for alternative in &fact.alternatives {
-            let Ok(spec) = analyze_quantifier(alternative, symbolic_types) else {
-                continue;
-            };
-            if !matches!(spec.kind, quantifier::QuantifierKind::Exists) {
-                continue;
-            }
-            let payload = existential_payload(&spec);
-            let Some(unifier) = crate::formula::conjunction_views(&payload)
-                .into_iter()
-                .find_map(|pattern| {
-                    let mut unifier = Unifier {
-                        metavariables: &spec.introduced,
-                        assignments: BTreeMap::new(),
-                        pattern_accessible: accessible
-                            .iter()
-                            .chain(spec.introduced.iter())
-                            .cloned()
-                            .collect(),
-                        candidate_accessible: accessible.clone(),
-                        pattern_bound: BTreeSet::new(),
-                        candidate_bound: BTreeSet::new(),
-                        bound_forward: BTreeMap::new(),
-                        bound_reverse: BTreeMap::new(),
-                        nonce_pairs: BTreeSet::new(),
-                    };
-                    (unifier.expression(pattern, sentence)
-                        && spec
-                            .introduced
-                            .iter()
-                            .all(|variable| unifier.assignments.contains_key(variable)))
-                    .then_some(unifier)
-                })
-            else {
-                continue;
-            };
-            let mut introduced_types = BTreeMap::new();
-            let mut assignments = Vec::new();
-            let mut assigned_variables = BTreeSet::new();
-            let mut valid = true;
-            for binder in &spec.introduced {
-                let Some(RawExpr::Variable(candidate)) = unifier
-                    .assignments
-                    .get(binder)
-                    .map(|expression| &expression.raw)
-                else {
-                    valid = false;
-                    break;
-                };
-                if !unbound.contains(candidate) || !assigned_variables.insert(candidate.clone()) {
-                    valid = false;
-                    break;
-                }
-                let Some(ty) = spec.types.types.get(binder).cloned() else {
-                    valid = false;
-                    break;
-                };
-                introduced_types.insert(candidate.clone(), ty);
-                assignments.push((binder.clone(), candidate.clone()));
-            }
-            if !valid || assigned_variables != unbound {
-                continue;
-            }
-            let mut extended = symbolic_types.clone();
-            extended.types.extend(introduced_types.clone());
-            let prepared = prepare_expression_with_premises(
-                &extended,
-                sentence,
-                POSITIVE,
-                &run.givens,
-                run.max_dimension,
-                &run.timings,
-            )
-            .map_err(ModelFindingError::from_type)?;
-            let lowered = lower_prepared_boolean(environment, &prepared)?;
-            validation.checks.push(StepCheck::ExistentialElimination {
-                fact: fact.sentence.clone(),
-                assignments,
-            });
-            return Ok(Some(ClaimResult {
-                assertions: vec![lowered],
-                retained: Vec::new(),
-                introduced_types,
-                alternatives: prepared.expression.meta.alternatives().to_vec(),
-                validated: true,
-            }));
-        }
-    }
-    Ok(None)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_claim(
-    sentence: &Expr<()>,
-    validation: &mut StepValidationData,
-    solver: &mut Solver,
-    environment: Rc<Environment>,
-    symbolic_types: &SymbolicTypeEnvironment,
-    proof: ProofContext<'_>,
-    run: &mut ValidationRun,
-    require_positive: bool,
-) -> Result<ClaimResult, ArgumentValidationError> {
-    if let Some(result) = try_existential_elimination(
-        sentence,
-        validation,
-        &environment,
-        symbolic_types,
-        proof,
-        run,
-    )? {
-        return Ok(result);
-    }
-    if is_quantifier(sentence) {
-        return validate_quantified_claim(
-            sentence,
-            validation,
-            solver,
-            environment,
-            symbolic_types,
-            proof,
-            run,
-        );
-    }
-    if contains_quantifier(sentence) {
-        validation.checks.push(StepCheck::QuantifierInconclusive {
-            message: "quantifiers embedded beneath another operator are unsupported".to_owned(),
-        });
-        return Ok(ClaimResult::default());
-    }
-    validate_ordinary_claim(
-        sentence,
-        validation,
-        solver,
-        environment,
-        symbolic_types,
-        proof.tracked,
-        run,
-        require_positive,
-    )
+    goal.validation.checks.push(StepCheck::InconsistentGivens {
+        max_dimension: (!exhaustive).then_some(max_dimension),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1247,42 +391,6 @@ fn validate_ordinary_claim(
         return Ok(ClaimResult::default());
     }
 
-    let facts = proof_facts(tracked, &[]);
-    let alternative_witness =
-        positive
-            .expression
-            .meta
-            .alternatives()
-            .iter()
-            .find_map(|alternative| {
-                let spec = analyze_quantifier(alternative, symbolic_types).ok()?;
-                if !matches!(spec.kind, quantifier::QuantifierKind::Exists) {
-                    return None;
-                }
-                find_existential_witness(&spec, symbolic_types, &environment, &facts, &run.timings)
-            });
-    if let Some(witness) = alternative_witness {
-        let mut accepted = Vec::new();
-        if require_positive {
-            for extension in extensions.environments {
-                let _environment_time = run.timings.environment(&extension, symbolic_types);
-                accepted.push(lower_prepared_boolean(&extension, &positive)?);
-            }
-        }
-        validation.checks.push(StepCheck::ExistentialWitness {
-            assignments: witness.assignments.into_iter().collect(),
-            supporting_facts: witness.supporting_facts,
-        });
-        return Ok(ClaimResult {
-            assertions: accepted,
-            retained: Vec::new(),
-            introduced_types: BTreeMap::new(),
-            alternatives: positive.expression.meta.alternatives().to_vec(),
-            validated: true,
-        });
-    }
-
-    let mut accepted = Vec::new();
     for extension in extensions.environments {
         let extension = Rc::new(extension);
         let _environment_time = run.timings.environment(&extension, symbolic_types);
@@ -1349,7 +457,6 @@ fn validate_ordinary_claim(
                     } else {
                         validation.checks.extend(warnings);
                     }
-                    accepted.push(positive);
                 } else {
                     validation.checks.push(StepCheck::Unsat {
                         environment: extension,
@@ -1359,19 +466,13 @@ fn validate_ordinary_claim(
             }
         }
     }
-    Ok(ClaimResult {
-        assertions: accepted,
-        retained: Vec::new(),
-        introduced_types: BTreeMap::new(),
-        alternatives: positive.expression.meta.alternatives().to_vec(),
-        validated: true,
-    })
+    Ok(ClaimResult { validated: true })
 }
 
+mod natural_deduction;
+
 mod quantifier;
-use quantifier::{
-    analyze_quantifier, find_existential_witness, proof_facts, validate_quantified_claim,
-};
+use crate::type_resolver::{QuantifierKind, QuantifierSpec, analyze_quantifier};
 
 fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
     if givens.is_empty() {
@@ -1390,9 +491,9 @@ fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Ex
 
 mod environment;
 use environment::{
-    analyze_goal_givens, check_step_existence, concrete_declarations, core_facts,
-    ensure_expression_bound, expression_environment_extensions, extend_symbolic_types,
-    fixed_assignment_declarations, goal_environment_extensions, quantifier_environment_extensions,
+    check_step_existence, concrete_declarations, core_facts, ensure_expression_bound,
+    expression_environment_extensions, extend_symbolic_types, fixed_assignment_declarations,
+    goal_environment_extensions,
 };
 
 mod markdown;

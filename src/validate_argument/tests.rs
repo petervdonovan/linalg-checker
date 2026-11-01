@@ -2,10 +2,24 @@ use crate::timing::Timings;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Argument, ArgumentItem, Arguments, StepCheck, StepValidationData, Tactic, ToFromMd,
-    free_variables, infer_induction_start,
+    Argument, ArgumentItem, Arguments, StepCheck, Tactic, ToFromMd, free_variables,
+    infer_induction_start,
 };
 use crate::{Environment, RawExpr, TypeExpr, Variable, type_resolver::SymbolicTypeEnvironment};
+
+fn check_deduction(
+    context: &crate::natural_deduction::ProofContext,
+    conclusion: &crate::Expr<()>,
+) -> crate::natural_deduction::NaturalDeductionResult {
+    let timings = Timings::default();
+    let mut checks = super::quantifier::DimensionChecks {
+        evidence: Vec::new(),
+        context,
+        givens: &[],
+        timings: &timings,
+    };
+    crate::natural_deduction::follows_from_natural_deduction(context, conclusion, &mut checks)
+}
 
 const ARGUMENT: &str = r#"# Scalar argument
 
@@ -136,7 +150,7 @@ WTS $n = n$ by induction on $n$
             .iter()
             .any(|check| matches!(check, StepCheck::TacticEstablished))
     );
-    assert!(!argument.root.validation.environments_exhaustive);
+    assert!(argument.root.validation.environments_exhaustive);
 }
 
 #[test]
@@ -166,14 +180,12 @@ WTS $n = n$ by induction on $n$"#,
         expected[1].as_latex().to_string(),
         r"\forall n = n, n + 1 = n + 1"
     );
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
     assert!(
         argument
             .to_string()
@@ -350,6 +362,8 @@ WTS $\forall x \in \mathbb{R}, x x \ge 0$
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         argument.root.validation.checks[0],
@@ -380,14 +394,12 @@ fn universal_naturals_are_bounded_and_empty_domains_are_inconclusive() {
 WTS $\forall n \in \mathbb{N}, n = n$"#,
     );
     bounded.validate(2, &Timings::default()).unwrap();
-    assert!(
-        bounded
-            .root
-            .validation
-            .checks
-            .iter()
-            .all(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(bounded.root.validation.checks.iter().all(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
     assert!(!bounded.root.validation.environments_exhaustive);
 
     let mut vacuous = Argument::parse_str(
@@ -415,14 +427,12 @@ WTS $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$"#,
     );
     argument.validate(2, &Timings::default()).unwrap();
 
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .all(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().all(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
     assert!(!argument.root.validation.environments_exhaustive);
 }
 
@@ -434,22 +444,20 @@ fn existential_matching_joins_assignments_across_requirements() {
     active
         .types
         .insert(crate::Variable::new("y"), crate::TypeExpr::Real);
-    let spec = super::analyze_quantifier(&quantified, &active).unwrap();
-    let facts = [r"1 > 0", r"2 > 0", r"1 < y", r"3 < y"]
-        .map(|tex| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap());
-    assert!(
-        super::quantifier::find_existential_witness(
-            &spec,
-            &active,
-            &Environment::default(),
-            &facts,
-            &Timings::default()
-        )
-        .is_some(),
-        "direct matching failed for spec {:?} and facts {:?}",
-        spec.introduced,
-        facts
-    );
+    let mut context = crate::natural_deduction::ProofContext::default();
+    for (v, t) in &active.types {
+        context.declare_parameter(v.clone(), t.clone());
+    }
+    for tex in [r"1 > 0", r"2 > 0", r"1 < y", r"3 < y"] {
+        context.assume(
+            crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap(),
+            Vec::new(),
+        );
+    }
+    assert!(matches!(
+        check_deduction(&context, &quantified),
+        crate::natural_deduction::NaturalDeductionResult::Established { .. }
+    ));
     let mut witness = Argument::parse_str(
         r#"# Existential witness
 
@@ -538,7 +546,7 @@ fn existential_unification_does_not_leak_inner_binders() {
         crate::from_tex::expr(&ratex_parser::parse(r"\forall z \in \mathbb{R}, z = z").unwrap())
             .unwrap();
     let witness_variable = crate::Variable::new("y");
-    let mut unifier = super::Unifier {
+    let mut unifier = crate::unification::Unifier {
         metavariables: &BTreeSet::from([witness_variable]),
         assignments: BTreeMap::new(),
         pattern_accessible: BTreeSet::new(),
@@ -554,70 +562,28 @@ fn existential_unification_does_not_leak_inner_binders() {
 
 #[test]
 fn contextual_existential_elimination_supports_multiple_fresh_binders() {
-    use z3::ast::Bool;
-
-    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
-    let x = Variable::new("x");
-    let types = SymbolicTypeEnvironment {
-        types: [(x, TypeExpr::Real)].into_iter().collect(),
-    };
-    let fact = super::TrackedFact {
-        tracker: Bool::new_const("multiple_binder_fact"),
-        sentence: expression("P"),
-        alternatives: vec![expression(
+    use crate::natural_deduction::{NaturalDeductionProof, NaturalDeductionResult, ProofContext};
+    let expression = |s: &str| crate::from_tex::expr(&ratex_parser::parse(s).unwrap()).unwrap();
+    let mut context = ProofContext::default();
+    context.declare_parameter(Variable::new("x"), TypeExpr::Real);
+    context.assume(
+        expression("P"),
+        vec![expression(
             r"\exists u \in \mathbb{R}, v \in \mathbb{R}, x = u + v \land 0 = 0",
         )],
+    );
+    let NaturalDeductionResult::Established { derivations } =
+        check_deduction(&context, &expression("x = a + b"))
+    else {
+        panic!("missing witness opening")
     };
-    let mut validation = StepValidationData::default();
-    let run = super::ValidationRun {
-        timings: Timings::default(),
-
-        givens: Vec::new(),
-        max_dimension: 2,
-        next_tracker: 0,
-    };
-    let result = super::try_existential_elimination(
-        &expression("x = a + b"),
-        &mut validation,
-        &Environment::default(),
-        &types,
-        super::ProofContext {
-            tracked: std::slice::from_ref(&fact),
-            retained: &[],
-        },
-        &run,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        result
-            .introduced_types
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([Variable::new("a"), Variable::new("b")])
+    assert!(
+        matches!(&derivations[0].proof,NaturalDeductionProof::ExistentialElimination{assignments,introduced_types,..} if assignments.len()==2 && introduced_types.keys().cloned().collect::<BTreeSet<_>>()==BTreeSet::from([Variable::new("a"),Variable::new("b")]))
     );
     assert!(matches!(
-        validation.checks.as_slice(),
-        [StepCheck::ExistentialElimination { assignments, .. }] if assignments.len() == 2
+        check_deduction(&context, &expression("x = a + 1")),
+        NaturalDeductionResult::NoMatch
     ));
-
-    let mut invalid = StepValidationData::default();
-    assert!(
-        super::try_existential_elimination(
-            &expression("x = a + 1"),
-            &mut invalid,
-            &Environment::default(),
-            &types,
-            super::ProofContext {
-                tracked: &[fact],
-                retained: &[],
-            },
-            &run,
-        )
-        .unwrap()
-        .is_none()
-    );
 }
 
 #[test]
@@ -632,22 +598,24 @@ fn existential_witness_matching_sees_through_contextual_conjunctions() {
         .collect(),
     };
     let quantified = expression(r"\exists w \in \mathbb{R}, x = w");
-    let spec = super::analyze_quantifier(&quantified, &active).unwrap();
     let facts = [expression(r"0 = 0 \land x = a")];
-    let witness = super::quantifier::find_existential_witness(
-        &spec,
-        &active,
-        &Environment::default(),
-        &facts,
-        &Timings::default(),
-    )
-    .unwrap();
-    assert_eq!(witness.assignments[&Variable::new("w")], expression("a"));
-    assert_eq!(witness.supporting_facts, facts);
+    let mut context = crate::natural_deduction::ProofContext::default();
+    for (v, t) in &active.types {
+        context.declare_parameter(v.clone(), t.clone());
+    }
+    context.assume(facts[0].clone(), Vec::new());
+    let crate::natural_deduction::NaturalDeductionResult::Established { derivations } =
+        check_deduction(&context, &quantified)
+    else {
+        panic!("missing witness")
+    };
+    assert!(
+        matches!(&derivations[0].proof,crate::natural_deduction::NaturalDeductionProof::ExistentialIntroduction{assignments,premises} if assignments[&Variable::new("w")]==expression("a") && premises[0].expression==facts[0])
+    );
 }
 
 #[test]
-fn existential_witnesses_cannot_escape_their_goal() {
+fn a_goal_can_be_verified_locally_using_its_witness() {
     let mut argument = Argument::parse_str(
         r#"# Escaping witness
 
@@ -666,18 +634,14 @@ WTS $u = u$
         sentence(&argument, 0).validation.checks.as_slice(),
         [StepCheck::ExistentialElimination { .. }]
     ));
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::InvalidExistentialElimination { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::Unsat { .. } | StepCheck::EstablishedByFact { .. }
+    )));
 }
 
 #[test]
-fn existential_goal_uses_direct_children_but_not_internal_descendants() {
+fn existential_goal_uses_direct_children_and_independent_internal_descendants() {
     let mut direct = Argument::parse_str(
         r#"# Direct child evidence
 
@@ -702,7 +666,7 @@ WTS $\exists x > 0, x < y$
     );
 
     let mut hidden = Argument::parse_str(
-        r#"# Internal evidence stays local
+        r#"# Independent internal evidence is exported
 
 WTS $\exists x > 0, x = x$
 
@@ -718,7 +682,7 @@ WTS $\exists x > 0, x = x$
             .validation
             .checks
             .iter()
-            .any(|check| matches!(check, StepCheck::QuantifierInconclusive { .. }))
+            .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
     );
 }
 
@@ -767,6 +731,8 @@ fn failed_children_do_not_invalidate_the_goal() {
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
@@ -775,6 +741,8 @@ fn failed_children_do_not_invalidate_the_goal() {
     assert!(matches!(
         argument.root.validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -807,6 +775,8 @@ WTS $x = x$
     assert!(matches!(
         first.validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         &first.steps[0],
@@ -820,6 +790,8 @@ WTS $x = x$
     assert!(matches!(
         second.validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -868,10 +840,14 @@ WTS $x = x$
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         argument.root.validation.checks[0],
         StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -897,7 +873,12 @@ WTS $x = x$
     let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
         panic!("expected nested goal")
     };
-    assert!(matches!(goal.validation.checks[0], StepCheck::Unsat { .. }));
+    assert!(matches!(
+        goal.validation.checks[0],
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    ));
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
         StepCheck::Counterexample { .. }
@@ -925,12 +906,12 @@ WTS $A = A$
     let ArgumentItem::Goal(goal) = &argument.root.steps[0] else {
         panic!("expected nested goal")
     };
-    assert!(
-        goal.validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(goal.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
     assert!(
         !goal
             .validation
@@ -991,13 +972,12 @@ WTS $0 = 0$
     let ArgumentItem::Goal(child) = &argument.root.steps[0] else {
         panic!("expected goal")
     };
-    assert!(
-        child
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(child.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
     assert!(
         sentence(&argument, 1)
             .validation
@@ -1005,14 +985,12 @@ WTS $0 = 0$
             .iter()
             .any(|check| matches!(check, StepCheck::Error { .. }))
     );
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::Unsat { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
 }
 
 #[test]
@@ -1036,8 +1014,501 @@ WTS $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$",
             .validation
             .checks
             .iter()
-            .filter(|check| matches!(check, StepCheck::Unsat { .. }))
+            .filter(|check| matches!(
+                check,
+                StepCheck::Unsat { .. }
+                    | StepCheck::EstablishedByFact { .. }
+                    | StepCheck::NaturalDeduction { .. }
+            ))
             .count(),
         2
+    );
+}
+
+#[test]
+fn natural_deduction_instantiates_explicit_and_exported_universals() {
+    for source in [
+        r#"# Explicit universal
+
+Given:
+
+- $y \in \mathbb{R}$
+
+- $\forall x > 0, x < y$
+
+- $1 > 0$
+
+WTS $1 < y$"#,
+        r#"# Exported universal
+
+Given:
+
+- $y \in \mathbb{R}$
+
+WTS $y = y$
+
+1. Given:
+
+   - $a \in \mathbb{R}$
+
+   WTS $a = a$"#,
+    ] {
+        let mut argument = Argument::parse_str(source);
+        argument.validate(2, &Timings::default()).unwrap();
+        assert!(argument.root.validation.checks.iter().any(|c| matches!(c, StepCheck::NaturalDeduction { proof: crate::natural_deduction::NaturalDeductionProof::UniversalElimination { .. }, .. })), "{:?}", argument.root.validation);
+        assert!(argument.to_string().contains("universal elimination"));
+    }
+}
+
+#[test]
+fn natural_deduction_generalizes_an_established_instance() {
+    let mut argument = Argument::parse_str(
+        r#"# Generalization
+
+Given:
+
+- $a \in \mathbb{R}$
+
+WTS $\forall x \in \mathbb{R}, x = x$
+
+1. $a = a$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(c, StepCheck::NaturalDeduction { proof: crate::natural_deduction::NaturalDeductionProof::UniversalIntroduction { .. }, .. })), "{:?}", argument.root.validation);
+}
+
+#[test]
+fn natural_deduction_implication_introduction_is_explicit_and_exportable() {
+    let mut argument = Argument::parse_str(
+        r#"# Discharged implication
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $\exists t \in \mathbb{R}, t = t, x > 0 \implies x > 0$
+
+1. $1 = 1$
+
+2. Given:
+
+   - $x > 0$
+
+   WTS $x = 0$
+
+   1. $x > 0 \implies x > 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    let ArgumentItem::Goal(child) = &argument.root.steps[1] else {
+        panic!()
+    };
+    assert!(matches!(
+        &sentence_child(child, 0).validation.checks[0],
+        StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::ImplicationIntroduction { .. },
+            ..
+        }
+    ));
+    assert!(
+        child
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::Counterexample { .. }))
+    );
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(c,StepCheck::ExistentialWitness { supporting_facts, .. } if supporting_facts.contains(&sentence_child(child,0).sentence))));
+}
+
+fn sentence_child(goal: &super::Goal, index: usize) -> &super::ArgumentStep {
+    let ArgumentItem::Sentence(step) = &goal.steps[index] else {
+        panic!("expected sentence")
+    };
+    step
+}
+
+#[test]
+fn a_failed_child_still_exports_independent_validated_facts() {
+    let mut argument = Argument::parse_str(
+        r#"# Independent fact from failed block
+
+WTS $\exists x > 0, x = x$
+
+1. WTS $0 = 1$
+
+   1. $1 > 0$
+
+   2. $1 = 1$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::ExistentialWitness { .. }))
+    );
+}
+
+#[test]
+fn natural_deduction_does_not_instantiate_incompatible_vector_dimensions() {
+    let mut argument = Argument::parse_str(
+        r#"# Incompatible witness dimensions
+
+Given:
+
+- $y \in \mathbb{R}^{3}$
+
+WTS $\exists x \in \mathbb{R}^{2}, x = y$
+
+1. $y = y$"#,
+    );
+    argument.validate(3, &Timings::default()).unwrap();
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .all(|c| !matches!(c, StepCheck::ExistentialWitness { .. }))
+    );
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::QuantifierInconclusive { .. }))
+    );
+}
+
+#[test]
+fn independent_export_does_not_downgrade_local_deduction() {
+    let mut argument = Argument::parse_str(
+        r#"# Bounded exported statement
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x > 0 \implies x > 0$
+
+1. Given:
+
+   - $n \in \mathbb{N}$
+   - $x > 0$
+
+   WTS $n = n$
+
+   1. $x > 0 \implies x > 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(argument.root.validation.environments_exhaustive);
+    assert!(argument.root.validation.checks.iter().all(|c| matches!(
+        c,
+        StepCheck::Unsat { .. }
+            | StepCheck::EstablishedByFact { .. }
+            | StepCheck::NaturalDeduction { .. }
+    )));
+}
+
+#[test]
+fn natural_deduction_type_errors_are_local_and_goals_can_open_witnesses() {
+    let mut argument = Argument::parse_str(
+        r#"# Ill typed implication
+
+WTS $1 \implies 0 = 0$
+
+1. $0 = 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::Error { .. } | StepCheck::DimensionallyInvalid { .. }
+    )));
+
+    let mut argument = Argument::parse_str(
+        r#"# Opening a witness in the conclusion
+
+Given:
+
+- $\exists x \in \mathbb{R}, x > 0$
+
+WTS $a > 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::ExistentialElimination { .. }))
+    );
+}
+
+#[test]
+fn likely_premises_support_verified_reuse_without_rechecking_their_truth() {
+    let mut argument = Argument::parse_str(
+        r#"# Local inference status
+
+Given:
+
+- $A \in \mathbb{R}^{n \times n}$
+
+WTS $A = A$
+
+1. $A = A$
+2. $A = A$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(!sentence(&argument, 0).validation.environments_exhaustive);
+    assert!(sentence(&argument, 1).validation.environments_exhaustive);
+    assert!(matches!(
+        sentence(&argument, 1).validation.checks.as_slice(),
+        [StepCheck::EstablishedByFact { .. }]
+    ));
+    assert!(argument.root.validation.environments_exhaustive);
+}
+
+#[test]
+fn fallback_results_are_aggregated_before_a_fact_enters_the_context() {
+    let mut argument = Argument::parse_str(
+        r#"# Reject before admission
+
+Given:
+
+- $n \in \mathbb{N}$
+
+WTS $0 = 1$
+
+1. $n = 0$
+2. $n = 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    for i in 0..2 {
+        assert!(
+            sentence(&argument, i)
+                .validation
+                .checks
+                .iter()
+                .any(|c| matches!(c, StepCheck::Counterexample { .. }))
+        );
+        assert!(
+            !sentence(&argument, i)
+                .validation
+                .checks
+                .iter()
+                .any(|c| matches!(c, StepCheck::EstablishedByFact { .. }))
+        );
+    }
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::Counterexample { .. }))
+    );
+}
+
+#[test]
+fn a_goal_witness_opening_is_valid_locally_but_is_not_exported() {
+    let mut argument = Argument::parse_str(
+        r#"# Local witness
+
+Given:
+
+- $\exists x \in \mathbb{R}, x > 0$
+
+WTS $a > 0$"#,
+    );
+    let mut context = crate::natural_deduction::ProofContext::default();
+    let mut run = super::ValidationRun {
+        timings: Timings::default(),
+        max_dimension: 2,
+        next_tracker: 0,
+        givens: Vec::new(),
+        lexical_expressions: Vec::new(),
+        interpretations: BTreeMap::new(),
+    };
+    let outcome =
+        super::natural_deduction::validate_goal(&mut argument.root, &mut context, &mut run, None)
+            .unwrap();
+    assert!(outcome.validated);
+    assert!(!outcome.exported);
+    assert!(!context.types.types.contains_key(&Variable::new("a")));
+    assert!(context.facts().is_empty());
+}
+
+#[test]
+fn instantiation_requires_symbolic_dimension_compatibility() {
+    use crate::natural_deduction::{NaturalDeductionProof, NaturalDeductionResult, ProofContext};
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let mut context = ProofContext::default();
+    for name in ["n", "m"] {
+        context.declare_parameter(Variable::new(name), TypeExpr::Nat);
+    }
+    context.declare_parameter(
+        Variable::new("y"),
+        TypeExpr::Matrix(expression("m"), expression("1")),
+    );
+    context.assume(
+        expression(r"\forall x \in \mathbb{R}^{n}, x = x"),
+        Vec::new(),
+    );
+    let target = expression("y = y");
+    let timings = Timings::default();
+    let mut checks = super::quantifier::DimensionChecks {
+        evidence: Vec::new(),
+        context: &context,
+        givens: &[],
+        timings: &timings,
+    };
+    assert!(!matches!(
+        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks),
+        NaturalDeductionResult::Established { .. }
+    ));
+    let equality = crate::preprocessing::prepare_expression(
+        &context.types,
+        &expression("n = m"),
+        super::POSITIVE,
+    )
+    .unwrap();
+    let mut checks = super::quantifier::DimensionChecks {
+        evidence: Vec::new(),
+        context: &context,
+        givens: std::slice::from_ref(&equality),
+        timings: &timings,
+    };
+    let NaturalDeductionResult::Established { derivations } =
+        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks)
+    else {
+        panic!("symbolic equality should establish compatible dimensions")
+    };
+    assert!(matches!(
+        derivations[0].proof,
+        NaturalDeductionProof::UniversalElimination { .. }
+    ));
+}
+
+#[test]
+fn likely_instance_supports_verified_universal_introduction() {
+    let mut argument = Argument::parse_str(
+        r#"# Generalize an accepted instance
+
+Given:
+
+- $n \in \mathbb{N}$
+
+WTS $\forall k \in \mathbb{N}, k = k$
+
+1. $n = n$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(!sentence(&argument, 0).validation.environments_exhaustive);
+    assert!(argument.root.validation.environments_exhaustive);
+    assert!(matches!(
+        argument.root.validation.checks.as_slice(),
+        [StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::UniversalIntroduction { .. },
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn witness_acceptance_selects_the_first_suitable_source() {
+    let mut argument = Argument::parse_str(
+        r#"# Select a witness source
+
+Given:
+
+- $\exists x \in \mathbb{R}, x > 0$
+- $\exists y \in \mathbb{R}, y > 0 \land y < 1$
+
+WTS $a > 0$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(
+        matches!(argument.root.validation.checks.as_slice(),[StepCheck::ExistentialElimination{fact,..}] if fact==&argument.root.givens[0])
+    );
+}
+
+#[test]
+fn undefined_instantiation_is_not_mislabeled_as_verified_or_likely() {
+    let mut argument = Argument::parse_str(
+        r#"# Undefined instantiation
+
+Given:
+
+- $\forall x \in \mathbb{R}, x = x$
+
+WTS $\left(-1\right)^{\frac{1}{2}} = \left(-1\right)^{\frac{1}{2}}$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::MayBeUndefined { .. } | StepCheck::Error { .. }
+    )));
+    assert!(!argument.root.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::NaturalDeduction { .. } | StepCheck::Unsat { .. }
+    )));
+}
+
+#[test]
+fn accepted_dimension_facts_are_usable_and_their_scope_dependencies_are_retained() {
+    use crate::natural_deduction::{NaturalDeductionResult, ProofContext};
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let mut context = ProofContext::default();
+    for name in ["n", "m"] {
+        context.declare_parameter(Variable::new(name), TypeExpr::Nat);
+    }
+    context.declare_parameter(
+        Variable::new("y"),
+        TypeExpr::Matrix(expression("m"), expression("1")),
+    );
+    context.assume(
+        expression(r"\forall x \in \mathbb{R}^{n}, x = x"),
+        Vec::new(),
+    );
+    let parent = context.clone();
+    context.enter_scope();
+    let local = context.assume(expression("1 > 0"), Vec::new());
+    // Simulate a fact already accepted by fallback. It is available to subsequent
+    // dimension checks even though it is not one of their lexical givens.
+    context.record_external(expression("n = m"), Vec::new());
+    let equality = context
+        .facts()
+        .iter()
+        .find(|f| f.expression == expression("n = m"))
+        .unwrap()
+        .derivations[0]
+        .id;
+    let target = expression("y = y");
+    let timings = Timings::default();
+    let mut checks = super::quantifier::DimensionChecks {
+        context: &context,
+        givens: &[],
+        timings: &timings,
+        evidence: Vec::new(),
+    };
+    let NaturalDeductionResult::Established { derivations } =
+        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks)
+    else {
+        panic!("accepted dimension equality should be usable");
+    };
+    assert!(
+        derivations.iter().all(
+            |d| d.assumptions.contains(&local) && d.side_condition_premises.contains(&equality)
+        )
+    );
+    context.record(target.clone(), Vec::new(), derivations);
+    assert!(
+        !context
+            .exportable_to(&parent)
+            .iter()
+            .any(|f| f.expression == target)
     );
 }

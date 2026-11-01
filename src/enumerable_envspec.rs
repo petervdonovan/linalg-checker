@@ -327,6 +327,36 @@ pub(crate) struct DimensionEquivalenceQuery {
 }
 
 impl DimensionEquivalenceQuery {
+    pub(crate) fn necessarily_equal_expressions(
+        &mut self,
+        left: &Expr<()>,
+        right: &Expr<()>,
+    ) -> Option<bool> {
+        if left == right {
+            return Some(true);
+        }
+        let left = lower_required_natural(
+            left,
+            &self.natural_symbols,
+            "unsupported dimension expression",
+        )
+        .ok()?;
+        let right = lower_required_natural(
+            right,
+            &self.natural_symbols,
+            "unsupported dimension expression",
+        )
+        .ok()?;
+        self.solver.push();
+        self.solver.assert(left.eq(right).not());
+        let result = self.timings.check(&self.solver, "z3_integer_ms");
+        self.solver.pop(1);
+        match result {
+            SatResult::Unsat => Some(true),
+            SatResult::Sat => Some(false),
+            SatResult::Unknown => None,
+        }
+    }
     pub(crate) fn necessarily_equal(
         &mut self,
         left: ImplicitDimension,

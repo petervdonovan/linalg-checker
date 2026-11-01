@@ -9,7 +9,9 @@ WTS $x = x$
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $x = x$
 </details>
 
 1. $x = x$
@@ -26,7 +28,7 @@ No premises seemed necessary to show this.
 
    The negation of $x = 0$ is satisfied by:
 
-   - $x = -1$
+   - $x = 2$
    </details>
 
 # Matrix argument
@@ -42,7 +44,7 @@ WTS $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$
 
 The negation of $A = \begin{bmatrix}1 & 0 \\ 0 & 1\end{bmatrix}$ is satisfied by:
 
-- $A = \begin{bmatrix}0 & -1 \\ -1 & 0\end{bmatrix}$
+- $A = \begin{bmatrix}\square & \square \\ \square & 2\end{bmatrix}$
 </details>
 
 1. $A = A$
@@ -199,9 +201,11 @@ Given:
 WTS $x^{\frac{1}{2}} = x^{\frac{1}{2}}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>⚠️ conditional</summary>
 
-No premises seemed necessary to show this.
+The expression $x^{\frac{1}{2}}$ may be undefined. For example:
+
+- $x = -1$
 </details>
 
 # Assumed matrix square root
@@ -213,9 +217,9 @@ Given:
 WTS $A^{\frac{1}{2}} = A^{\frac{1}{2}}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>⚠️ conditional</summary>
 
-No premises seemed necessary to show this.
+The existence of $A^{\frac{1}{2}}$ was assumed without checking.
 </details>
 
 # Dimensionally invalid matrix square root
@@ -319,7 +323,9 @@ WTS $x = x$
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $x = x$
 </details>
 
 1. WTS $x = x$
@@ -327,7 +333,9 @@ No premises seemed necessary to show this.
    <details>
    <summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
+   This follows from the following facts:
+
+   - $x = x$
    </details>
 
    1. $x = 0$
@@ -337,7 +345,7 @@ No premises seemed necessary to show this.
 
       The negation of $x = 0$ is satisfied by:
 
-      - $x = -1$
+      - $x = 2$
       </details>
    2. $x = x$
 
@@ -351,7 +359,9 @@ No premises seemed necessary to show this.
    <details>
    <summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
+   This follows from the following facts:
+
+   - $x = x$
    </details>
 
 # Local givens and sibling names
@@ -359,9 +369,13 @@ No premises seemed necessary to show this.
 WTS $0 = 0$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ verified by universal elimination</summary>
 
-No premises seemed necessary to show this.
+- $y = 0$
+
+Supporting facts:
+
+- $\forall y \in \mathbb{R}, y = y$
 </details>
 
 1. Given:
@@ -375,7 +389,7 @@ No premises seemed necessary to show this.
 
    The negation of $y = 0$ is satisfied by:
 
-   - $y = -1$
+   - $y = 2$
    </details>
 2. Given:
 
@@ -481,9 +495,9 @@ This follows from the following facts:
 WTS $2^{n} \ge n + 1$ by induction on $n$
 
 <details>
-<summary>✅ likely</summary>
+<summary>✅ verified</summary>
 
-The induction base and step were validated up to a maximum dimension of 2.
+The induction base and step were validated.
 </details>
 
 1. WTS $2^{0} \ge 0 + 1$
@@ -491,7 +505,9 @@ The induction base and step were validated up to a maximum dimension of 2.
    <details>
    <summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
+   This follows from the following facts:
+
+   - $2^{0} \ge 0 + 1$
    </details>
 
    1. $2^{0} \ge 0 + 1$
@@ -508,11 +524,11 @@ The induction base and step were validated up to a maximum dimension of 2.
    WTS $2^{n + 1} \ge n + 1 + 1$
 
    <details>
-   <summary>✅ likely</summary>
+   <summary>✅ verified</summary>
 
-   No counterexamples found up to a maximum dimension of 2.
+   This follows from the following facts:
 
-   No premises seemed necessary to show this.
+   - $2^{n + 1} \ge n + 1 + 1$
    </details>
 
    1. $2 2^{n} \ge 2 \left(n + 1\right)$
@@ -552,9 +568,9 @@ Given:
 WTS $\left\lVert \vec{x} \right\rVert_{2}^{2} \ge 0$ by induction on $n$
 
 <details>
-<summary>✅ likely</summary>
+<summary>✅ verified</summary>
 
-The induction base and step were validated up to a maximum dimension of 2.
+The induction base and step were validated.
 </details>
 
 1. Given:
@@ -729,9 +745,9 @@ No premises seemed necessary to show this.
 WTS $2 \sum_{i=1}^{n}i = n \left(n + 1\right)$ by induction on $n$
 
 <details>
-<summary>✅ likely</summary>
+<summary>✅ verified</summary>
 
-The induction base and step were validated up to a maximum dimension of 2.
+The induction base and step were validated.
 </details>
 
 1. WTS $2 \sum_{i=1}^{1}i = 1 \left(1 + 1\right)$
@@ -803,7 +819,9 @@ WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
 </details>
 
 1. WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
@@ -919,7 +937,9 @@ WTS $\vec{A} = \vec{A}$
 <details>
 <summary>✅ verified</summary>
 
-No premises seemed necessary to show this.
+This follows from the following facts:
+
+- $\vec{A} = \vec{A}$
 </details>
 
 1. $\vec{A} \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
@@ -1042,15 +1062,11 @@ Given:
 WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
-<summary>✅ witness found</summary>
+<summary>✅ verified</summary>
 
-Witness:
+This follows from the following facts:
 
-- $w_{preimage of A} = a \vec{u} + b \vec{v}$
-
-Matched facts:
-
-- $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
+- $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 </details>
 
 1. $\vec{x} = A \vec{u}$
@@ -1153,7 +1169,7 @@ WTS $c > 0$
 
 This follows from the following facts:
 
-- $c > 0 \land \left(\exists a, a > 0\right)$
+- $c > 0$
 </details>
 
 # Negative universal skolemization

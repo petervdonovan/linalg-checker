@@ -54,6 +54,7 @@ fn has_success_check(validation: &StepValidationData) -> bool {
                 | StepCheck::ExistentialWitness { .. }
                 | StepCheck::TacticEstablished
                 | StepCheck::EstablishedByFact { .. }
+                | StepCheck::NaturalDeduction { .. }
         )
     })
 }
@@ -103,7 +104,7 @@ fn failure_examples_match_current_validation() {
         ),
         (
             "A nested quantified statement under conjunction",
-            "quantifiers embedded beneath another operator",
+            "SMT backend cannot lower this quantified formula",
         ),
         (
             "A quantified premise needed to derive a concrete fact",
@@ -124,7 +125,7 @@ fn failure_examples_match_current_validation() {
         ),
         (
             "A linear-independence definition with quantified coefficients",
-            "## Error",
+            "subscripted expression is not a sequence",
         ),
         (
             "A matrix square-root identity with unverified existence",

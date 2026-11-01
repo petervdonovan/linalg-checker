@@ -81,8 +81,7 @@ WTS $\left(A + B\right)^\top = A + B$
 
 This follows from the following facts:
 
-- $B^\top = B$
-- $A^\top + B^\top = A + B$
+- $\left(A + B\right)^\top = A + B$
 </details>
 
 1. $\left(A + B\right)^\top = A^\top + B^\top$
@@ -180,7 +179,7 @@ WTS $c \vec{x} \in \operatorname{Nul}(A)$
 
 This follows from the following facts:
 
-- $A c \vec{x} = \mathbb{0}$
+- $c \vec{x} \in \operatorname{Nul}(A)$
 </details>
 
 1. $A \vec{x} = \mathbb{0}$
@@ -233,15 +232,11 @@ Given:
 WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
-<summary>✅ witness found</summary>
+<summary>✅ verified</summary>
 
-Witness:
+This follows from the following facts:
 
-- $w_{preimage of A} = a \vec{u} + b \vec{v}$
-
-Matched facts:
-
-- $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
+- $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 </details>
 
 1. $\vec{x} = A \vec{u}$
@@ -293,9 +288,9 @@ Matched facts:
 WTS $2^{n} \ge n + 1$ by induction on $n$
 
 <details>
-<summary>✅ likely</summary>
+<summary>✅ verified</summary>
 
-The induction base and step were validated up to a maximum dimension of 2.
+The induction base and step were validated.
 </details>
 
 1. WTS $2^{0} \ge 0 + 1$
@@ -303,7 +298,9 @@ The induction base and step were validated up to a maximum dimension of 2.
    <details>
    <summary>✅ verified</summary>
 
-   No premises seemed necessary to show this.
+   This follows from the following facts:
+
+   - $2^{0} \ge 0 + 1$
    </details>
 
    1. $2^{0} \ge 0 + 1$
@@ -320,11 +317,11 @@ The induction base and step were validated up to a maximum dimension of 2.
    WTS $2^{n + 1} \ge n + 1 + 1$
 
    <details>
-   <summary>✅ likely</summary>
+   <summary>✅ verified</summary>
 
-   No counterexamples found up to a maximum dimension of 2.
+   This follows from the following facts:
 
-   No premises seemed necessary to show this.
+   - $2^{n + 1} \ge n + 1 + 1$
    </details>
 
    1. $2 2^{n} \ge 2 \left(n + 1\right)$
@@ -407,7 +404,7 @@ WTS $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
 
 This follows from the following facts:
 
-- $y + 1 > 0$
+- $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
 </details>
 
 1. $y > 0$

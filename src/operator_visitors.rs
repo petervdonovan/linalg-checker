@@ -321,6 +321,16 @@ impl VisitMut<TypedMetadata> for QuantifierLowering {
             visit_mut::visit_expr_mut(self, context, node);
             return;
         }
+        if node
+            .meta
+            .quantifier_bindings()
+            .is_some_and(|b| b.introduced.len() != 1)
+        {
+            self.error = Some(TypeError::Unsupported(
+                "quantifier lowering supports exactly one binder",
+            ));
+            return;
+        }
         let RawExpr::Finop(op @ (Finop::Exists | Finop::Forall), expressions) = &node.raw else {
             unreachable!()
         };
@@ -345,8 +355,8 @@ impl VisitMut<TypedMetadata> for QuantifierLowering {
             return;
         }
         let Some((binder, explicit_type)) = binder_declaration(declaration) else {
-            self.error = Some(TypeError::Invalid(
-                "quantifier requires a direct variable binder",
+            self.error = Some(TypeError::Unsupported(
+                "SMT quantifier lowering requires a direct variable binder",
             ));
             return;
         };

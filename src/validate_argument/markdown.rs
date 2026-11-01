@@ -503,6 +503,47 @@ fn validation_details(
             fact.as_latex()
         ));
     }
+    if let Some(StepCheck::NaturalDeduction {
+        proof,
+        supporting_facts,
+    }) = validation
+        .checks
+        .iter()
+        .find(|check| matches!(check, StepCheck::NaturalDeduction { .. }))
+    {
+        use crate::natural_deduction::NaturalDeductionProof;
+        let (rule, detail) = match proof {
+            NaturalDeductionProof::UniversalElimination { assignments, .. } => (
+                "universal elimination",
+                assignments
+                    .iter()
+                    .map(|(v, e)| format!("- ${} = {}$", v.z3_name(), e.as_latex()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            NaturalDeductionProof::UniversalIntroduction {
+                assignments,
+                discharged,
+                ..
+            } => (
+                "universal introduction",
+                format!(
+                    "Generalized {} parameter(s), discharging {} assumption(s).",
+                    assignments.len(),
+                    discharged.len()
+                ),
+            ),
+            NaturalDeductionProof::ImplicationIntroduction { discharged, .. } => (
+                "implication introduction",
+                format!("Discharged {} assumption(s).", discharged.len()),
+            ),
+            _ => ("contextual fact", String::new()),
+        };
+        return Some(format!(
+            "<details>\n<summary>✅ verified by {rule}</summary>\n\n{detail}\n\nSupporting facts:\n\n{}\n</details>",
+            expression_bullets(supporting_facts)
+        ));
+    }
     if let Some(StepCheck::QuestionableQuantifier { premises }) = validation
         .checks
         .iter()

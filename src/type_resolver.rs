@@ -1,4 +1,12 @@
-use std::{collections::HashMap, error::Error, fmt};
+mod bindings;
+pub(crate) use bindings::avoid_bound_collisions;
+mod quantifier;
+pub use quantifier::{QuantifierKind, QuantifierSpec, analyze_quantifier};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    error::Error,
+    fmt,
+};
 
 use crate::type_expr::{abstract_type_variable, open_sequence_element};
 use crate::{
@@ -34,15 +42,32 @@ pub trait MaybeTyped {
         &[]
     }
     fn add_alternative(&mut self, _expression: Expr<()>) {}
+    fn quantifier_bindings(&self) -> Option<&QuantifierBindings> {
+        None
+    }
+    fn set_quantifier_bindings(&mut self, _bindings: QuantifierBindings) {}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuantifierBindings {
+    pub introduced: BTreeMap<Variable, TypeExpr<()>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TypedMetadata {
     ty: Option<TypeExpr<()>>,
     alternatives: Vec<Expr<()>>,
+    quantifier: Option<QuantifierBindings>,
+    pub(crate) free_variables: Option<BTreeSet<Variable>>,
 }
 
 impl MaybeTyped for TypedMetadata {
+    fn quantifier_bindings(&self) -> Option<&QuantifierBindings> {
+        self.quantifier.as_ref()
+    }
+    fn set_quantifier_bindings(&mut self, bindings: QuantifierBindings) {
+        self.quantifier = Some(bindings);
+    }
     fn get_type(&self) -> Result<TypeExpr<()>, TypeError> {
         self.ty
             .clone()
@@ -76,8 +101,54 @@ impl TypedMetadata {
         Self {
             ty: Some(ty),
             alternatives: Vec::new(),
+            quantifier: None,
+            free_variables: None,
         }
     }
+}
+
+/// Analyze a surface formula without lowering it or choosing concrete dimensions.
+pub fn analyze_expression(
+    types: &SymbolicTypeEnvironment,
+    expression: &Expr<()>,
+) -> Result<Expr<TypedMetadata>, TypeError> {
+    let mut typed = expression.with_default_metadata();
+    TypeResolver::new_partial(types, &OperatorTypeRules::surface())
+        .resolve(&mut typed, VisitContext::positive())?;
+    struct Complete {
+        error: Option<TypeError>,
+    }
+    impl crate::visit::Visit<TypedMetadata> for Complete {
+        fn visit_expr(&mut self, e: &Expr<TypedMetadata>) {
+            if e.meta.get_type().is_err()
+                && let RawExpr::Variable(v) = &e.raw
+            {
+                self.error = Some(TypeError::MissingType(v.clone()));
+            }
+            crate::visit::visit_expr(self, e);
+        }
+    }
+    let mut complete = Complete { error: None };
+    crate::visit::Visit::visit_expr(&mut complete, &typed);
+    if let Some(error) = complete.error {
+        return Err(error);
+    }
+    typed.get_mut().unwrap().meta.free_variables = Some(crate::formula::free_variables_in_context(
+        std::iter::once(expression),
+        &types.types.keys().cloned().collect(),
+    ));
+    Ok(typed)
+}
+
+pub fn analyze_formula(
+    types: &SymbolicTypeEnvironment,
+    expression: &Expr<()>,
+) -> Result<Expr<TypedMetadata>, TypeError> {
+    let typed = analyze_expression(types, expression)?;
+    if typed.meta.get_type()? != TypeExpr::Bool {
+        return Err(TypeError::Invalid("a statement must be Boolean"));
+    }
+    Ok(typed)
 }
 
 pub trait TypeLookup {
@@ -191,8 +262,8 @@ impl OperatorTypeRules {
         rules.register_triop(Triop::DoubleSubscript, real_result_rule);
         rules.register_finop(Finop::Plus, addition_rule);
         rules.register_finop(Finop::Times, multiplication_rule);
-        rules.register_finop(Finop::And, bool_result_rule);
-        rules.register_finop(Finop::Or, bool_result_rule);
+        rules.register_finop(Finop::And, boolean_fold_rule);
+        rules.register_finop(Finop::Or, boolean_fold_rule);
         rules.register_finop(Finop::Forall, bool_result_rule);
         rules.register_finop(Finop::Exists, bool_result_rule);
         rules.register_finop(Finop::Max, scalar_fold_rule);
@@ -202,6 +273,12 @@ impl OperatorTypeRules {
         rules.register_seqop(SeqOp::Prod, sequence_fold_rule);
         rules.register_seqop(SeqOp::BigOr, boolean_sequence_fold_rule);
         rules.register_seqop(SeqOp::Map, map_rule);
+        rules
+    }
+
+    pub fn surface() -> Self {
+        let mut rules = Self::core();
+        rules.register_monop(Monop::Norm2, real_result_rule);
         rules
     }
 
@@ -434,12 +511,25 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
                     self.rules.infer_triop(*op, operands)
                 });
             }
+            RawExpr::Finop(Finop::Forall | Finop::Exists, _) => TypeExpr::Bool,
             RawExpr::Finop(op, expressions) => {
                 return infer_operator(expressions.iter(), |operands| {
                     self.rules.infer_finop(*op, operands)
                 });
             }
-            RawExpr::CmpChain(_) | RawExpr::LogicChain(_) => TypeExpr::Bool,
+            RawExpr::LogicChain(chain) => {
+                for expression in
+                    std::iter::once(&chain.start).chain(chain.assertions.iter().map(|(_, e)| e))
+                {
+                    if let Ok(ty) = expression.meta.get_type()
+                        && ty != TypeExpr::Bool
+                    {
+                        return Err(TypeError::Invalid("logical operands must be Boolean"));
+                    }
+                }
+                TypeExpr::Bool
+            }
+            RawExpr::CmpChain(_) => TypeExpr::Bool,
             RawExpr::Seqop(op, range, body) => {
                 let Some(operand) = operand(body) else {
                     return Ok(None);
@@ -517,95 +607,75 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                     self.visit_expr_mut(context.clone(), c);
                 }
                 RawExpr::Finop(Finop::Forall | Finop::Exists, expressions) => {
-                    let Some((declaration, remaining)) = expressions.split_first() else {
+                    if expressions.len() < 2 {
                         self.error = Some(TypeError::Invalid(
-                            "quantifier requires one binder declaration and a body",
-                        ));
-                        return;
-                    };
-                    if remaining.is_empty() {
-                        self.error = Some(TypeError::Invalid(
-                            "quantifier requires one binder declaration and a body",
+                            "quantifier requires premises and a body",
                         ));
                         return;
                     }
-                    let (binder, explicit_type) = match &declaration.raw {
-                        RawExpr::Variable(binder) => (binder.clone(), None),
-                        RawExpr::Binop(Binop::ElementOf, subject, target) => {
-                            let (RawExpr::Variable(binder), RawExpr::Type(ty)) =
-                                (&subject.raw, &target.raw)
-                            else {
-                                self.error = Some(TypeError::Invalid(
-                                    "quantifier requires a direct variable binder",
-                                ));
-                                return;
-                            };
-                            (binder.clone(), Some(ty.with_default_metadata()))
-                        }
-                        _ => {
-                            self.error = Some(TypeError::Invalid(
-                                "quantifier requires a direct variable binder",
-                            ));
-                            return;
-                        }
-                    };
-                    if remaining[..remaining.len() - 1].iter().any(|expression| {
-                        match &expression.raw {
-                            RawExpr::Binop(Binop::ElementOf, left, right) => {
-                                matches!(left.raw, RawExpr::Variable(_))
-                                    && matches!(right.raw, RawExpr::Type(_))
-                            }
-                            RawExpr::Variable(variable) => self.types.type_of(variable).is_none(),
-                            _ => false,
-                        }
-                    }) {
-                        self.error = Some(TypeError::Unsupported(
-                            "quantifier lowering supports exactly one binder",
-                        ));
-                        return;
-                    }
-                    if self.types.type_of(&binder).is_some()
-                        || self
-                            .local_bindings
-                            .iter()
-                            .any(|(active, _)| active == &binder)
-                        || context
-                            .active_ranges
-                            .iter()
-                            .any(|range| range.index_variable == binder)
-                    {
+                    let premises = expressions[..expressions.len() - 1]
+                        .iter()
+                        .map(|e| e.with_default_metadata())
+                        .collect::<Vec<Expr<()>>>();
+                    let variables = crate::formula::free_variables(premises.iter());
+                    let introduced = variables
+                        .into_iter()
+                        .filter(|v| {
+                            self.types.type_of(v).is_none()
+                                && !self.local_bindings.iter().any(|(b, _)| b == v)
+                                && !context.active_ranges.iter().any(|r| r.index_variable == *v)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if introduced.is_empty() {
                         self.error = Some(TypeError::Invalid("quantifier binder must be fresh"));
                         return;
                     }
-                    let ty = if let Some(ty) = explicit_type {
-                        ty
-                    } else {
-                        let premise: Expr<()> = declaration.with_default_metadata();
-                        let inferred =
-                            match crate::enumerable_envspec::infer_symbolic_type_environment(
-                                std::slice::from_ref(&premise),
-                            ) {
-                                Ok(inferred) => inferred,
-                                Err(_) => {
-                                    self.error = Some(TypeError::Invalid(
-                                        "quantifier binder type could not be inferred",
-                                    ));
-                                    return;
-                                }
-                            };
-                        let Some(ty) = inferred.types.get(&binder).cloned() else {
-                            self.error = Some(TypeError::Invalid(
-                                "quantifier binder type could not be inferred",
-                            ));
-                            return;
+                    let inferred =
+                        match crate::enumerable_envspec::infer_symbolic_type_environment(&premises)
+                        {
+                            Ok(types) => types,
+                            Err(_) => {
+                                self.error = Some(TypeError::Invalid(
+                                    "quantifier binder types could not be inferred",
+                                ));
+                                return;
+                            }
                         };
-                        ty
+                    let bindings = introduced
+                        .iter()
+                        .map(|v| inferred.types.get(v).cloned().map(|ty| (v.clone(), ty)))
+                        .collect::<Option<BTreeMap<_, _>>>();
+                    let Some(bindings) = bindings else {
+                        self.error = Some(TypeError::Invalid(
+                            "quantifier binder type could not be inferred",
+                        ));
+                        return;
                     };
-                    self.local_bindings.push((binder, ty));
-                    for expression in expressions {
+                    let depth = self.local_bindings.len();
+                    self.local_bindings
+                        .extend(bindings.iter().map(|(v, t)| (v.clone(), t.clone())));
+                    let len = expressions.len();
+                    for (i, expression) in expressions.iter_mut().enumerate() {
                         self.visit_expr_mut(context.clone(), expression);
+                        let declaration = i + 1 < len
+                            && matches!(&expression.raw, RawExpr::Variable(v) if bindings.contains_key(v));
+                        if !declaration
+                            && let Ok(ty) = expression.meta.get_type()
+                            && ty != TypeExpr::Bool
+                        {
+                            self.error = Some(TypeError::Invalid(
+                                "quantifier restrictions and body must be Boolean",
+                            ));
+                        }
                     }
-                    self.local_bindings.pop();
+                    self.local_bindings.truncate(depth);
+                    // Save lexical binding resolution, independent of future declarations.
+                    node.get_mut()
+                        .unwrap()
+                        .meta
+                        .set_quantifier_bindings(QuantifierBindings {
+                            introduced: bindings,
+                        });
                 }
                 RawExpr::Finop(_, expressions) => {
                     for expression in expressions {
@@ -935,6 +1005,15 @@ fn diagonal_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError
         ));
     }
     Ok(TypeExpr::Matrix(size.clone(), size))
+}
+
+fn boolean_fold_rule(operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
+    for operand in operands {
+        if operand.value()? != TypeExpr::Bool {
+            return Err(TypeError::Invalid("logical operands must be Boolean"));
+        }
+    }
+    Ok(TypeExpr::Bool)
 }
 
 fn bool_result_rule(_operands: &[TypeRuleOperand]) -> Result<TypeExpr<()>, TypeError> {
@@ -1507,6 +1586,70 @@ mod tests {
                     .unwrap();
             }))
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod formula_analysis_tests {
+    use super::*;
+    fn expr(tex: &str) -> Expr<()> {
+        crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap()
+    }
+    #[test]
+    fn analyzes_surface_quantifiers_compositionally_without_lowering() {
+        for tex in [
+            r"\forall x \in \mathbb{R}, y \in \mathbb{R}, x = x \land y = y",
+            r"\forall x > 0, x = x",
+            r"\forall x \in \mathbb{R}, \left(x > 0 \implies \left(\exists y \in \mathbb{R}, y = x\right)\right)",
+            r"\left(\forall x \in \mathbb{R}, x = x\right) \implies \left(\exists y \in \mathbb{R}, y = y\right)",
+        ] {
+            let analyzed = analyze_formula(&SymbolicTypeEnvironment::default(), &expr(tex))
+                .unwrap_or_else(|e| panic!("{tex}: {e}"));
+            assert_eq!(analyzed.meta.get_type().unwrap(), TypeExpr::Bool);
+        }
+    }
+    #[test]
+    fn rejects_non_boolean_restrictions_bodies_and_logical_operands() {
+        for tex in [
+            r"\forall x \in \mathbb{R}, 7",
+            r"\forall x \in \mathbb{R}, x + 1, x = x",
+            r"1 \implies \left(\forall x \in \mathbb{R}, x = x\right)",
+            r"1 \land \left(\exists x \in \mathbb{R}, x = x\right)",
+        ] {
+            assert!(
+                analyze_formula(&SymbolicTypeEnvironment::default(), &expr(tex)).is_err(),
+                "{tex}"
+            );
+        }
+    }
+    #[test]
+    fn outer_dimensions_remain_free_in_quantified_domains() {
+        let n = Variable::new("n");
+        let types = SymbolicTypeEnvironment {
+            types: HashMap::from([(n.clone(), TypeExpr::Nat)]),
+        };
+        let expression = expr(r"\forall x \in \mathbb{R}^{n}, x = x");
+        let analyzed = analyze_formula(&types, &expression).unwrap();
+        assert_eq!(analyzed.meta.free_variables, Some(BTreeSet::from([n])));
+        assert_eq!(
+            analyzed
+                .meta
+                .quantifier_bindings()
+                .unwrap()
+                .introduced
+                .len(),
+            1
+        );
+        assert_eq!(
+            analyze_formula(&SymbolicTypeEnvironment::default(), &expression)
+                .unwrap()
+                .meta
+                .quantifier_bindings()
+                .unwrap()
+                .introduced
+                .len(),
+            2
         );
     }
 }
