@@ -210,6 +210,7 @@ fn type_error_to_shape_error(error: TypeError) -> ShapeError {
         TypeError::Ellipsis(error) => ShapeError::InvalidTyping(error.to_string()),
         TypeError::Unsupported(message) => ShapeError::Unsupported(message.to_owned()),
         TypeError::Invalid(message) => ShapeError::InvalidTyping(message.to_owned()),
+        error @ TypeError::UndefinedVariable(_) => ShapeError::InvalidTyping(error.to_string()),
         TypeError::MissingType(variable) => ShapeError::InvalidTyping(format!(
             "missing inferred type for {}",
             variable_z3_name(&variable)

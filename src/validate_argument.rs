@@ -115,9 +115,6 @@ pub enum StepCheck {
     QuestionableQuantifier {
         premises: Vec<Expr<()>>,
     },
-    EstablishedByFact {
-        fact: Expr<()>,
-    },
     ExistentialWitness {
         assignments: Vec<(Variable, Expr<()>)>,
         supporting_facts: Vec<Expr<()>>,

@@ -42,11 +42,9 @@ unary operator remains after concrete elaboration
 1. $\det(A) \ne 0$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $\det(A) \ne 0$
+   This statement is already established in the current context.
    </details>
 2. $A^{-1} A = I$
 
@@ -85,7 +83,7 @@ WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, x = y\right) \lan
 <details>
 <summary>Inconclusive</summary>
 
-the SMT backend cannot lower this quantified formula
+verification failed to handle the quantifiers in this formula
 </details>
 
 1. $\exists y \in \mathbb{R}, x = y$
@@ -93,14 +91,14 @@ the SMT backend cannot lower this quantified formula
    <details>
    <summary>Inconclusive</summary>
 
-   missing type for x
+   reference to undefined variable $x$
    </details>
 2. $x = x$
 
    <details>
    <summary>Unsupported step</summary>
 
-   missing type for x
+   reference to undefined variable $x$
    </details>
 
 # A quantified premise needed to derive a concrete fact
@@ -153,7 +151,7 @@ no common syntactic witness was established
    <details>
    <summary>Unsupported step</summary>
 
-   missing type for x
+   reference to undefined variable $x$
    </details>
 
 # Zero-based sequence indexing
@@ -165,11 +163,9 @@ Given:
 WTS $z_{0} \in \mathbb{R}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $z_{0} \in \mathbb{R}$
+This statement is already established in the current context.
 </details>
 
 1. $z_{0} \in \mathbb{R}$
@@ -205,7 +201,7 @@ No counterexample was found, but the following subgoals were not established:
    <details>
    <summary>Unsupported step</summary>
 
-   missing type for n
+   reference to undefined variable $n$
    </details>
 
 # The Gram matrix proof needs an explicitly introduced arbitrary vector
@@ -227,7 +223,7 @@ No premises seemed necessary to show this.
    <details>
    <summary>Unsupported step</summary>
 
-   missing type for \vec{x}
+   reference to undefined variable $\vec{x}$
    </details>
 
 # A linear-independence definition with quantified coefficients

@@ -10,11 +10,9 @@ Given:
 WTS $x^{2} \le y^{2}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $x^{2} \le y^{2}$
+This statement is already established in the current context.
 </details>
 
 1. $0 \le y$
@@ -77,11 +75,9 @@ Given:
 WTS $\left(A + B\right)^\top = A + B$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $\left(A + B\right)^\top = A + B$
+This statement is already established in the current context.
 </details>
 
 1. $\left(A + B\right)^\top = A^\top + B^\top$
@@ -175,11 +171,9 @@ Given:
 WTS $c \vec{x} \in \operatorname{Nul}(A)$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $c \vec{x} \in \operatorname{Nul}(A)$
+This statement is already established in the current context.
 </details>
 
 1. $A \vec{x} = \mathbb{0}$
@@ -232,11 +226,9 @@ Given:
 WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
+This statement is already established in the current context.
 </details>
 
 1. $\vec{x} = A \vec{u}$
@@ -296,11 +288,9 @@ The induction base and step were validated.
 1. WTS $2^{0} \ge 0 + 1$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $2^{0} \ge 0 + 1$
+   This statement is already established in the current context.
    </details>
 
    1. $2^{0} \ge 0 + 1$
@@ -317,11 +307,9 @@ The induction base and step were validated.
    WTS $2^{n + 1} \ge n + 1 + 1$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $2^{n + 1} \ge n + 1 + 1$
+   This statement is already established in the current context.
    </details>
 
    1. $2 2^{n} \ge 2 \left(n + 1\right)$
@@ -384,11 +372,9 @@ Matched facts:
 2. $1 < y$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $1 < y$
+   This statement is already established in the current context.
    </details>
 
 # A set-comprehension closure argument
@@ -400,11 +386,9 @@ Given:
 WTS $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $y + 1 \in \left\{x \in \mathbb{R} : x > 0\right\}$
+This statement is already established in the current context.
 </details>
 
 1. $y > 0$
@@ -457,11 +441,9 @@ The negation of $x = 0$ is satisfied by:
 1. $x y = 0$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $x y = 0$
+   This statement is already established in the current context.
    </details>
 2. $x = 0$
 
@@ -487,11 +469,9 @@ Given:
 WTS $x \le y + z$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $x \le y + z$
+This statement is already established in the current context.
 </details>
 
 1. $y \le y + z$

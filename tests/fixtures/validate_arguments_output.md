@@ -7,11 +7,9 @@ Given:
 WTS $x = x$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $x = x$
+This statement is already established in the current context.
 </details>
 
 1. $x = x$
@@ -321,21 +319,17 @@ Given:
 WTS $x = x$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $x = x$
+This statement is already established in the current context.
 </details>
 
 1. WTS $x = x$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $x = x$
+   This statement is already established in the current context.
    </details>
 
    1. $x = 0$
@@ -357,11 +351,9 @@ This follows from the following facts:
 2. $x = x$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $x = x$
+   This statement is already established in the current context.
    </details>
 
 # Local givens and sibling names
@@ -415,31 +407,25 @@ Given:
 WTS $x x \le y y$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $x x \le y y$
+This statement is already established in the current context.
 </details>
 
 1. WTS $0 \le y$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $0 \le y$
+   This statement is already established in the current context.
    </details>
 
    1. $x \le y$
 
       <details>
-      <summary>✅ verified</summary>
+      <summary>✅ repeats established fact</summary>
 
-      This follows from the following facts:
-
-      - $x \le y$
+      This statement is already established in the current context.
       </details>
    2. $0 \le y$
 
@@ -503,11 +489,9 @@ The induction base and step were validated.
 1. WTS $2^{0} \ge 0 + 1$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $2^{0} \ge 0 + 1$
+   This statement is already established in the current context.
    </details>
 
    1. $2^{0} \ge 0 + 1$
@@ -524,11 +508,9 @@ The induction base and step were validated.
    WTS $2^{n + 1} \ge n + 1 + 1$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $2^{n + 1} \ge n + 1 + 1$
+   This statement is already established in the current context.
    </details>
 
    1. $2 2^{n} \ge 2 \left(n + 1\right)$
@@ -610,11 +592,9 @@ Given:
 WTS $\forall x \in \mathbb{R}, x x \ge 0$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $\forall x \in \mathbb{R}, x x \ge 0$
+This statement is already established in the current context.
 </details>
 
 1. $\exists z > 0, z < y$
@@ -671,11 +651,9 @@ Matched facts:
 2. WTS $1 < y$
 
    <details>
-   <summary>✅ verified</summary>
+   <summary>✅ repeats established fact</summary>
 
-   This follows from the following facts:
-
-   - $1 < y$
+   This statement is already established in the current context.
    </details>
 
 # Existential involving inferred dimensions
@@ -817,11 +795,9 @@ Given:
 WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
+This statement is already established in the current context.
 </details>
 
 1. WTS $\operatorname{diag}(c_{1}, \ldots, d_{n}) = \operatorname{diag}(c)$
@@ -935,11 +911,9 @@ Given:
 WTS $\vec{A} = \vec{A}$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $\vec{A} = \vec{A}$
+This statement is already established in the current context.
 </details>
 
 1. $\vec{A} \in \left\{X \in \mathbb{R}^{2 \times 2} : \det(X) > 0\right\}$
@@ -1062,11 +1036,9 @@ Given:
 WTS $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ repeats established fact</summary>
 
-This follows from the following facts:
-
-- $a \vec{x} + b \vec{y} \in \operatorname{Range}(A)$
+This statement is already established in the current context.
 </details>
 
 1. $\vec{x} = A \vec{u}$
@@ -1165,11 +1137,11 @@ Given:
 WTS $c > 0$
 
 <details>
-<summary>✅ verified</summary>
+<summary>✅ follows from established fact</summary>
 
-This follows from the following facts:
+Established fact:
 
-- $c > 0$
+- $c > 0 \land \left(\exists a, a > 0\right)$
 </details>
 
 # Negative universal skolemization

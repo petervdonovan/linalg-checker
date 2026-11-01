@@ -34,7 +34,7 @@ pub(super) fn ensure_expression_bound(
         .find(|variable| !types.types.contains_key(variable))
     {
         return Err(ModelFindingError::from(ToZ3Error::from(
-            TypeError::MissingType(variable),
+            TypeError::UndefinedVariable(variable),
         )));
     }
     Ok(())

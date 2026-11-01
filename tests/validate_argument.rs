@@ -45,9 +45,7 @@ fn is_verified(validation: &StepValidationData) -> bool {
         && validation.checks.iter().all(|check| {
             matches!(
                 check,
-                StepCheck::Unsat { .. }
-                    | StepCheck::EstablishedByFact { .. }
-                    | StepCheck::NaturalDeduction { .. }
+                StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
             )
         })
 }
@@ -111,9 +109,7 @@ fn validates_nested_induction_obligations() {
         };
         assert!(goal.validation.checks.iter().any(|check| matches!(
             check,
-            StepCheck::Unsat { .. }
-                | StepCheck::EstablishedByFact { .. }
-                | StepCheck::NaturalDeduction { .. }
+            StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
         )));
     }
 }
@@ -179,7 +175,13 @@ fn validates_quantified_steps_and_goal_evidence() {
             .validation
             .checks
             .iter()
-            .any(|check| matches!(check, StepCheck::EstablishedByFact { .. }))
+            .any(|check| matches!(
+                check,
+                StepCheck::NaturalDeduction {
+                    proof: linalg_sandbox::natural_deduction::NaturalDeductionProof::Reuse { .. },
+                    ..
+                }
+            ))
     );
 
     let direct = arguments
@@ -211,9 +213,19 @@ fn validates_quantified_steps_and_goal_evidence() {
         )
     };
     assert!(
-        inferred_dimensions.root.validation.checks.iter().any(
-            |check| witness_is_b(check) || matches!(check, StepCheck::EstablishedByFact { .. })
-        )
+        inferred_dimensions
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| witness_is_b(check)
+                || matches!(
+                    check,
+                    StepCheck::NaturalDeduction {
+                        proof: linalg_sandbox::natural_deduction::NaturalDeductionProof::Reuse { .. },
+                        ..
+                    }
+                ))
     );
     let ArgumentItem::Sentence(existential) = &inferred_dimensions.root.steps[1] else {
         panic!("expected existential sentence")

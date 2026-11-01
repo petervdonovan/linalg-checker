@@ -469,11 +469,7 @@ fn validate_induction(
     Ok(result)
 }
 
-fn proof_check(
-    proof: &nd::NaturalDeductionProof,
-    context: &nd::ProofContext,
-    sentence: &Expr<()>,
-) -> StepCheck {
+fn proof_check(proof: &nd::NaturalDeductionProof) -> StepCheck {
     use nd::NaturalDeductionProof::*;
     let premises: Vec<&nd::Premise> = match proof {
         Reuse { premise }
@@ -492,11 +488,7 @@ fn proof_check(
             supporting_facts.push(p.expression.clone());
         }
     }
-    let _ = context;
     match proof {
-        Reuse { .. } => StepCheck::EstablishedByFact {
-            fact: sentence.clone(),
-        },
         ExistentialIntroduction { assignments, .. } => StepCheck::ExistentialWitness {
             assignments: assignments
                 .iter()
@@ -695,9 +687,7 @@ pub(super) fn validate_claim(
             return Ok(false);
         }
         validation.environments_exhaustive = true;
-        validation
-            .checks
-            .push(proof_check(&derivations[0].proof, context, sentence));
+        validation.checks.push(proof_check(&derivations[0].proof));
         if let Ok(spec) = analyze_quantifier(sentence, &context.types)
             && !spec.questionable.is_empty()
         {
@@ -744,7 +734,7 @@ pub(super) fn validate_claim(
         }
     } else if contains_quantifier(sentence) {
         validation.checks.push(StepCheck::QuantifierInconclusive {
-            message: "the SMT backend cannot lower this quantified formula".into(),
+            message: "verification failed to handle the quantifiers in this formula".into(),
         });
         false
     } else {

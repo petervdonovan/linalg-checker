@@ -53,7 +53,6 @@ fn has_success_check(validation: &StepValidationData) -> bool {
                 | StepCheck::Counterexample { .. }
                 | StepCheck::ExistentialWitness { .. }
                 | StepCheck::TacticEstablished
-                | StepCheck::EstablishedByFact { .. }
                 | StepCheck::NaturalDeduction { .. }
         )
     })
@@ -104,7 +103,7 @@ fn failure_examples_match_current_validation() {
         ),
         (
             "A nested quantified statement under conjunction",
-            "SMT backend cannot lower this quantified formula",
+            "verification failed to handle the quantifiers in this formula",
         ),
         (
             "A quantified premise needed to derive a concrete fact",
@@ -114,14 +113,17 @@ fn failure_examples_match_current_validation() {
             "An existential witness requiring arithmetic reasoning",
             "no common syntactic witness was established",
         ),
-        ("Zero-based sequence indexing", "✅ verified"),
+        (
+            "Zero-based sequence indexing",
+            "✅ repeats established fact",
+        ),
         (
             "A flat induction proof without explicit obligations",
             "Unsupported step",
         ),
         (
             "The Gram matrix proof needs an explicitly introduced arbitrary vector",
-            r"missing type for \vec{x}",
+            r"reference to undefined variable $\vec{x}$",
         ),
         (
             "A linear-independence definition with quantified coefficients",

@@ -512,6 +512,25 @@ fn validation_details(
         .find(|check| matches!(check, StepCheck::NaturalDeduction { .. }))
     {
         use crate::natural_deduction::NaturalDeductionProof;
+        if let NaturalDeductionProof::Reuse { premise } = proof {
+            let (summary, explanation) = if premise.alternative.is_none() && premise.conjunct == 0 {
+                (
+                    "✅ repeats established fact",
+                    "This statement is already established in the current context.".to_owned(),
+                )
+            } else {
+                (
+                    "✅ follows from established fact",
+                    format!(
+                        "Established fact:\n\n{}",
+                        expression_bullets(supporting_facts)
+                    ),
+                )
+            };
+            return Some(format!(
+                "<details>\n<summary>{summary}</summary>\n\n{explanation}\n</details>"
+            ));
+        }
         let (rule, detail) = match proof {
             NaturalDeductionProof::UniversalElimination { assignments, .. } => (
                 "universal elimination",
@@ -604,14 +623,11 @@ fn validation_details(
 
     let mut present = BTreeSet::new();
     for check in &validation.checks {
-        match check {
-            StepCheck::Unsat {
-                supporting_facts, ..
-            } => present.extend(supporting_facts.iter().cloned()),
-            StepCheck::EstablishedByFact { fact } => {
-                present.insert(fact.clone());
-            }
-            _ => {}
+        if let StepCheck::Unsat {
+            supporting_facts, ..
+        } = check
+        {
+            present.extend(supporting_facts.iter().cloned());
         }
     }
     let mut seen = BTreeSet::new();

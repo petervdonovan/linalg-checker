@@ -182,9 +182,7 @@ WTS $n = n$ by induction on $n$"#,
     );
     assert!(argument.root.validation.checks.iter().any(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
     assert!(
         argument
@@ -361,13 +359,14 @@ WTS $\forall x \in \mathbb{R}, x x \ge 0$
     argument.validate(1, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         argument.root.validation.checks[0],
-        StepCheck::EstablishedByFact { .. }
+        StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+            ..
+        }
     ));
 
     let mut false_claim = Argument::parse_str(
@@ -396,9 +395,7 @@ WTS $\forall n \in \mathbb{N}, n = n$"#,
     bounded.validate(2, &Timings::default()).unwrap();
     assert!(bounded.root.validation.checks.iter().all(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
     assert!(!bounded.root.validation.environments_exhaustive);
 
@@ -429,9 +426,7 @@ WTS $\forall x \in \mathbb{R}^{n}, \left\lVert x \right\rVert_{2}^{2} \ge 0$"#,
 
     assert!(argument.root.validation.checks.iter().all(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
     assert!(!argument.root.validation.environments_exhaustive);
 }
@@ -525,16 +520,18 @@ WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, y = y\right)$
     argument.validate(1, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
-        StepCheck::EstablishedByFact { .. }
+        StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+            ..
+        }
     ));
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::EstablishedByFact { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -634,10 +631,14 @@ WTS $u = u$
         sentence(&argument, 0).validation.checks.as_slice(),
         [StepCheck::ExistentialElimination { .. }]
     ));
-    assert!(argument.root.validation.checks.iter().any(|check| matches!(
-        check,
-        StepCheck::Unsat { .. } | StepCheck::EstablishedByFact { .. }
-    )));
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Unsat { .. }))
+    );
 }
 
 #[test]
@@ -730,9 +731,7 @@ fn failed_children_do_not_invalidate_the_goal() {
 
     assert!(matches!(
         sentence(&argument, 0).validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
@@ -740,9 +739,7 @@ fn failed_children_do_not_invalidate_the_goal() {
     ));
     assert!(matches!(
         argument.root.validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -774,9 +771,7 @@ WTS $x = x$
     };
     assert!(matches!(
         first.validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         &first.steps[0],
@@ -789,9 +784,7 @@ WTS $x = x$
     };
     assert!(matches!(
         second.validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -839,15 +832,11 @@ WTS $x = x$
     ));
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         argument.root.validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
 }
 
@@ -875,9 +864,7 @@ WTS $x = x$
     };
     assert!(matches!(
         goal.validation.checks[0],
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     ));
     assert!(matches!(
         sentence(&argument, 1).validation.checks[0],
@@ -908,9 +895,7 @@ WTS $A = A$
     };
     assert!(goal.validation.checks.iter().any(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
     assert!(
         !goal
@@ -974,9 +959,7 @@ WTS $0 = 0$
     };
     assert!(child.validation.checks.iter().any(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
     assert!(
         sentence(&argument, 1)
@@ -987,9 +970,7 @@ WTS $0 = 0$
     );
     assert!(argument.root.validation.checks.iter().any(|check| matches!(
         check,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
 }
 
@@ -1016,9 +997,7 @@ WTS $\operatorname{diag}(c_{1}, \ldots, c_{n}) = \operatorname{diag}(c)$",
             .iter()
             .filter(|check| matches!(
                 check,
-                StepCheck::Unsat { .. }
-                    | StepCheck::EstablishedByFact { .. }
-                    | StepCheck::NaturalDeduction { .. }
+                StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
             ))
             .count(),
         2
@@ -1206,9 +1185,7 @@ WTS $x > 0 \implies x > 0$
     assert!(argument.root.validation.environments_exhaustive);
     assert!(argument.root.validation.checks.iter().all(|c| matches!(
         c,
-        StepCheck::Unsat { .. }
-            | StepCheck::EstablishedByFact { .. }
-            | StepCheck::NaturalDeduction { .. }
+        StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
     )));
 }
 
@@ -1266,7 +1243,10 @@ WTS $A = A$
     assert!(sentence(&argument, 1).validation.environments_exhaustive);
     assert!(matches!(
         sentence(&argument, 1).validation.checks.as_slice(),
-        [StepCheck::EstablishedByFact { .. }]
+        [StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+            ..
+        }]
     ));
     assert!(argument.root.validation.environments_exhaustive);
 }
@@ -1299,7 +1279,13 @@ WTS $0 = 1$
                 .validation
                 .checks
                 .iter()
-                .any(|c| matches!(c, StepCheck::EstablishedByFact { .. }))
+                .any(|c| matches!(
+                    c,
+                    StepCheck::NaturalDeduction {
+                        proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+                        ..
+                    }
+                ))
         );
     }
     assert!(
@@ -1511,4 +1497,108 @@ fn accepted_dimension_facts_are_usable_and_their_scope_dependencies_are_retained
             .iter()
             .any(|f| f.expression == target)
     );
+}
+
+#[test]
+fn undefined_references_are_reported_without_guessing_a_new_variable() {
+    use crate::type_resolver::{TypeError, analyze_formula};
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    for tex in ["x = x", r"\forall y \in \mathbb{R}, x = y"] {
+        let error =
+            analyze_formula(&SymbolicTypeEnvironment::default(), &expression(tex)).unwrap_err();
+        assert!(matches!(&error, TypeError::UndefinedVariable(v) if v.name == "x"));
+        assert_eq!(error.to_string(), "reference to undefined variable $x$");
+    }
+    let mut argument = Argument::parse_str("# Undefined reference\n\nWTS $x = x$");
+    argument.validate(2, &Timings::default()).unwrap();
+    assert!(
+        argument
+            .to_string()
+            .contains("reference to undefined variable $x$")
+    );
+    assert!(!argument.to_string().contains("missing type"));
+
+    // Name-based inference remains available when a variable is introduced.
+    let mut declared =
+        Argument::parse_str("# Introduced variable\n\nGiven:\n\n- $x = x$\n\nWTS $x = x$");
+    declared.validate(2, &Timings::default()).unwrap();
+    assert!(declared.to_string().contains("✅ repeats established fact"));
+}
+
+#[test]
+fn quantifier_failure_uses_user_facing_language() {
+    let mut argument = Argument::parse_str(
+        r#"# Quantifier limitation
+
+WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, x = y\right) \land x = x$"#,
+    );
+    argument.validate(2, &Timings::default()).unwrap();
+    let rendered = argument.to_string();
+    assert!(rendered.contains("verification failed to handle the quantifiers in this formula"));
+    assert!(!rendered.contains("SMT"));
+    assert!(!rendered.contains("backend"));
+}
+
+#[test]
+fn reuse_rendering_distinguishes_repetition_from_contextual_views() {
+    use crate::natural_deduction::NaturalDeductionProof;
+    for (source, conclusion, exact) in [
+        ("x > 0", "x > 0", true),
+        (r"x > 0 \land x < 2", "x > 0", false),
+    ] {
+        let input = format!(
+            "# Contextual reuse\n\nGiven:\n\n- $x \\in \\mathbb{{R}}$\n- ${source}$\n\nWTS ${conclusion}$"
+        );
+        let mut argument = Argument::parse_str(&input);
+        argument.validate(2, &Timings::default()).unwrap();
+        let StepCheck::NaturalDeduction {
+            proof: NaturalDeductionProof::Reuse { premise },
+            supporting_facts,
+        } = &argument.root.validation.checks[0]
+        else {
+            panic!("expected structured reuse: {:?}", argument.root.validation);
+        };
+        assert_eq!(premise.expression, argument.root.givens[1]);
+        assert_eq!(supporting_facts, &[argument.root.givens[1].clone()]);
+        let rendered = argument.to_string();
+        if exact {
+            assert!(rendered.contains("✅ repeats established fact"));
+            assert!(!rendered.contains("This follows from the following facts"));
+        } else {
+            assert!(rendered.contains("✅ follows from established fact"));
+            assert!(!rendered.contains("✅ repeats established fact"));
+        }
+    }
+}
+
+#[test]
+fn an_elaborated_context_view_retains_its_source_in_the_explanation() {
+    use crate::natural_deduction::{NaturalDeductionProof, NaturalDeductionResult, ProofContext};
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let mut context = ProofContext::default();
+    context.declare_parameter(Variable::new("x"), TypeExpr::Real);
+    let source = expression("0 < x");
+    let alternative = expression("x > 0");
+    context.assume(source.clone(), vec![alternative.clone()]);
+    let NaturalDeductionResult::Established { derivations } =
+        check_deduction(&context, &alternative)
+    else {
+        panic!("expected reuse of the context view");
+    };
+    assert!(
+        matches!(&derivations[0].proof, NaturalDeductionProof::Reuse { premise } if premise.alternative == Some(0) && premise.expression == source)
+    );
+    let mut argument = Argument::parse_str("# Context view\n\nWTS $x > 0$");
+    argument
+        .root
+        .validation
+        .checks
+        .push(StepCheck::NaturalDeduction {
+            proof: derivations[0].proof.clone(),
+            supporting_facts: vec![source.clone()],
+        });
+    let rendered = argument.to_string();
+    assert!(rendered.contains("✅ follows from established fact"));
+    assert!(rendered.contains(&format!("- ${}$", source.as_latex())));
+    assert!(!rendered.contains("✅ repeats established fact"));
 }

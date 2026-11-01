@@ -105,7 +105,11 @@ pub fn follows_from_natural_deduction(
 ) -> NaturalDeductionResult {
     let analysis = crate::type_resolver::analyze_formula(&context.types, conclusion);
     if let Err(error) = &analysis
-        && !matches!(error, crate::type_resolver::TypeError::MissingType(_))
+        && !matches!(
+            error,
+            crate::type_resolver::TypeError::MissingType(_)
+                | crate::type_resolver::TypeError::UndefinedVariable(_)
+        )
     {
         return NaturalDeductionResult::Inconclusive {
             reasons: vec![error.to_string()],

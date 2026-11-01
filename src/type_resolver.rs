@@ -18,6 +18,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
     MissingType(Variable),
+    UndefinedVariable(Variable),
     Ellipsis(Box<crate::ellipsis_elimination::EllipsisEliminationError>),
     Invalid(&'static str),
     Unsupported(&'static str),
@@ -28,6 +29,11 @@ impl fmt::Display for TypeError {
         match self {
             Self::Ellipsis(error) => error.fmt(f),
             Self::MissingType(variable) => write!(f, "missing type for {}", variable.z3_name()),
+            Self::UndefinedVariable(variable) => write!(
+                f,
+                "reference to undefined variable ${}$",
+                Expr::<()>::new(RawExpr::Variable(variable.clone())).as_latex()
+            ),
             Self::Invalid(message) | Self::Unsupported(message) => f.write_str(message),
         }
     }
@@ -115,20 +121,25 @@ pub fn analyze_expression(
     let mut typed = expression.with_default_metadata();
     TypeResolver::new_partial(types, &OperatorTypeRules::surface())
         .resolve(&mut typed, VisitContext::positive())?;
-    struct Complete {
+    struct Complete<'a> {
+        types: &'a SymbolicTypeEnvironment,
         error: Option<TypeError>,
     }
-    impl crate::visit::Visit<TypedMetadata> for Complete {
+    impl crate::visit::Visit<TypedMetadata> for Complete<'_> {
         fn visit_expr(&mut self, e: &Expr<TypedMetadata>) {
             if e.meta.get_type().is_err()
                 && let RawExpr::Variable(v) = &e.raw
             {
-                self.error = Some(TypeError::MissingType(v.clone()));
+                self.error = Some(if self.types.types.contains_key(v) {
+                    TypeError::MissingType(v.clone())
+                } else {
+                    TypeError::UndefinedVariable(v.clone())
+                });
             }
             crate::visit::visit_expr(self, e);
         }
     }
-    let mut complete = Complete { error: None };
+    let mut complete = Complete { types, error: None };
     crate::visit::Visit::visit_expr(&mut complete, &typed);
     if let Some(error) = complete.error {
         return Err(error);
