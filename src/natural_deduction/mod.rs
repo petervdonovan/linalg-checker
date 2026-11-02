@@ -7,7 +7,9 @@ use crate::{
     type_resolver::SymbolicTypeEnvironment,
 };
 use std::collections::{BTreeMap, BTreeSet};
+mod checked;
 mod context;
+pub use checked::{CheckedFormula, FormulaInterpreter, SurfaceInterpreter};
 mod matching;
 
 mod rules;
@@ -40,6 +42,8 @@ pub enum NaturalDeductionProof {
     },
     Reuse {
         premise: Premise,
+        /// Whole-fact reuse with the same written expression and frozen meaning.
+        exact: bool,
     },
     ExistentialIntroduction {
         premises: Vec<Premise>,
@@ -68,9 +72,20 @@ pub enum NaturalDeductionProof {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NaturalDeductionResult {
-    Established { derivations: Vec<Derivation> },
-    NoMatch,
-    Inconclusive { reasons: Vec<String> },
+    Established {
+        conclusion: CheckedFormula,
+        derivations: Vec<Derivation>,
+    },
+    NoMatch {
+        conclusion: CheckedFormula,
+    },
+    Inconclusive {
+        conclusion: CheckedFormula,
+        reasons: Vec<String>,
+    },
+    Invalid {
+        error: crate::type_resolver::TypeError,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SideConditionResult {
@@ -101,47 +116,77 @@ pub trait SideConditionChecker {
 pub fn follows_from_natural_deduction(
     context: &ProofContext,
     conclusion: &Expr<()>,
+    interpreter: &impl FormulaInterpreter,
     checks: &mut impl SideConditionChecker,
 ) -> NaturalDeductionResult {
-    let analysis = crate::type_resolver::analyze_formula(&context.types, conclusion);
-    if let Err(error) = &analysis
-        && !matches!(
-            error,
-            crate::type_resolver::TypeError::MissingType(_)
-                | crate::type_resolver::TypeError::UndefinedVariable(_)
-        )
-    {
-        return NaturalDeductionResult::Inconclusive {
-            reasons: vec![error.to_string()],
-        };
-    }
-    let result = rules::check(context, conclusion, checks);
-    if analysis.is_err()
-        && let NaturalDeductionResult::Established { derivations } = result
-    {
-        let derivations = derivations
-            .into_iter()
-            .filter(|d| {
-                let NaturalDeductionProof::ExistentialElimination {
-                    introduced_types, ..
-                } = &d.proof
-                else {
-                    return false;
-                };
-                let mut scope = context.types.clone();
-                scope.types.extend(introduced_types.clone());
-                crate::type_resolver::analyze_formula(&scope, conclusion).is_ok()
-            })
-            .collect::<Vec<_>>();
-        if derivations.is_empty() {
-            NaturalDeductionResult::Inconclusive {
-                reasons: vec![analysis.unwrap_err().to_string()],
-            }
-        } else {
-            NaturalDeductionResult::Established { derivations }
+    match interpreter.check(context, conclusion) {
+        Ok(checked) => {
+            let spec = if crate::formula::is_quantifier(checked.analyzed()) {
+                Some(
+                    QuantifierSpec::from_analyzed(checked.analyzed())
+                        .expect("checked quantifiers have binding metadata"),
+                )
+            } else {
+                None
+            };
+            let result = rules::check(
+                context,
+                &checked.meaning(),
+                checked.free_variables(),
+                spec.as_ref(),
+                checks,
+            );
+            attach_checked(checked, result)
         }
+        Err(error) => {
+            for (source_id, introduced_types) in rules::witness_scopes(context, conclusion) {
+                let mut scope = context.clone();
+                scope.enter_scope();
+                for (v, t) in &introduced_types {
+                    scope.declare_parameter(v.clone(), t.clone());
+                }
+                if let Ok(checked)=interpreter.check(&scope,conclusion)
+                    && let rules::RuleResult::Established(derivations)=rules::check(context,&checked.meaning(),checked.free_variables(),None,checks)
+                    && let Some(source)=derivations.into_iter().find(|d|matches!(&d.proof,NaturalDeductionProof::ExistentialElimination{source,introduced_types:verified,..} if source.derivation==source_id && *verified==introduced_types)) {
+                    return NaturalDeductionResult::Established{conclusion:checked,derivations:vec![source]};
+                }
+            }
+            NaturalDeductionResult::Invalid { error }
+        }
+    }
+}
+fn attach_checked(conclusion: CheckedFormula, result: rules::RuleResult) -> NaturalDeductionResult {
+    let result = if let rules::RuleResult::Established(mut derivations) = result {
+        for d in &mut derivations {
+            if let NaturalDeductionProof::Reuse { premise, exact } = &mut d.proof {
+                *exact = premise.alternative.is_none()
+                    && premise.conjunct == 0
+                    && premise.expression == *conclusion.written();
+            }
+        }
+        rules::RuleResult::Established(derivations)
     } else {
         result
+    };
+    match result {
+        rules::RuleResult::Established(derivations) => NaturalDeductionResult::Established {
+            conclusion,
+            derivations,
+        },
+        rules::RuleResult::NoMatch => NaturalDeductionResult::NoMatch { conclusion },
+        rules::RuleResult::Inconclusive(reasons) => NaturalDeductionResult::Inconclusive {
+            conclusion,
+            reasons,
+        },
+    }
+}
+impl NaturalDeductionResult {
+    pub fn checked(&self) -> Option<&CheckedFormula> {
+        match self {
+            Self::Established { conclusion, .. } | Self::NoMatch { conclusion } => Some(conclusion),
+            Self::Inconclusive { conclusion, .. } => Some(conclusion),
+            Self::Invalid { .. } => None,
+        }
     }
 }
 

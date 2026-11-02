@@ -18,7 +18,12 @@ fn check_deduction(
         givens: &[],
         timings: &timings,
     };
-    crate::natural_deduction::follows_from_natural_deduction(context, conclusion, &mut checks)
+    crate::natural_deduction::follows_from_natural_deduction(
+        context,
+        conclusion,
+        &crate::natural_deduction::SurfaceInterpreter,
+        &mut checks,
+    )
 }
 
 const ARGUMENT: &str = r#"# Scalar argument
@@ -444,7 +449,8 @@ fn existential_matching_joins_assignments_across_requirements() {
         context.declare_parameter(v.clone(), t.clone());
     }
     for tex in [r"1 > 0", r"2 > 0", r"1 < y", r"3 < y"] {
-        context.assume(
+        test_assume(
+            &mut context,
             crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap(),
             Vec::new(),
         );
@@ -563,13 +569,15 @@ fn contextual_existential_elimination_supports_multiple_fresh_binders() {
     let expression = |s: &str| crate::from_tex::expr(&ratex_parser::parse(s).unwrap()).unwrap();
     let mut context = ProofContext::default();
     context.declare_parameter(Variable::new("x"), TypeExpr::Real);
-    context.assume(
+    context.declare_parameter(Variable::new("P"), TypeExpr::Bool);
+    test_assume(
+        &mut context,
         expression("P"),
         vec![expression(
             r"\exists u \in \mathbb{R}, v \in \mathbb{R}, x = u + v \land 0 = 0",
         )],
     );
-    let NaturalDeductionResult::Established { derivations } =
+    let NaturalDeductionResult::Established { derivations, .. } =
         check_deduction(&context, &expression("x = a + b"))
     else {
         panic!("missing witness opening")
@@ -579,7 +587,7 @@ fn contextual_existential_elimination_supports_multiple_fresh_binders() {
     );
     assert!(matches!(
         check_deduction(&context, &expression("x = a + 1")),
-        NaturalDeductionResult::NoMatch
+        NaturalDeductionResult::Invalid { .. }
     ));
 }
 
@@ -600,8 +608,8 @@ fn existential_witness_matching_sees_through_contextual_conjunctions() {
     for (v, t) in &active.types {
         context.declare_parameter(v.clone(), t.clone());
     }
-    context.assume(facts[0].clone(), Vec::new());
-    let crate::natural_deduction::NaturalDeductionResult::Established { derivations } =
+    test_assume(&mut context, facts[0].clone(), Vec::new());
+    let crate::natural_deduction::NaturalDeductionResult::Established { derivations, .. } =
         check_deduction(&context, &quantified)
     else {
         panic!("missing witness")
@@ -1316,7 +1324,7 @@ WTS $a > 0$"#,
         next_tracker: 0,
         givens: Vec::new(),
         lexical_expressions: Vec::new(),
-        interpretations: BTreeMap::new(),
+        lowering: super::natural_deduction::LoweringCache::default(),
     };
     let outcome =
         super::natural_deduction::validate_goal(&mut argument.root, &mut context, &mut run, None)
@@ -1339,7 +1347,8 @@ fn instantiation_requires_symbolic_dimension_compatibility() {
         Variable::new("y"),
         TypeExpr::Matrix(expression("m"), expression("1")),
     );
-    context.assume(
+    test_assume(
+        &mut context,
         expression(r"\forall x \in \mathbb{R}^{n}, x = x"),
         Vec::new(),
     );
@@ -1352,7 +1361,12 @@ fn instantiation_requires_symbolic_dimension_compatibility() {
         timings: &timings,
     };
     assert!(!matches!(
-        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks),
+        crate::natural_deduction::follows_from_natural_deduction(
+            &context,
+            &target,
+            &crate::natural_deduction::SurfaceInterpreter,
+            &mut checks
+        ),
         NaturalDeductionResult::Established { .. }
     ));
     let equality = crate::preprocessing::prepare_expression(
@@ -1367,8 +1381,13 @@ fn instantiation_requires_symbolic_dimension_compatibility() {
         givens: std::slice::from_ref(&equality),
         timings: &timings,
     };
-    let NaturalDeductionResult::Established { derivations } =
-        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks)
+    let NaturalDeductionResult::Established { derivations, .. } =
+        crate::natural_deduction::follows_from_natural_deduction(
+            &context,
+            &target,
+            &crate::natural_deduction::SurfaceInterpreter,
+            &mut checks,
+        )
     else {
         panic!("symbolic equality should establish compatible dimensions")
     };
@@ -1455,16 +1474,17 @@ fn accepted_dimension_facts_are_usable_and_their_scope_dependencies_are_retained
         Variable::new("y"),
         TypeExpr::Matrix(expression("m"), expression("1")),
     );
-    context.assume(
+    test_assume(
+        &mut context,
         expression(r"\forall x \in \mathbb{R}^{n}, x = x"),
         Vec::new(),
     );
     let parent = context.clone();
     context.enter_scope();
-    let local = context.assume(expression("1 > 0"), Vec::new());
+    let local = test_assume(&mut context, expression("1 > 0"), Vec::new());
     // Simulate a fact already accepted by fallback. It is available to subsequent
     // dimension checks even though it is not one of their lexical givens.
-    context.record_external(expression("n = m"), Vec::new());
+    test_record_external(&mut context, expression("n = m"), Vec::new());
     let equality = context
         .facts()
         .iter()
@@ -1480,8 +1500,13 @@ fn accepted_dimension_facts_are_usable_and_their_scope_dependencies_are_retained
         timings: &timings,
         evidence: Vec::new(),
     };
-    let NaturalDeductionResult::Established { derivations } =
-        crate::natural_deduction::follows_from_natural_deduction(&context, &target, &mut checks)
+    let NaturalDeductionResult::Established { derivations, .. } =
+        crate::natural_deduction::follows_from_natural_deduction(
+            &context,
+            &target,
+            &crate::natural_deduction::SurfaceInterpreter,
+            &mut checks,
+        )
     else {
         panic!("accepted dimension equality should be usable");
     };
@@ -1490,7 +1515,7 @@ fn accepted_dimension_facts_are_usable_and_their_scope_dependencies_are_retained
             |d| d.assumptions.contains(&local) && d.side_condition_premises.contains(&equality)
         )
     );
-    context.record(target.clone(), Vec::new(), derivations);
+    test_record(&mut context, target.clone(), Vec::new(), derivations);
     assert!(
         !context
             .exportable_to(&parent)
@@ -1552,7 +1577,7 @@ fn reuse_rendering_distinguishes_repetition_from_contextual_views() {
         let mut argument = Argument::parse_str(&input);
         argument.validate(2, &Timings::default()).unwrap();
         let StepCheck::NaturalDeduction {
-            proof: NaturalDeductionProof::Reuse { premise },
+            proof: NaturalDeductionProof::Reuse { premise, .. },
             supporting_facts,
         } = &argument.root.validation.checks[0]
         else {
@@ -1579,14 +1604,14 @@ fn an_elaborated_context_view_retains_its_source_in_the_explanation() {
     context.declare_parameter(Variable::new("x"), TypeExpr::Real);
     let source = expression("0 < x");
     let alternative = expression("x > 0");
-    context.assume(source.clone(), vec![alternative.clone()]);
-    let NaturalDeductionResult::Established { derivations } =
+    test_assume(&mut context, source.clone(), vec![alternative.clone()]);
+    let NaturalDeductionResult::Established { derivations, .. } =
         check_deduction(&context, &alternative)
     else {
         panic!("expected reuse of the context view");
     };
     assert!(
-        matches!(&derivations[0].proof, NaturalDeductionProof::Reuse { premise } if premise.alternative == Some(0) && premise.expression == source)
+        matches!(&derivations[0].proof, NaturalDeductionProof::Reuse { premise, .. } if premise.alternative == Some(0) && premise.expression == source)
     );
     let mut argument = Argument::parse_str("# Context view\n\nWTS $x > 0$");
     argument
@@ -1601,4 +1626,249 @@ fn an_elaborated_context_view_retains_its_source_in_the_explanation() {
     assert!(rendered.contains("✅ follows from established fact"));
     assert!(rendered.contains(&format!("- ${}$", source.as_latex())));
     assert!(!rendered.contains("✅ repeats established fact"));
+}
+
+#[test]
+fn a_child_cannot_replace_a_parents_ellipsis_interpretation() {
+    let mut argument = Argument::parse_str(
+        r#"# Frozen ellipsis meaning
+
+Given:
+
+- $n = 3$
+- $s \in \operatorname{Seq}_{n}(\mathbb{R})$
+- $\operatorname{diag}(s_{1}, \ldots, s_{n}) = \operatorname{diag}(s)$
+
+WTS $s_{2} = s_{1}$
+
+1. Given:
+
+   - $s_{1} = 0$
+   - $s_{n} = 0$
+
+   WTS $\operatorname{diag}(s_{1}, \ldots, s_{n}) = \operatorname{diag}(s)$"#,
+    );
+    argument.validate(3, &Timings::default()).unwrap();
+    assert!(
+        argument
+            .root
+            .validation
+            .checks
+            .iter()
+            .any(|c| matches!(c, StepCheck::Counterexample { .. })),
+        "{:?}",
+        argument.root.validation
+    );
+    let ArgumentItem::Goal(child) = &argument.root.steps[0] else {
+        panic!()
+    };
+    assert!(!child.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::NaturalDeduction {
+            proof: crate::natural_deduction::NaturalDeductionProof::Reuse { .. },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn quantifier_renaming_does_not_capture_sequence_indices() {
+    use crate::{Binop, Cmp, CmpChain, Expr, Finop, Range, RawExpr, SeqOp};
+    let var = |name: &str| Expr::new(RawExpr::Variable(Variable::new(name)));
+    let nat = |value| Expr::new(RawExpr::NatLiteral(value));
+    let decl = |name: &str| {
+        Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            var(name),
+            Expr::new(RawExpr::Type(TypeExpr::Real)),
+        ))
+    };
+    let sum = |index: &str, body| {
+        Expr::new(RawExpr::Seqop(
+            SeqOp::Sum,
+            Range {
+                index_variable: Variable::new(index),
+                from: nat(1),
+                to: nat(2),
+            },
+            body,
+        ))
+    };
+    let twice = |value| Expr::new(RawExpr::Finop(Finop::Times, vec![nat(2), value]));
+    let eq = |a, b| {
+        Expr::new(RawExpr::CmpChain(CmpChain {
+            start: a,
+            assertions: vec![(Cmp::Eq, b)],
+        }))
+    };
+    let source = Expr::new(RawExpr::Finop(
+        Finop::Forall,
+        vec![decl("x"), eq(sum("ndbound0", var("x")), twice(var("x")))],
+    ));
+    for later in [false, true] {
+        let mut givens = vec![source.clone(), decl("t")];
+        if later {
+            givens.push(decl("x"));
+        }
+        let mut argument = Argument {
+            name: "Sequence binder capture".into(),
+            root: super::Goal {
+                givens,
+                conclusion: eq(sum("i", var("i")), twice(var("t"))),
+                tactic: None,
+                steps: Vec::new(),
+                validation: Default::default(),
+            },
+            error: None,
+        };
+        argument.validate(2, &Timings::default()).unwrap();
+        assert!(
+            argument
+                .root
+                .validation
+                .checks
+                .iter()
+                .any(|c| matches!(c, StepCheck::Counterexample { .. })),
+            "later={later}: {:?}",
+            argument.root.validation
+        );
+    }
+}
+
+fn test_assume(
+    context: &mut crate::natural_deduction::ProofContext,
+    expression: crate::Expr<()>,
+    views: Vec<crate::Expr<()>>,
+) -> crate::natural_deduction::AssumptionId {
+    let formula = context.check(&expression).unwrap();
+    let views = views.iter().map(|e| context.check(e).unwrap()).collect();
+    context.assume(formula, views).unwrap()
+}
+fn test_record_external(
+    context: &mut crate::natural_deduction::ProofContext,
+    expression: crate::Expr<()>,
+    views: Vec<crate::Expr<()>>,
+) {
+    let formula = context.check(&expression).unwrap();
+    let views = views.iter().map(|e| context.check(e).unwrap()).collect();
+    context.record_external(formula, views).unwrap();
+}
+fn test_record(
+    context: &mut crate::natural_deduction::ProofContext,
+    expression: crate::Expr<()>,
+    views: Vec<crate::Expr<()>>,
+    derivations: Vec<crate::natural_deduction::Derivation>,
+) {
+    let formula = context.check(&expression).unwrap();
+    let views = views.iter().map(|e| context.check(e).unwrap()).collect();
+    context.record(formula, views, derivations).unwrap();
+}
+
+#[test]
+fn contextual_interpretation_preserves_quantifiers_and_resolves_their_ellipses() {
+    let mut argument = Argument::parse_str(
+        r#"# Interpreted quantified statement
+
+Given:
+
+- $n = 3$
+
+WTS $\forall s \in \operatorname{Seq}_{n}(\mathbb{R}), \operatorname{diag}(s_{1}, \ldots, s_{n}) = \operatorname{diag}(s)$"#,
+    );
+    argument.validate(3, &Timings::default()).unwrap();
+    assert!(!argument.root.validation.checks.is_empty());
+    assert!(
+        argument.root.validation.checks.iter().all(|c| matches!(
+            c,
+            StepCheck::Unsat { .. } | StepCheck::NaturalDeduction { .. }
+        )),
+        "{:?}",
+        argument.root.validation
+    );
+}
+
+#[test]
+fn checked_meanings_stay_frozen_across_failed_child_checks_and_siblings() {
+    use crate::natural_deduction::{
+        CheckedFormula, FormulaInterpreter, NaturalDeductionResult, ProofContext,
+    };
+    let expression = |tex: &str| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    struct Interpreter {
+        premises: Vec<crate::preprocessing::PreparedExpression>,
+    }
+    impl FormulaInterpreter for Interpreter {
+        fn check(
+            &self,
+            context: &ProofContext,
+            written: &crate::Expr<()>,
+        ) -> Result<CheckedFormula, crate::type_resolver::TypeError> {
+            let meaning = crate::preprocessing::interpret_formula(
+                context.types(),
+                written,
+                &self.premises,
+                3,
+                &Timings::default(),
+            )?;
+            CheckedFormula::from_interpreted(context, written, meaning)
+        }
+    }
+    let mut parent = ProofContext::default();
+    parent.declare_parameter(Variable::new("n"), TypeExpr::Nat);
+    parent.declare_parameter(
+        Variable::new("s"),
+        TypeExpr::Seq(
+            crate::Expr::new(RawExpr::Type(TypeExpr::Real)),
+            expression("n"),
+        ),
+    );
+    let prepare = |context: &ProofContext, tex: &str| {
+        crate::preprocessing::prepare_expression(context.types(), &expression(tex), super::POSITIVE)
+            .unwrap()
+    };
+    let root = Interpreter {
+        premises: vec![prepare(&parent, "n = 3")],
+    };
+    let written = expression(r"\operatorname{diag}(s_{1}, \ldots, s_{n}) = \operatorname{diag}(s)");
+    let original = root.check(&parent, &written).unwrap();
+    let frozen = original.meaning();
+    let identity = original.id();
+    parent.assume(original.clone(), Vec::new()).unwrap();
+    let before = parent.store_counts();
+    let mut child = parent.clone();
+    child.enter_scope();
+    let local = Interpreter {
+        premises: vec![
+            prepare(&child, "n = 3"),
+            prepare(&child, "s_{1} = 0"),
+            prepare(&child, "s_{n} = 0"),
+        ],
+    };
+    let mut checks = super::quantifier::DimensionChecks {
+        context: &child,
+        givens: &[],
+        timings: &Timings::default(),
+        evidence: Vec::new(),
+    };
+    let result = crate::natural_deduction::follows_from_natural_deduction(
+        &child,
+        &written,
+        &local,
+        &mut checks,
+    );
+    assert!(matches!(result, NaturalDeductionResult::NoMatch { .. }));
+    let changed = result.checked().unwrap();
+    assert_ne!(changed.meaning(), frozen);
+    assert_ne!(changed.id(), identity);
+    assert_eq!(parent.facts()[0].formula().meaning(), frozen);
+    assert_eq!(parent.store_counts(), before);
+    assert_eq!(
+        parent
+            .import_delta(child.export_delta(&parent).unwrap())
+            .unwrap(),
+        0
+    );
+    let sibling = parent.clone();
+    let again = root.check(&sibling, &written).unwrap();
+    assert_eq!(again.meaning(), frozen);
+    assert_eq!(parent.facts()[0].formula().id(), identity);
 }

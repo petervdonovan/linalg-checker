@@ -1,3 +1,8 @@
+pub(super) enum RuleResult {
+    Established(Vec<super::Derivation>),
+    NoMatch,
+    Inconclusive(Vec<String>),
+}
 use super::matching::{match_expression, views};
 use super::*;
 
@@ -91,18 +96,16 @@ fn discharge_sets(context: &ProofContext, expression: &Expr<()>) -> Vec<BTreeSet
     }
 }
 fn substituted(expression: &Expr<()>, assignments: &BTreeMap<Variable, Expr<()>>) -> Expr<()> {
-    // Matching binders are fresh w.r.t. candidate variables, so substitutions
-    // cannot accidentally rewrite a previously inserted candidate term.
-    assignments.iter().fold(expression.clone(), |e, (v, t)| {
-        crate::formula::substitute_free_variable(&e, v, t)
-    })
+    crate::formula::substitute_free_variables(expression, assignments)
 }
 
 pub(super) fn check(
     context: &ProofContext,
     conclusion: &Expr<()>,
+    conclusion_free: &BTreeSet<Variable>,
+    conclusion_spec: Option<&QuantifierSpec>,
     checks: &mut impl SideConditionChecker,
-) -> NaturalDeductionResult {
+) -> RuleResult {
     let mut results = Vec::new();
     let mut reasons = Vec::new();
     let available = views(context);
@@ -114,21 +117,22 @@ pub(super) fn check(
                 context,
                 NaturalDeductionProof::Reuse {
                     premise: premise.clone(),
+                    exact: false,
                 },
                 std::slice::from_ref(premise),
             ));
         }
     }
 
-    if let Ok(spec) = analyze_quantifier(conclusion, &context.types) {
+    if let Some(spec) = conclusion_spec {
         match spec.kind {
             QuantifierKind::Exists => {
-                let mut required = requirements(&spec);
+                let mut required = requirements(spec);
                 required.push(&spec.body);
                 for state in
                     match_requirements(context, &spec.introduced, &required, Match::default())
                 {
-                    if side_conditions(checks, &spec, &state, &mut reasons) {
+                    if side_conditions(checks, spec, &state, &mut reasons) {
                         results.push(with_side_conditions(
                             context,
                             derived(
@@ -174,7 +178,7 @@ pub(super) fn check(
                     }
                     for mut matched in restriction_matches {
                         matched.supporting_facts.push((*expression).clone());
-                        if !side_conditions(checks, &spec, &matched, &mut reasons) {
+                        if !side_conditions(checks, spec, &matched, &mut reasons) {
                             continue;
                         }
                         let Some(assignments) = matched
@@ -228,7 +232,7 @@ pub(super) fn check(
                                 continue;
                             }
                             d.required_variables.retain(|v| !parameters.contains(v));
-                            context.refresh_scopes(&mut d, conclusion);
+                            context.refresh_scopes(&mut d, conclusion_free);
                             // A type dependency may reintroduce a generalized parameter.
                             if !d.required_variables.is_disjoint(&parameters) {
                                 continue;
@@ -245,12 +249,11 @@ pub(super) fn check(
         .difference(&accessible)
         .cloned()
         .collect::<BTreeSet<_>>();
-    for (source, expression) in &available {
-        let spec = context
+    for (source, _expression) in &available {
+        let checked_view = context
             .analyzed_view(source)
-            .as_ref()
-            .map(QuantifierSpec::from_analyzed)
-            .unwrap_or_else(|| analyze_quantifier(expression, &context.types));
+            .expect("visible premises have checked binding analysis");
+        let spec = QuantifierSpec::from_analyzed(&checked_view);
         let Ok(spec) = spec else {
             continue;
         };
@@ -383,8 +386,8 @@ pub(super) fn check(
     }
     let mut nondominated: Vec<Derivation> = Vec::new();
     for mut result in results {
-        context.refresh_scopes(&mut result, conclusion);
-        result = context.discharge_witnesses(conclusion, &result);
+        context.refresh_scopes(&mut result, conclusion_free);
+        result = context.discharge_witnesses(conclusion_free, &result);
         if nondominated.iter().any(|d| d.dominates(&result)) {
             continue;
         }
@@ -392,12 +395,79 @@ pub(super) fn check(
         nondominated.push(result);
     }
     if !nondominated.is_empty() {
-        NaturalDeductionResult::Established {
-            derivations: nondominated,
-        }
+        RuleResult::Established(nondominated)
     } else if !reasons.is_empty() {
-        NaturalDeductionResult::Inconclusive { reasons }
+        RuleResult::Inconclusive(reasons)
     } else {
-        NaturalDeductionResult::NoMatch
+        RuleResult::NoMatch
     }
+}
+
+/// Provisional typing scopes only. No fact or rule result is accepted until the
+/// candidate has been interpreted and matched against the selected source.
+pub(super) fn witness_scopes(
+    context: &ProofContext,
+    candidate: &Expr<()>,
+) -> Vec<(DerivationId, BTreeMap<Variable, TypeExpr<()>>)> {
+    let accessible = context.types.types.keys().cloned().collect();
+    let unbound =
+        crate::formula::free_variables_in_context(std::iter::once(candidate), &accessible)
+            .difference(&accessible)
+            .cloned()
+            .collect::<Vec<_>>();
+    if unbound.is_empty() {
+        return Vec::new();
+    }
+    fn permutations(values: &[Variable]) -> Vec<Vec<Variable>> {
+        if values.is_empty() {
+            return vec![Vec::new()];
+        }
+        let mut result = Vec::new();
+        for i in 0..values.len() {
+            let mut remaining = values.to_vec();
+            let first = remaining.remove(i);
+            for mut tail in permutations(&remaining) {
+                tail.insert(0, first.clone());
+                result.push(tail);
+            }
+        }
+        result
+    }
+    let mut result = Vec::new();
+    for (source, _) in views(context) {
+        let analyzed = context
+            .analyzed_view(&source)
+            .expect("source has checked bindings");
+        let Ok(spec) = QuantifierSpec::from_analyzed(&analyzed) else {
+            continue;
+        };
+        if spec.kind != QuantifierKind::Exists || spec.introduced.len() != unbound.len() {
+            continue;
+        }
+        for names in permutations(&unbound) {
+            let assignments = spec
+                .introduced
+                .iter()
+                .cloned()
+                .zip(names)
+                .collect::<BTreeMap<_, _>>();
+            let assignments_expr = assignments
+                .iter()
+                .map(|(v, t)| (v.clone(), Expr::new(RawExpr::Variable(t.clone()))))
+                .collect();
+            let mut types = BTreeMap::new();
+            for binder in &spec.introduced {
+                let ty = crate::formula::substitute_free_variables(
+                    &Expr::new(RawExpr::Type(spec.bindings[binder].clone())),
+                    &assignments_expr,
+                );
+                let RawExpr::Type(ty) = &ty.raw else {
+                    unreachable!()
+                };
+                types.insert(assignments[binder].clone(), ty.clone());
+            }
+            result.push((source.derivation, types));
+        }
+    }
+    result
 }

@@ -512,8 +512,8 @@ fn validation_details(
         .find(|check| matches!(check, StepCheck::NaturalDeduction { .. }))
     {
         use crate::natural_deduction::NaturalDeductionProof;
-        if let NaturalDeductionProof::Reuse { premise } = proof {
-            let (summary, explanation) = if premise.alternative.is_none() && premise.conjunct == 0 {
+        if let NaturalDeductionProof::Reuse { exact, .. } = proof {
+            let (summary, explanation) = if *exact {
                 (
                     "✅ repeats established fact",
                     "This statement is already established in the current context.".to_owned(),

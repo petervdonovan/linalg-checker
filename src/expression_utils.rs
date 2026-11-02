@@ -177,6 +177,47 @@ fn visit_logic_chain_children<Metadata, Visitor>(
     }
 }
 
+/// Choose a variable name absent from the complete expression and its context.
+pub(crate) fn fresh_variable_like(variable: &Variable, used: &mut BTreeSet<Variable>) -> Variable {
+    let mut fresh = variable.clone();
+    loop {
+        fresh.annotations.push(crate::Annotation::Prime);
+        if used.insert(fresh.clone()) {
+            return fresh;
+        }
+    }
+}
+
+pub(crate) fn all_typed_variables(
+    expression: &Expr<crate::type_resolver::TypedMetadata>,
+) -> BTreeSet<Variable> {
+    use crate::type_resolver::MaybeTyped;
+    struct Collector(BTreeSet<Variable>);
+    impl Visit<crate::type_resolver::TypedMetadata> for Collector {
+        fn visit_variable(&mut self, variable: &Variable) {
+            self.0.insert(variable.clone());
+        }
+        fn visit_metadata(&mut self, meta: &crate::type_resolver::TypedMetadata) {
+            if let Ok(ty) = meta.get_type() {
+                self.0.extend(all_variables(std::iter::once(&Expr::new(
+                    crate::RawExpr::Type(ty),
+                ))));
+            }
+            if let Some(bindings) = meta.quantifier_bindings() {
+                self.0.extend(bindings.introduced.keys().cloned());
+                for ty in bindings.introduced.values() {
+                    self.0.extend(all_variables(std::iter::once(&Expr::new(
+                        crate::RawExpr::Type(ty.clone()),
+                    ))));
+                }
+            }
+        }
+    }
+    let mut collector = Collector(BTreeSet::new());
+    collector.visit_expr(expression);
+    collector.0
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

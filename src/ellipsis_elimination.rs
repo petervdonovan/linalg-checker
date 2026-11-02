@@ -205,6 +205,56 @@ impl VisitMut<crate::type_resolver::TypedMetadata> for EllipsisElimination<'_> {
         if self.error.is_some() {
             return;
         }
+        let frozen_bindings =
+            crate::type_resolver::MaybeTyped::quantifier_bindings(&node.meta).cloned();
+        if let RawExpr::Finop(Finop::Forall | Finop::Exists, expressions) =
+            &mut node.get_mut().unwrap().raw
+        {
+            // Contextual interpretation runs before quantifier lowering. Each
+            // binder's types and preceding restrictions belong to this scope.
+            let expressions_len = expressions.len();
+            let mut types = self.types.clone();
+            let Some(bindings) = frozen_bindings else {
+                self.error = Some(
+                    ModelFindingError::from_type(crate::type_resolver::TypeError::Invalid(
+                        "quantifier interpretation requires checked binders",
+                    ))
+                    .into(),
+                );
+                return;
+            };
+            types.types.extend(bindings.introduced);
+            let mut scope = self.premises.to_vec();
+            for (index, child) in expressions.iter_mut().enumerate() {
+                let mut pass =
+                    EllipsisElimination::new(&types, &scope, self.max_dimension, &self.timings);
+                pass.visit_expr_mut(context.clone(), child);
+                match pass.finish() {
+                    Ok(count) => self.rewrites += count,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
+                if index + 1 < expressions_len
+                    && !matches!(child.raw, RawExpr::Variable(_))
+                    && !crate::formula::contains_quantifier(child)
+                {
+                    match crate::preprocessing::prepare_expression(
+                        &types,
+                        child,
+                        VisitContext::positive(),
+                    ) {
+                        Ok(prepared) => scope.push(prepared),
+                        Err(error) => {
+                            self.error = Some(ModelFindingError::from_type(error).into());
+                            return;
+                        }
+                    }
+                }
+            }
+            return;
+        }
         // A literal owns its ellipsis markers; recurse into anchors only.
         if let RawExpr::Finop(Finop::SeqLiteral, elements) = &mut node.get_mut().unwrap().raw {
             for element in elements.iter_mut() {

@@ -2,7 +2,72 @@
 //! checks; only the aggregate result can add a formula to the shared context.
 use super::*;
 use crate::natural_deduction as nd;
-use crate::type_resolver::{MaybeTyped, analyze_formula};
+use crate::type_resolver::MaybeTyped;
+
+#[derive(Default)]
+pub(super) struct LoweringCache {
+    entries: BTreeMap<nd::InterpretationId, Result<Rc<PreparedExpression>, TypeError>>,
+}
+impl LoweringCache {
+    fn lower(
+        &mut self,
+        types: &SymbolicTypeEnvironment,
+        formula: &nd::CheckedFormula,
+    ) -> Result<Rc<PreparedExpression>, TypeError> {
+        self.entries
+            .entry(formula.id())
+            .or_insert_with(|| {
+                let normalized = crate::type_resolver::avoid_bound_collisions(
+                    formula.analyzed(),
+                    &types.types.keys().cloned().collect(),
+                );
+                prepare_expression(types, &normalized.with_default_metadata::<()>(), POSITIVE)
+                    .map(Rc::new)
+            })
+            .clone()
+    }
+    fn seed(&mut self, formula: &nd::CheckedFormula, prepared: PreparedExpression) {
+        self.entries
+            .entry(formula.id())
+            .or_insert_with(|| Ok(Rc::new(prepared)));
+    }
+}
+struct LexicalInterpreter<'a> {
+    givens: &'a [PreparedExpression],
+    max_dimension: u64,
+    timings: &'a Timings,
+}
+impl nd::FormulaInterpreter for LexicalInterpreter<'_> {
+    fn check(
+        &self,
+        context: &nd::ProofContext,
+        written: &Expr<()>,
+    ) -> Result<nd::CheckedFormula, TypeError> {
+        let meaning = crate::preprocessing::interpret_formula(
+            &context.types,
+            written,
+            self.givens,
+            self.max_dimension,
+            self.timings,
+        )?;
+        nd::CheckedFormula::from_interpreted(context, written, meaning)
+    }
+}
+fn context_error(error: nd::ContextError) -> ArgumentValidationError {
+    ShapeError::InvalidTyping(error.to_string()).into()
+}
+fn checked_alternatives(
+    context: &nd::ProofContext,
+    prepared: &PreparedExpression,
+) -> Result<Vec<nd::CheckedFormula>, TypeError> {
+    prepared
+        .expression
+        .meta
+        .alternatives()
+        .iter()
+        .map(|e| context.check(e))
+        .collect()
+}
 
 #[derive(Default)]
 pub(super) struct GoalOutcome {
@@ -18,35 +83,13 @@ fn error_check(validation: &mut StepValidationData, error: ModelFindingError) {
 }
 fn prepared_facts(
     context: &nd::ProofContext,
-    run: &ValidationRun,
+    run: &mut ValidationRun,
 ) -> Result<Vec<(Expr<()>, PreparedExpression)>, ModelFindingError> {
     let mut facts = Vec::new();
     for fact in context.facts() {
-        if let Some(prepared) = run.interpretations.get(&fact.id) {
-            facts.push((fact.expression.clone(), prepared.clone()));
-            continue;
-        }
-        let expression = fact
-            .analyzed
-            .as_ref()
-            .map(|e| {
-                crate::type_resolver::avoid_bound_collisions(
-                    e,
-                    &context.types.types.keys().cloned().collect(),
-                )
-                .with_default_metadata()
-            })
-            .unwrap_or_else(|| fact.expression.clone());
-        match prepare_expression_with_premises(
-            &context.types,
-            &expression,
-            POSITIVE,
-            &run.givens,
-            run.max_dimension,
-            &run.timings,
-        ) {
-            Ok(prepared) => facts.push((fact.expression.clone(), prepared)),
-            Err(TypeError::Unsupported(_)) if contains_quantifier(&expression) => {}
+        match run.lowering.lower(&context.types, &fact.formula) {
+            Ok(prepared) => facts.push((fact.expression.clone(), (*prepared).clone())),
+            Err(TypeError::Unsupported(_)) if contains_quantifier(&fact.formula.meaning()) => {}
             Err(error) => return Err(ModelFindingError::from_type(error)),
         }
     }
@@ -130,8 +173,17 @@ fn initialize_scope(
             }
             introduced.extend(new);
         }
-        let typed = analyze_formula(&context.types, given).map_err(|e| e.to_string())?;
-        if let Ok(spec) = QuantifierSpec::from_analyzed(&typed)
+        let checked = nd::FormulaInterpreter::check(
+            &LexicalInterpreter {
+                givens: &run.givens,
+                max_dimension: run.max_dimension,
+                timings: &run.timings,
+            },
+            context,
+            given,
+        )
+        .map_err(|e| e.to_string())?;
+        if let Ok(spec) = QuantifierSpec::from_analyzed(checked.analyzed())
             && !spec.questionable.is_empty()
         {
             goal.validation
@@ -140,32 +192,21 @@ fn initialize_scope(
                     premises: spec.questionable,
                 });
         }
-        let prepared = match prepare_expression_with_premises(
-            &context.types,
-            given,
-            POSITIVE,
-            &run.givens,
-            run.max_dimension,
-            &run.timings,
-        ) {
-            Ok(prepared) => Some(prepared),
-            Err(TypeError::Unsupported(_)) if contains_quantifier(given) => None,
+        let prepared = match run.lowering.lower(&context.types, &checked) {
+            Ok(p) => Some(p),
+            Err(TypeError::Unsupported(_)) if contains_quantifier(&checked.meaning()) => None,
             Err(error) => return Err(error.to_string()),
         };
-        let alternatives = prepared
+        let views = prepared
             .as_ref()
-            .map(|p| p.expression.meta.alternatives().to_vec())
+            .map(|p| checked_alternatives(context, p))
+            .transpose()
+            .map_err(|e| e.to_string())?
             .unwrap_or_default();
-        assumptions.insert(context.assume(given.clone(), alternatives));
+        assumptions.insert(context.assume(checked, views).map_err(|e| e.to_string())?);
         if let Some(prepared) = prepared {
-            let fact = context
-                .facts()
-                .iter()
-                .find(|f| f.expression == *given)
-                .unwrap();
-            run.interpretations.insert(fact.id, prepared.clone());
             run.lexical_expressions.push(given.clone());
-            run.givens.push(prepared);
+            run.givens.push((*prepared).clone());
         }
     }
     if let Some((variable, start)) = forced {
@@ -181,7 +222,12 @@ fn initialize_scope(
         .map_err(|e| e.to_string())?;
         run.lexical_expressions.push(bound.clone());
         run.givens.push(prepared);
-        assumptions.insert(context.assume(bound, Vec::new()));
+        let checked = context.check(&bound).map_err(|e| e.to_string())?;
+        assumptions.insert(
+            context
+                .assume(checked, Vec::new())
+                .map_err(|e| e.to_string())?,
+        );
     }
     Ok((introduced, assumptions))
 }
@@ -224,12 +270,13 @@ pub(super) fn validate_goal(
                 }
             }
         }
-        let validated = validate_claim(&goal.conclusion, &mut goal.validation, &mut context, run)?;
+        let conclusion_fact =
+            validate_claim(&goal.conclusion, &mut goal.validation, &mut context, run)?;
+        let validated = conclusion_fact.is_some();
         // Export independent internal facts even when the requested conclusion failed.
-        let facts = context.exportable_to(parent);
-        for fact in facts {
-            parent.import(fact, &context.archive);
-        }
+        parent
+            .import_delta(context.export_delta(parent).map_err(context_error)?)
+            .map_err(context_error)?;
         let exported = validated
             && export_goal(
                 goal,
@@ -239,6 +286,7 @@ pub(super) fn validate_goal(
                 &assumptions,
                 run,
                 scope_len,
+                conclusion_fact.expect("validated goal has an accepted fact"),
             );
         Ok(GoalOutcome {
             validated,
@@ -250,6 +298,7 @@ pub(super) fn validate_goal(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_goal(
     goal: &Goal,
     context: &nd::ProofContext,
@@ -258,48 +307,38 @@ fn export_goal(
     discharged: &BTreeSet<nd::AssumptionId>,
     run: &mut ValidationRun,
     scope_len: usize,
+    conclusion_id: nd::FactId,
 ) -> bool {
-    let mut givens = goal
-        .givens
+    let givens = discharged
         .iter()
-        .map(|given| {
-            context
-                .facts()
-                .iter()
-                .find(|f| f.expression == *given)
-                .and_then(|f| f.analyzed.as_ref())
-                .map(|e| {
-                    crate::type_resolver::avoid_bound_collisions(
-                        e,
-                        &context.types.types.keys().cloned().collect(),
-                    )
-                    .with_default_metadata()
-                })
-                .unwrap_or_else(|| given.clone())
+        .map(|id| {
+            let a = &context.assumptions()[id];
+            crate::type_resolver::avoid_bound_collisions(
+                a.formula.analyzed(),
+                &context.types.types.keys().cloned().collect(),
+            )
+            .with_default_metadata()
         })
         .collect::<Vec<Expr<()>>>();
-    for id in discharged {
-        if let Some(a) = context.assumptions().get(id)
-            && !goal.givens.contains(&a.expression)
-        {
-            givens.push(a.expression.clone());
-        }
-    }
-    let statement = exported_goal_expression(introduced, &givens, &goal.conclusion);
-    // Export eligibility is distinct from validity of the goal inside its scope.
-    if analyze_formula(&parent.types, &statement).is_err() {
-        return false;
-    }
-    let Some(fact) = context
+    let fact = context
         .facts()
         .iter()
-        .find(|f| f.expression == goal.conclusion)
+        .find(|f| f.id == conclusion_id)
+        .expect("accepted conclusion is visible");
+    let conclusion = crate::type_resolver::avoid_bound_collisions(
+        fact.formula.analyzed(),
+        &context.types.types.keys().cloned().collect(),
+    )
+    .with_default_metadata();
+    let meaning = exported_goal_expression(introduced, &givens, &conclusion);
+    let written = exported_goal_expression(introduced, &goal.givens, &goal.conclusion);
+    let Ok(checked) = nd::CheckedFormula::from_interpreted(parent, &written, meaning.clone())
     else {
         return false;
     };
     let mut proofs = Vec::new();
     for source in &fact.derivations {
-        let mut d = source.clone();
+        let mut d = (**source).clone();
         d.assumptions.retain(|a| !discharged.contains(a));
         d.required_variables.retain(|v| !introduced.contains(v));
         if !d
@@ -318,22 +357,21 @@ fn export_goal(
             conclusion: goal.conclusion.clone(),
             cases: vec![source.id],
         };
-        parent.refresh_scopes(&mut d, &statement);
+        parent.refresh_scopes(&mut d, checked.free_variables());
         proofs.push(d);
     }
     if proofs.is_empty() {
         return false;
     }
-    parent.archive.extend(context.archive.clone());
-    parent.record(statement.clone(), Vec::new(), proofs);
-    if !contains_quantifier(&statement)
-        && let Some(prepared) = run.interpretations.get(&fact.id).cloned()
-        && let Some(exported) = parent.facts().iter().find(|f| f.expression == statement)
+    if !contains_quantifier(&meaning)
+        && let Ok(prepared) = run.lowering.lower(&context.types, &fact.formula)
     {
-        run.interpretations
-            .insert(exported.id, prepared.under_givens(&run.givens[scope_len..]));
+        run.lowering.seed(
+            &checked,
+            (*prepared).clone().under_givens(&run.givens[scope_len..]),
+        );
     }
-    true
+    parent.record(checked, Vec::new(), proofs).is_ok()
 }
 
 fn validate_induction(
@@ -408,19 +446,33 @@ fn validate_induction(
         goal.validation.environments_exhaustive = true;
         goal.validation.givens_feasible = true;
         goal.validation.checks.push(StepCheck::TacticEstablished);
-        let statement = scoped_goal_expression(&goal.givens, &goal.conclusion);
-        context.record_external_with_proof(
-            statement.clone(),
-            Vec::new(),
-            nd::NaturalDeductionProof::ScopedGoal {
-                givens: goal.givens.clone(),
-                conclusion: goal.conclusion.clone(),
-                cases: Vec::new(),
-            },
-        );
-        for fact in context.exportable_to(parent) {
-            parent.import(fact, &context.archive);
+        let mut schema_givens = vec![Expr::new(RawExpr::Binop(
+            Binop::ElementOf,
+            Expr::new(RawExpr::Variable(variable.clone())),
+            Expr::new(RawExpr::Type(TypeExpr::Nat)),
+        ))];
+        if start > 0 {
+            schema_givens.push(natural_lower_bound(&variable, start));
         }
+        schema_givens.extend(goal.givens.iter().cloned());
+        let statement = scoped_goal_expression(&schema_givens, &goal.conclusion);
+        let checked = context
+            .check(&statement)
+            .map_err(ModelFindingError::from_type)?;
+        context
+            .record_external_with_proof(
+                checked,
+                Vec::new(),
+                nd::NaturalDeductionProof::ScopedGoal {
+                    givens: goal.givens.clone(),
+                    conclusion: goal.conclusion.clone(),
+                    cases: Vec::new(),
+                },
+            )
+            .map_err(context_error)?;
+        parent
+            .import_delta(context.export_delta(parent).map_err(context_error)?)
+            .map_err(context_error)?;
         return Ok(GoalOutcome {
             validated: true,
             exported: parent.facts().iter().any(|f| f.expression == statement),
@@ -440,8 +492,9 @@ fn validate_induction(
     let initialized = initialize_scope(goal, &mut schema, run, Some((&variable, start)));
     let result = match initialized {
         Ok((introduced, assumptions)) => {
-            let validated =
+            let conclusion_fact =
                 validate_claim(&goal.conclusion, &mut goal.validation, &mut schema, run)?;
+            let validated = conclusion_fact.is_some();
             let exported = validated
                 && export_goal(
                     goal,
@@ -451,6 +504,7 @@ fn validate_induction(
                     &assumptions,
                     run,
                     scope_len,
+                    conclusion_fact.expect("validated schema has an accepted fact"),
                 );
             GoalOutcome {
                 validated,
@@ -472,7 +526,7 @@ fn validate_induction(
 fn proof_check(proof: &nd::NaturalDeductionProof) -> StepCheck {
     use nd::NaturalDeductionProof::*;
     let premises: Vec<&nd::Premise> = match proof {
-        Reuse { premise }
+        Reuse { premise, .. }
         | UniversalIntroduction { premise, .. }
         | ImplicationIntroduction { premise, .. } => vec![premise],
         ExistentialIntroduction { premises, .. } => premises.iter().collect(),
@@ -573,91 +627,102 @@ pub(super) fn validate_claim(
     validation: &mut StepValidationData,
     context: &mut nd::ProofContext,
     run: &mut ValidationRun,
-) -> Result<bool, ArgumentValidationError> {
-    let mut candidates = vec![sentence.clone()];
-    let mut alternatives = Vec::new();
-    let mut interpretation = None;
-    let analysis = analyze_formula(&context.types, sentence);
-    if analysis.is_ok()
-        && !contains_quantifier(sentence)
-        && let Ok(prepared) = prepare_expression_with_premises(
-            &context.types,
-            sentence,
-            POSITIVE,
-            &run.givens,
-            run.max_dimension,
-            &run.timings,
-        )
-    {
-        alternatives = prepared.expression.meta.alternatives().to_vec();
-        interpretation = Some(prepared);
-        candidates.extend(alternatives.iter().filter(|e| is_quantifier(e)).cloned());
-    }
-    let mut checks = quantifier::DimensionChecks {
-        evidence: Vec::new(),
-        context,
-        givens: &run.givens,
-        timings: &run.timings,
+) -> Result<Option<nd::FactId>, ArgumentValidationError> {
+    let result = {
+        let interpreter = LexicalInterpreter {
+            givens: &run.givens,
+            max_dimension: run.max_dimension,
+            timings: &run.timings,
+        };
+        let mut checks = quantifier::DimensionChecks {
+            context,
+            givens: &run.givens,
+            timings: &run.timings,
+            evidence: Vec::new(),
+        };
+        nd::follows_from_natural_deduction(context, sentence, &interpreter, &mut checks)
     };
-    let mut proposals = None;
-    for candidate in &candidates {
-        if let nd::NaturalDeductionResult::Established { derivations } =
-            nd::follows_from_natural_deduction(context, candidate, &mut checks)
-        {
-            proposals = Some(derivations);
-            break;
+    let Some(checked) = result.checked().cloned() else {
+        let nd::NaturalDeductionResult::Invalid { error } = result else {
+            unreachable!()
+        };
+        if contains_quantifier(sentence) {
+            validation.checks.push(StepCheck::QuantifierInconclusive {
+                message: error.to_string(),
+            });
+        } else {
+            error_check(validation, ModelFindingError::from_type(error));
+        }
+        return Ok(None);
+    };
+    let mut checking_scope = std::borrow::Cow::Borrowed(&*context);
+    let mut proof = match result {
+        nd::NaturalDeductionResult::Established { derivations, .. } => Some(derivations),
+        _ => None,
+    };
+    if let Some(ds) = &proof
+        && let nd::NaturalDeductionProof::ExistentialElimination {
+            introduced_types, ..
+        } = &ds[0].proof
+    {
+        let scope = checking_scope.to_mut();
+        // Adopt the provisional binding scopes that were checked by the proposal.
+        for (v, ty) in introduced_types {
+            let id = checked.bindings()[v].0;
+            scope.scopes.insert(id);
+            scope.current_scope = id;
+            scope.declare_parameter(v.clone(), ty.clone());
         }
     }
-    if let Some(mut derivations) = proposals {
-        // Selecting a source is explicit and commits exactly one witness choice.
-        let selected = derivations.iter().position(|d| {
-            matches!(
-                d.proof,
-                nd::NaturalDeductionProof::ExistentialElimination { .. }
-            )
-        });
-        let mut checking_scope = std::borrow::Cow::Borrowed(&*context);
-        if let Some(index) = selected {
-            let chosen = derivations.remove(index);
-            if let nd::NaturalDeductionProof::ExistentialElimination {
-                introduced_types, ..
-            } = &chosen.proof
-            {
-                let scope = checking_scope.to_mut();
-                scope.enter_scope();
-                for (v, ty) in introduced_types {
-                    scope.declare_parameter(v.clone(), ty.clone());
-                }
+    let meaning = checked.meaning();
+    let prepared = if !contains_quantifier(&meaning) {
+        match run.lowering.lower(&checking_scope.types, &checked) {
+            Ok(p) => Some(p),
+            Err(error) => {
+                error_check(validation, ModelFindingError::from_type(error));
+                return Ok(None);
             }
-            derivations = vec![chosen];
         }
-        if let Err(error) = analyze_formula(&checking_scope.types, sentence) {
+    } else {
+        None
+    };
+    let views = match prepared
+        .as_ref()
+        .map(|p| checked_alternatives(&checking_scope, p))
+        .transpose()
+    {
+        Ok(v) => v.unwrap_or_default(),
+        Err(error) => {
             error_check(validation, ModelFindingError::from_type(error));
-            return Ok(false);
+            return Ok(None);
         }
-        // Logical justification is already complete. Preprocessing is only for
-        // well-definedness and elaborated views, never for finite proof checking.
-        if !contains_quantifier(sentence) {
-            match prepare_expression_with_premises(
-                &checking_scope.types,
-                sentence,
-                POSITIVE,
-                &run.givens,
-                run.max_dimension,
-                &run.timings,
-            ) {
-                Ok(prepared) => {
-                    alternatives = prepared.expression.meta.alternatives().to_vec();
-                    interpretation = Some(prepared);
-                }
-                Err(error) => {
-                    error_check(validation, ModelFindingError::from_type(error));
-                    return Ok(false);
-                }
+    };
+    if proof.is_none() {
+        for view in &views {
+            let mut checks = quantifier::DimensionChecks {
+                context,
+                givens: &run.givens,
+                timings: &run.timings,
+                evidence: Vec::new(),
+            };
+            if let nd::NaturalDeductionResult::Established { derivations, .. } =
+                nd::follows_from_natural_deduction(
+                    context,
+                    &view.meaning(),
+                    &nd::SurfaceInterpreter,
+                    &mut checks,
+                )
+            {
+                proof = Some(derivations);
+                break;
             }
         }
-        // Fresh terms in universal instantiation need their own domain checks,
-        // including when the resulting formula still contains quantifiers.
+    }
+    if let Some(mut derivations) = proof {
+        let opening = matches!(
+            derivations[0].proof,
+            nd::NaturalDeductionProof::ExistentialElimination { .. }
+        );
         if let nd::NaturalDeductionProof::UniversalElimination { assignments, .. } =
             &derivations[0].proof
         {
@@ -666,58 +731,44 @@ pub(super) fn validate_claim(
                     start: term.clone(),
                     assertions: vec![(Cmp::Eq, term.clone())],
                 }));
-                let prepared = prepare_expression_with_premises(
-                    &checking_scope.types,
-                    &reflexivity,
-                    POSITIVE,
-                    &run.givens,
-                    run.max_dimension,
-                    &run.timings,
-                )
-                .map_err(ModelFindingError::from_type)?;
-                if !check_definedness(&prepared, &checking_scope, validation, run)? {
-                    return Ok(false);
+                let term_checked = checking_scope
+                    .check(&reflexivity)
+                    .map_err(ModelFindingError::from_type)?;
+                let term_prepared = run
+                    .lowering
+                    .lower(&checking_scope.types, &term_checked)
+                    .map_err(ModelFindingError::from_type)?;
+                if !check_definedness(&term_prepared, &checking_scope, validation, run)? {
+                    return Ok(None);
                 }
             }
         }
-        if selected.is_none()
-            && let Some(prepared) = &interpretation
-            && !check_definedness(prepared, &checking_scope, validation, run)?
+        if !opening
+            && let Some(p) = &prepared
+            && !check_definedness(p, &checking_scope, validation, run)?
         {
-            return Ok(false);
+            return Ok(None);
         }
         validation.environments_exhaustive = true;
         validation.checks.push(proof_check(&derivations[0].proof));
-        if let Ok(spec) = analyze_quantifier(sentence, &context.types)
+        if let Ok(spec) = QuantifierSpec::from_analyzed(checked.analyzed())
             && !spec.questionable.is_empty()
         {
             validation.checks.push(StepCheck::QuestionableQuantifier {
                 premises: spec.questionable,
             });
         }
-        if selected.is_some() {
-            context.open_witness(sentence.clone(), alternatives, derivations.remove(0));
+        drop(checking_scope);
+        let id = if opening {
+            context.open_witness(checked, views, derivations.remove(0))
         } else {
-            context.record(sentence.clone(), alternatives, derivations);
+            context.record(checked, views, derivations)
         }
-        if let Some(prepared) = interpretation
-            && let Some(fact) = context.facts().iter().find(|f| f.expression == *sentence)
-        {
-            run.interpretations.insert(fact.id, prepared);
-        }
-        return Ok(true);
+        .map_err(context_error)?;
+        return Ok(Some(id));
     }
-    if let Err(error) = analysis {
-        if contains_quantifier(sentence) {
-            validation.checks.push(StepCheck::QuantifierInconclusive {
-                message: error.to_string(),
-            });
-        } else {
-            error_check(validation, ModelFindingError::from_type(error));
-        }
-        return Ok(false);
-    }
-    let accepted = if let Ok(spec) = analyze_quantifier(sentence, &context.types) {
+    drop(checking_scope);
+    let accepted = if let Ok(spec) = QuantifierSpec::from_analyzed(checked.analyzed()) {
         if !spec.questionable.is_empty() {
             validation.checks.push(StepCheck::QuestionableQuantifier {
                 premises: spec.questionable.clone(),
@@ -732,29 +783,29 @@ pub(super) fn validate_claim(
             }
             QuantifierKind::Forall => bounded_universal(&spec, validation, context, run)?,
         }
-    } else if contains_quantifier(sentence) {
+    } else if contains_quantifier(&meaning) {
         validation.checks.push(StepCheck::QuantifierInconclusive {
             message: "verification failed to handle the quantifiers in this formula".into(),
         });
         false
     } else {
-        bounded_ordinary(sentence, validation, context, run)?
+        bounded_ordinary(&meaning, validation, context, run)?
     };
     if accepted
-        && let Some(prepared) = &interpretation
-        && !check_definedness(prepared, context, validation, run)?
+        && let Some(p) = &prepared
+        && !check_definedness(p, context, validation, run)?
     {
-        return Ok(false);
+        return Ok(None);
     }
     if accepted {
-        context.record_external(sentence.clone(), alternatives);
-        if let Some(prepared) = interpretation
-            && let Some(fact) = context.facts().iter().find(|f| f.expression == *sentence)
-        {
-            run.interpretations.insert(fact.id, prepared);
-        }
+        Ok(Some(
+            context
+                .record_external(checked, views)
+                .map_err(context_error)?,
+        ))
+    } else {
+        Ok(None)
     }
-    Ok(accepted)
 }
 
 fn bounded_ordinary(
@@ -846,7 +897,8 @@ fn bounded_universal(
                 run.lexical_expressions.push(premise.clone());
             }
             if !spec.is_binder_declaration(premise) {
-                local.assume(premise.clone(), Vec::new());
+                let checked = local.check(premise).map_err(ModelFindingError::from_type)?;
+                local.assume(checked, Vec::new()).map_err(context_error)?;
             }
         }
         let (possible, _) = feasible(&local, run)?;
@@ -854,7 +906,7 @@ fn bounded_universal(
             validation.checks.push(StepCheck::VacuousQuantifier);
             return Ok(false);
         }
-        validate_claim(&spec.body, validation, &mut local, run)
+        validate_claim(&spec.body, validation, &mut local, run).map(|f| f.is_some())
     })();
     run.givens.truncate(len);
     run.lexical_expressions.truncate(len);

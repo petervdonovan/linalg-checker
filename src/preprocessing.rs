@@ -497,6 +497,40 @@ impl<Lookup: TypeLookup> TypeLookup for ExtendedTypeLookup<'_, Lookup> {
     }
 }
 
+/// Resolve contextual surface notation while retaining logical binders and
+/// operators. Backend lowering consumes this frozen meaning afterwards.
+pub fn interpret_formula(
+    types: &crate::type_resolver::SymbolicTypeEnvironment,
+    source: &Expr<()>,
+    premises: &[PreparedExpression],
+    max_dimension: u64,
+    timings: &Timings,
+) -> Result<Expr<()>, TypeError> {
+    if !crate::ellipsis_elimination::contains_ellipses(source) {
+        return Ok(source.clone());
+    }
+    let mut expression = source.with_default_metadata::<TypedMetadata>();
+    loop {
+        TypeResolver::new_partial(types, &OperatorTypeRules::surface())
+            .resolve(&mut expression, VisitContext::positive())?;
+        let mut pass = crate::ellipsis_elimination::EllipsisElimination::new(
+            types,
+            premises,
+            max_dimension,
+            timings,
+        );
+        pass.visit_expr_mut(VisitContext::positive(), &mut expression);
+        if pass
+            .finish()
+            .map_err(|e| TypeError::Ellipsis(Box::new(e)))?
+            == 0
+        {
+            break;
+        }
+    }
+    Ok(expression.with_default_metadata())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::timing::Timings;

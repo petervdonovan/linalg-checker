@@ -218,7 +218,7 @@ impl Argument {
             next_tracker: 0,
             givens: Vec::new(),
             lexical_expressions: Vec::new(),
-            interpretations: BTreeMap::new(),
+            lowering: natural_deduction::LoweringCache::default(),
         };
         drop(before);
         let _after = timings.scope("after_preprocessing_complete_ms");
@@ -258,7 +258,7 @@ struct ValidationRun {
     timings: Timings,
     givens: Vec<PreparedExpression>,
     lexical_expressions: Vec<Expr<()>>,
-    interpretations: BTreeMap<crate::natural_deduction::FactId, PreparedExpression>,
+    lowering: natural_deduction::LoweringCache,
     max_dimension: u64,
     next_tracker: usize,
 }
@@ -469,7 +469,7 @@ fn validate_ordinary_claim(
 mod natural_deduction;
 
 mod quantifier;
-use crate::type_resolver::{QuantifierKind, QuantifierSpec, analyze_quantifier};
+use crate::type_resolver::{QuantifierKind, QuantifierSpec};
 
 fn scoped_statement_expression(givens: &[Expr<()>], conclusion: &Expr<()>) -> Expr<()> {
     if givens.is_empty() {

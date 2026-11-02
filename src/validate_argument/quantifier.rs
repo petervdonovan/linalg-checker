@@ -166,10 +166,10 @@ fn witness_dimension_result(
             .meta
             .get_type()
             .map_err(ModelFindingError::from_type)?;
-        let mut expected = Expr::new(RawExpr::Type(spec.bindings[variable].clone()));
-        for (binder, value) in &witness.assignments {
-            expected = substitute_free_variable(&expected, binder, value);
-        }
+        let expected = crate::formula::substitute_free_variables(
+            &Expr::new(RawExpr::Type(spec.bindings[variable].clone())),
+            &witness.assignments,
+        );
         let RawExpr::Type(expected) = &expected.raw else {
             unreachable!()
         };

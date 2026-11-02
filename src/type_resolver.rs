@@ -369,6 +369,7 @@ pub struct TypeResolver<'a, Lookup> {
     set_depth: usize,
     in_dimension_expression: bool,
     allow_missing_variables: bool,
+    preserve_bindings: bool,
     error: Option<TypeError>,
 }
 
@@ -381,6 +382,7 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             set_depth: 0,
             in_dimension_expression: false,
             allow_missing_variables: false,
+            preserve_bindings: false,
             error: None,
         }
     }
@@ -393,8 +395,14 @@ impl<'a, Lookup: TypeLookup> TypeResolver<'a, Lookup> {
             set_depth: 0,
             in_dimension_expression: false,
             allow_missing_variables: true,
+            preserve_bindings: false,
             error: None,
         }
+    }
+
+    pub(crate) fn with_saved_bindings(mut self) -> Self {
+        self.preserve_bindings = true;
+        self
     }
 
     pub fn resolve<Metadata: MaybeTyped>(
@@ -561,6 +569,11 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
         if self.error.is_some() {
             return;
         }
+        let saved_bindings = if self.preserve_bindings {
+            node.meta.quantifier_bindings().cloned()
+        } else {
+            None
+        };
         {
             let raw = &mut node
                 .get_mut()
@@ -628,39 +641,46 @@ impl<Metadata: MaybeTyped, Lookup: TypeLookup> VisitMut<Metadata> for TypeResolv
                         .iter()
                         .map(|e| e.with_default_metadata())
                         .collect::<Vec<Expr<()>>>();
-                    let variables = crate::formula::free_variables(premises.iter());
-                    let introduced = variables
-                        .into_iter()
-                        .filter(|v| {
-                            self.types.type_of(v).is_none()
-                                && !self.local_bindings.iter().any(|(b, _)| b == v)
-                                && !context.active_ranges.iter().any(|r| r.index_variable == *v)
-                        })
-                        .collect::<BTreeSet<_>>();
-                    if introduced.is_empty() {
-                        self.error = Some(TypeError::Invalid("quantifier binder must be fresh"));
-                        return;
-                    }
-                    let inferred =
-                        match crate::enumerable_envspec::infer_symbolic_type_environment(&premises)
-                        {
-                            Ok(types) => types,
-                            Err(_) => {
-                                self.error = Some(TypeError::Invalid(
-                                    "quantifier binder types could not be inferred",
-                                ));
-                                return;
-                            }
+                    let bindings = if let Some(saved) = saved_bindings {
+                        saved.introduced
+                    } else {
+                        let variables = crate::formula::free_variables(premises.iter());
+                        let introduced = variables
+                            .into_iter()
+                            .filter(|v| {
+                                self.types.type_of(v).is_none()
+                                    && !self.local_bindings.iter().any(|(b, _)| b == v)
+                                    && !context.active_ranges.iter().any(|r| r.index_variable == *v)
+                            })
+                            .collect::<BTreeSet<_>>();
+                        if introduced.is_empty() {
+                            self.error =
+                                Some(TypeError::Invalid("quantifier binder must be fresh"));
+                            return;
+                        }
+                        let inferred =
+                            match crate::enumerable_envspec::infer_symbolic_type_environment(
+                                &premises,
+                            ) {
+                                Ok(types) => types,
+                                Err(_) => {
+                                    self.error = Some(TypeError::Invalid(
+                                        "quantifier binder types could not be inferred",
+                                    ));
+                                    return;
+                                }
+                            };
+                        let bindings = introduced
+                            .iter()
+                            .map(|v| inferred.types.get(v).cloned().map(|ty| (v.clone(), ty)))
+                            .collect::<Option<BTreeMap<_, _>>>();
+                        let Some(bindings) = bindings else {
+                            self.error = Some(TypeError::Invalid(
+                                "quantifier binder type could not be inferred",
+                            ));
+                            return;
                         };
-                    let bindings = introduced
-                        .iter()
-                        .map(|v| inferred.types.get(v).cloned().map(|ty| (v.clone(), ty)))
-                        .collect::<Option<BTreeMap<_, _>>>();
-                    let Some(bindings) = bindings else {
-                        self.error = Some(TypeError::Invalid(
-                            "quantifier binder type could not be inferred",
-                        ));
-                        return;
+                        bindings
                     };
                     let depth = self.local_bindings.len();
                     self.local_bindings

@@ -1,63 +1,63 @@
 # One-step natural deduction
 
-`follows_from_natural_deduction(context, conclusion, checks)` checks whether a
-statement follows in one supported step from the accepted context. It does not
-establish the global truth of its premises. Facts accepted as either verified or
-likely are equally available to the rules; a successful inference is verified.
+`follows_from_natural_deduction(context, written, interpreter, checks)` checks a
+single rule application against the visible context. The interpreter resolves the
+new occurrence in its lexical scope. The returned established result contains
+both its `CheckedFormula` and derivation proposals; acceptance uses that checked
+conclusion directly. Facts accepted as verified or likely are equally available.
 
-The rules are existential introduction, existential witness opening, universal
-introduction, universal elimination, implication introduction, and contextual
-reuse. Conjunct projections and elaborated alternatives retain their source
-provenance. Missing premises are not proved recursively. No match is not a
-counterexample, and inconclusive side conditions are distinguished from failure.
+The supported rules are existential introduction, witness opening, universal
+introduction/elimination, implication introduction, and contextual reuse. Missing
+premises are not proved recursively. Dimension evidence retains scope dependencies
+without propagating verification statuses.
 
-## Typing and context
+## Immutable interpretations
 
-`ProofContext` owns the authoritative symbolic typing environment and scoped facts.
-`type_resolver::analyze_formula` checks surface formulas without requiring SMT
-lowering. Quantifiers, including restrictions, multiple binders, and quantified
-Boolean operands, use the same analysis as ordinary formulas. Typed expressions
-retain their lexical binder resolution. Later declarations cannot reinterpret
-binders in an earlier fact; matching alpha-renames stored binders when needed.
+`CheckedFormula` has private contents and is created only by successful central
+formula analysis. It keeps the written expression, an analyzed interpreted
+meaning, and the identities/types of its free parameters. The natural deduction
+context accepts checked formulas and checked alternatives, never optional analysis.
 
-Concrete SMT environments are assignments for individual fallback checks. They
-are not a second symbolic context. Validation walks statements in order, tries
-natural deduction, and otherwise aggregates the statement's fallback results
-before accepting its original symbolic formula. One successful concrete case
-cannot admit a fact that fails in another case.
+Contextual surface interpretation (including ellipses) precedes matching and
+preserves logical quantifiers. Identical text in a stronger local scope can acquire
+a different meaning and must be justified again. Reuse compares frozen meanings;
+the proof records whether it is a literal repetition or a resolved contextual view.
 
-The deduction engine performs no SMT proof search. `SideConditionChecker` can
-establish symbolic type and dimension compatibility, but cannot prove missing
-logical premises. Finite dimension sampling does not certify those conditions.
-Accepted natural-number constraints can support dimension checks; their derivation
-references and scope dependencies are retained as side-condition evidence.
-Well-definedness obligations are checked separately from the inference itself;
-unresolved obligations are not relabeled as a likely natural deduction proof.
+Concrete lowering is a separate consumer. The validator's append-only cache is
+keyed by interpretation identity, including unsupported-lowering results. It lowers
+frozen meanings without resynthesizing contextual notation. Child occurrences and
+automatic implication exports cannot overwrite a parent's prepared interpretation.
 
-## Assumptions, witnesses, and export
+## Bindings and acceptance
 
-Assumption and parameter dependencies describe scope, not recursive verification
-status. Distinct occurrences of the same assumption have distinct IDs. Alternative
-derivations with incomparable scope dependencies are retained. External SMT facts
-conservatively depend on all active assumptions and parameters.
+Typed formulas retain lexical quantifier bindings. Capture-safe renaming reserves
+all names, including names in type annotations, and respects sequence and set
+binders. Domains and endpoints use the outer scope; bodies use their own binding.
+Value annotations are reconstructed from frozen lexical free types and saved
+binder maps, rather than re-inferring binders against a later context.
 
-Checking is read-only. Acceptance selects the first suitable witness source
-explicitly and commits a single opening, or records the nondominated ordinary
-proof alternatives. Opening a witness registers its parameter and local payload
-assumption, linked to the chosen existential fact. Discharge replaces that
-assumption with the source's dependencies when the witness is absent from the
-conclusion, remaining assumptions, and dependent types.
+Checking is read-only. Witness candidates are first interpreted in provisional
+typing scopes and rematched against the selected source. Acceptance explicitly
+chooses the first suitable source and commits one opening. Failed checks and
+foreign proof references cannot partially register assumptions or witnesses.
 
-Goals use the same inference rules as statements. A witness-bearing goal can be
-verified locally without being exportable. Both automatic implication/universal
-exports and independent internal facts must satisfy the parent scope's assumption
-and free-parameter requirements. Witnesses are never generalized automatically.
-Independent facts from a failed goal remain eligible for export.
+Witness discharge replaces the local payload assumption with the source
+existential's dependencies when its variables are absent from the conclusion,
+remaining assumptions, and dependent types. Goals use the same inference rules;
+a locally valid witness-bearing conclusion may be ineligible for export.
 
-The validator preserves the prepared interpretation of accepted ordinary facts,
-including ellipses interpreted under local givens. Solver reconstruction reuses
-that interpretation rather than reinterpreting surface text in another scope.
+## Shared storage and scoped visibility
 
-The proof API contains no solver trackers, finite-validation qualifications, or
-Markdown nodes. SMT bounds describe only the particular fallback result that
-used them; they do not propagate through subsequent natural deduction steps.
+Each root owns an append-only `ProofStore` shared through `Rc` by child contexts.
+Immutable fact contents and derivations are stored once. Contexts clone only their
+visibility/active-derivation handles and scoped typing state. Inspecting a stored
+proof does not make it available as a premise in another scope.
+
+Scope exit creates an `ExportDelta` containing newly eligible facts/derivations,
+excluding unchanged inherited entries. Applying it updates visibility without
+copying or reregistering records. Superseded derivations remain inspectable through
+stable IDs. Deltas and checked formulas from another root store are rejected.
+
+Assumption dependencies describe scope only. Independent facts from failed goals
+may export; facts requiring local assumptions or free parameters remain local.
+Externally checked SMT facts retain the existing conservative dependency policy.

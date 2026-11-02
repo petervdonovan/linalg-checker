@@ -41,13 +41,13 @@ pub(crate) fn views(context: &ProofContext) -> Vec<(Premise, Expr<()>)> {
     let mut result = Vec::new();
     for fact in &context.facts {
         for derivation in &fact.derivations {
-            for (alternative, expression) in std::iter::once((None, &fact.expression)).chain(
+            for (alternative, expression) in std::iter::once((None, fact.formula.analyzed())).chain(
                 fact.alternatives
                     .iter()
                     .enumerate()
-                    .map(|(i, e)| (Some(i), e)),
+                    .map(|(i, e)| (Some(i), e.analyzed())),
             ) {
-                for (conjunct, expression) in conjunction_views(expression).into_iter().enumerate()
+                for (conjunct, _expression) in conjunction_views(expression).into_iter().enumerate()
                 {
                     let premise = Premise {
                         fact: fact.id,
@@ -58,8 +58,8 @@ pub(crate) fn views(context: &ProofContext) -> Vec<(Premise, Expr<()>)> {
                     };
                     let normalized = context
                         .analyzed_view(&premise)
-                        .map(|e| e.with_default_metadata())
-                        .unwrap_or_else(|| expression.clone());
+                        .expect("visible views are checked")
+                        .with_default_metadata();
                     result.push((premise, normalized));
                 }
             }
@@ -117,9 +117,10 @@ fn match_views(
                     let supporting = premise
                         .alternative
                         .map(|i| &fact.alternatives[i])
-                        .unwrap_or(&fact.expression);
-                    if !matched.supporting_facts.contains(supporting) {
-                        matched.supporting_facts.push(supporting.clone());
+                        .unwrap_or(&fact.formula);
+                    let supporting = supporting.meaning();
+                    if !matched.supporting_facts.contains(&supporting) {
+                        matched.supporting_facts.push(supporting);
                     }
                     next.push(matched);
                 }

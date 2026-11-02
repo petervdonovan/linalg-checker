@@ -176,13 +176,7 @@ pub(crate) fn substitute_free_variable(
             if !self.replacement_free.contains(binder) {
                 return;
             }
-            let mut fresh = binder.clone();
-            loop {
-                fresh.annotations.push(crate::Annotation::Prime);
-                if self.used.insert(fresh.clone()) {
-                    break;
-                }
-            }
+            let fresh = crate::expression_utils::fresh_variable_like(binder, &mut self.used);
             *body = substitute_free_variable(
                 body,
                 binder,
@@ -272,5 +266,35 @@ pub(crate) fn substitute_free_variable(
         used: crate::expression_utils::all_variables([expression, replacement]),
     }
     .visit_expr_mut(POSITIVE, &mut result);
+    result
+}
+
+/// Capture-avoiding simultaneous substitution: inserted terms are never
+/// rewritten again by another assignment from the same substitution.
+pub(crate) fn substitute_free_variables(
+    expression: &Expr<()>,
+    assignments: &std::collections::BTreeMap<Variable, Expr<()>>,
+) -> Expr<()> {
+    let mut used = crate::expression_utils::all_variables(
+        std::iter::once(expression).chain(assignments.values()),
+    );
+    used.extend(assignments.keys().cloned());
+    let temporary = assignments
+        .keys()
+        .map(|v| {
+            (
+                v.clone(),
+                crate::expression_utils::fresh_variable_like(v, &mut used),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut result = deep_clone(expression);
+    for (old, fresh) in &temporary {
+        result =
+            substitute_free_variable(&result, old, &Expr::new(RawExpr::Variable(fresh.clone())));
+    }
+    for (old, fresh) in &temporary {
+        result = substitute_free_variable(&result, fresh, &assignments[old]);
+    }
     result
 }
