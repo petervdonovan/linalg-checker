@@ -467,3 +467,97 @@ Given:
 - $\left(\forall a, a = a\right) \implies c > 0$
 
 WTS $c > 0$
+
+# Independent facts cross multiple block boundaries
+
+Given:
+
+- $y \in \mathbb{R}$
+
+WTS $\exists x > 0, x = x$
+
+1. WTS $0 = 0$
+
+   1. WTS $0 = 0$
+
+      1. $1 > 0$
+      2. $1 = 1$
+      3. $y = y$
+2. $y = y$
+
+# Independent facts survive a failed goal
+
+WTS $\exists x > 0, x = x$
+
+1. WTS $0 = 1$
+
+   1. $1 > 0$
+   2. $1 = 1$
+2. $0 = 1$
+
+# Explicit implication introduction exports a discharged fact
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x > 0 \implies x > 0$
+
+1. Given:
+
+   - $x > 0$
+
+   WTS $x = 0$
+
+   1. $x \ge 0$
+   2. $x > 0 \implies x > 0$
+2. $x > 0 \implies x > 0$
+3. $x \ge 0$
+
+# Explicit universal introduction exports a quantified fact
+
+Given:
+
+- $b \in \mathbb{R}$
+
+WTS $\forall t \in \mathbb{R}, t t \ge 0$
+
+1. Given:
+
+   - $a \in \mathbb{R}$
+
+   WTS $0 = 0$
+
+   1. $a a \ge 0$
+   2. $\forall t \in \mathbb{R}, t t \ge 0$
+2. $\forall t \in \mathbb{R}, t t \ge 0$
+3. $b b \ge 0$
+4. $a = a$
+
+# Remaining assumptions prevent universal introduction
+
+WTS $\forall t \in \mathbb{R}, t > 0$
+
+1. Given:
+
+   - $a \in \mathbb{R}$
+   - $a > 0$
+
+   WTS $a > 0$
+
+   1. $\forall t \in \mathbb{R}, t > 0$
+2. $\forall t \in \mathbb{R}, t > 0$
+
+# Local existential witnesses cannot be generalized
+
+Given:
+
+- $\exists x \in \mathbb{R}, x > 0$
+
+WTS $\forall t \in \mathbb{R}, t > 0$
+
+1. WTS $a > 0$
+
+   1. $a > 0$
+   2. $\forall t \in \mathbb{R}, t > 0$
+2. $a = a$

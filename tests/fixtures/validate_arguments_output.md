@@ -1160,3 +1160,355 @@ This follows from the following facts:
 
 - $\left(\forall a, a = a\right) \implies c > 0$
 </details>
+
+# Independent facts cross multiple block boundaries
+
+Given:
+
+- $y \in \mathbb{R}$
+
+WTS $\exists x > 0, x = x$
+
+<details>
+<summary>✅ witness found</summary>
+
+Witness:
+
+- $x = 1$
+
+Matched facts:
+
+- $1 > 0$
+- $1 = 1$
+</details>
+
+1. WTS $0 = 0$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+
+   1. WTS $0 = 0$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
+
+      1. $1 > 0$
+
+         <details>
+         <summary>✅ verified</summary>
+
+         No premises seemed necessary to show this.
+         </details>
+      2. $1 = 1$
+
+         <details>
+         <summary>✅ verified</summary>
+
+         No premises seemed necessary to show this.
+         </details>
+      3. $y = y$
+
+         <details>
+         <summary>✅ verified</summary>
+
+         No premises seemed necessary to show this.
+         </details>
+2. $y = y$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+
+# Independent facts survive a failed goal
+
+WTS $\exists x > 0, x = x$
+
+<details>
+<summary>✅ witness found</summary>
+
+Witness:
+
+- $x = 1$
+
+Matched facts:
+
+- $1 > 0$
+- $1 = 1$
+</details>
+
+1. WTS $0 = 1$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $0 = 1$ is satisfied by:
+
+
+   </details>
+
+   1. $1 > 0$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
+   2. $1 = 1$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
+2. $0 = 1$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $0 = 1$ is satisfied by:
+
+
+   </details>
+
+# Explicit implication introduction exports a discharged fact
+
+Given:
+
+- $x \in \mathbb{R}$
+
+WTS $x > 0 \implies x > 0$
+
+<details>
+<summary>✅ repeats established fact</summary>
+
+This statement is already established in the current context.
+</details>
+
+1. Given:
+
+   - $x > 0$
+
+   WTS $x = 0$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $x = 0$ is satisfied by:
+
+   - $x = \frac{1}{2}$
+   </details>
+
+   1. $x \ge 0$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      This follows from the following facts:
+
+      - $x > 0$
+      </details>
+   2. $x > 0 \implies x > 0$
+
+      <details>
+      <summary>✅ verified by implication introduction</summary>
+
+      Discharged 1 assumption(s).
+
+      Supporting facts:
+
+      - $x > 0$
+      </details>
+2. $x > 0 \implies x > 0$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+3. $x \ge 0$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $x \ge 0$ is satisfied by:
+
+   - $x = -1$
+   </details>
+
+# Explicit universal introduction exports a quantified fact
+
+Given:
+
+- $b \in \mathbb{R}$
+
+WTS $\forall t \in \mathbb{R}, t t \ge 0$
+
+<details>
+<summary>✅ verified by universal introduction</summary>
+
+Generalized 1 parameter(s), discharging 1 assumption(s).
+
+Supporting facts:
+
+- $b b \ge 0$
+</details>
+
+1. Given:
+
+   - $a \in \mathbb{R}$
+
+   WTS $0 = 0$
+
+   <details>
+   <summary>✅ verified</summary>
+
+   No premises seemed necessary to show this.
+   </details>
+
+   1. $a a \ge 0$
+
+      <details>
+      <summary>✅ verified</summary>
+
+      No premises seemed necessary to show this.
+      </details>
+   2. $\forall t \in \mathbb{R}, t t \ge 0$
+
+      <details>
+      <summary>✅ verified by universal introduction</summary>
+
+      Generalized 1 parameter(s), discharging 1 assumption(s).
+
+      Supporting facts:
+
+      - $a a \ge 0$
+      </details>
+2. $\forall t \in \mathbb{R}, t t \ge 0$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+3. $b b \ge 0$
+
+   <details>
+   <summary>✅ verified by universal elimination</summary>
+
+   - $t = b$
+
+   Supporting facts:
+
+   - $\forall t \in \mathbb{R}, t t \ge 0$
+   </details>
+4. $a = a$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   reference to undefined variable $a$
+   </details>
+
+# Remaining assumptions prevent universal introduction
+
+WTS $\forall t \in \mathbb{R}, t > 0$
+
+<details>
+<summary>❌ counterexample found</summary>
+
+The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
+
+- $t = 0$
+</details>
+
+1. Given:
+
+   - $a \in \mathbb{R}$
+   - $a > 0$
+
+   WTS $a > 0$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+
+   1. $\forall t \in \mathbb{R}, t > 0$
+
+      <details>
+      <summary>❌ counterexample found</summary>
+
+      The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
+
+      - $a = \frac{1}{2}$
+      - $t = 0$
+      </details>
+2. $\forall t \in \mathbb{R}, t > 0$
+
+   <details>
+   <summary>❌ counterexample found</summary>
+
+   The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
+
+   - $t = 0$
+   </details>
+
+# Local existential witnesses cannot be generalized
+
+Given:
+
+- $\exists x \in \mathbb{R}, x > 0$
+
+WTS $\forall t \in \mathbb{R}, t > 0$
+
+<details>
+<summary>❌ counterexample found</summary>
+
+The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
+
+- $t = 0$
+</details>
+
+1. WTS $a > 0$
+
+   <details>
+   <summary>✅ repeats established fact</summary>
+
+   This statement is already established in the current context.
+   </details>
+
+   1. $a > 0$
+
+      <details>
+      <summary>✅ witness introduced</summary>
+
+      From $\exists x \in \mathbb{R}, x > 0$:
+
+      - $a$ as a witness for $x$
+      </details>
+   2. $\forall t \in \mathbb{R}, t > 0$
+
+      <details>
+      <summary>❌ counterexample found</summary>
+
+      The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
+
+      - $a = \frac{1}{2}$
+      - $t = 0$
+      </details>
+2. $a = a$
+
+   <details>
+   <summary>Unsupported step</summary>
+
+   reference to undefined variable $a$
+   </details>

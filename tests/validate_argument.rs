@@ -247,3 +247,224 @@ fn validates_determinant_of_a_diagonal_sequence() {
     assert!(is_verified(&argument.root.validation));
     assert!(!argument.root.validation.environments_exhaustive);
 }
+
+fn validate_fixture(name: &str) -> linalg_sandbox::validate_argument::Argument {
+    let mut argument = Arguments::parse_str(INPUT)
+        .0
+        .into_iter()
+        .find(|argument| argument.name == name)
+        .expect("missing natural-deduction fixture");
+    argument
+        .validate(MAX_DIMENSION, &linalg_sandbox::timing::Timings::default())
+        .unwrap();
+    assert!(argument.error.is_none());
+    argument
+}
+
+fn child(
+    goal: &linalg_sandbox::validate_argument::Goal,
+    index: usize,
+) -> &linalg_sandbox::validate_argument::Goal {
+    let ArgumentItem::Goal(child) = &goal.steps[index] else {
+        panic!("expected nested goal");
+    };
+    child
+}
+
+fn sentence(
+    goal: &linalg_sandbox::validate_argument::Goal,
+    index: usize,
+) -> &linalg_sandbox::validate_argument::ArgumentStep {
+    let ArgumentItem::Sentence(step) = &goal.steps[index] else {
+        panic!("expected ordinary sentence");
+    };
+    step
+}
+
+fn deduction(
+    validation: &StepValidationData,
+) -> &linalg_sandbox::natural_deduction::NaturalDeductionProof {
+    let [StepCheck::NaturalDeduction { proof, .. }] = validation.checks.as_slice() else {
+        panic!("expected a single deduction proof, got {validation:?}");
+    };
+    assert!(validation.environments_exhaustive);
+    proof
+}
+
+fn assert_counterexample(validation: &StepValidationData) {
+    assert!(
+        validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::Counterexample { .. })),
+        "{validation:?}"
+    );
+    assert!(
+        !validation
+            .checks
+            .iter()
+            .any(|check| matches!(check, StepCheck::NaturalDeduction { .. })),
+        "{validation:?}"
+    );
+}
+
+fn assert_undefined_a(validation: &StepValidationData) {
+    assert!(
+        matches!(validation.checks.as_slice(), [StepCheck::Error { error, .. }] if error.to_string() == "reference to undefined variable $a$"),
+        "{validation:?}"
+    );
+}
+
+fn assert_descendant_witness(
+    validation: &StepValidationData,
+    inner: &linalg_sandbox::validate_argument::Goal,
+) {
+    let [
+        StepCheck::ExistentialWitness {
+            assignments,
+            supporting_facts,
+        },
+    ] = validation.checks.as_slice()
+    else {
+        panic!("expected existential evidence from descendants, got {validation:?}");
+    };
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].0.name, "x");
+    assert_eq!(assignments[0].1.as_latex().to_string(), "1");
+    assert_eq!(supporting_facts.len(), 2);
+    for i in 0..2 {
+        assert!(is_verified(&sentence(inner, i).validation));
+        assert!(supporting_facts.contains(&sentence(inner, i).sentence));
+    }
+}
+
+#[test]
+fn independent_descendants_cross_multiple_scope_boundaries() {
+    use linalg_sandbox::natural_deduction::NaturalDeductionProof;
+    let argument = validate_fixture("Independent facts cross multiple block boundaries");
+    let outer = child(&argument.root, 0);
+    let inner = child(outer, 0);
+    assert!(is_verified(&outer.validation));
+    assert!(is_verified(&inner.validation));
+    assert_descendant_witness(&argument.root.validation, inner);
+    let NaturalDeductionProof::Reuse { premise, exact } =
+        deduction(&sentence(&argument.root, 1).validation)
+    else {
+        panic!("the parent must reuse the exported descendant");
+    };
+    assert!(*exact);
+    assert_eq!(premise.expression, sentence(inner, 2).sentence);
+}
+
+#[test]
+fn failed_goals_export_successful_descendants_without_admitting_the_failed_claim() {
+    let argument = validate_fixture("Independent facts survive a failed goal");
+    let failed = child(&argument.root, 0);
+    assert_counterexample(&failed.validation);
+    assert_descendant_witness(&argument.root.validation, failed);
+    assert_counterexample(&sentence(&argument.root, 1).validation);
+}
+
+#[test]
+fn explicit_implication_introduction_exports_only_the_discharged_fact() {
+    use linalg_sandbox::natural_deduction::NaturalDeductionProof;
+    let argument = validate_fixture("Explicit implication introduction exports a discharged fact");
+    let block = child(&argument.root, 0);
+    assert!(is_verified(&sentence(block, 0).validation));
+    assert_counterexample(&block.validation);
+    let NaturalDeductionProof::ImplicationIntroduction {
+        premise,
+        discharged,
+    } = deduction(&sentence(block, 1).validation)
+    else {
+        panic!("ordinary sentence must use implication introduction");
+    };
+    assert_eq!(premise.expression, block.givens[0]);
+    assert_eq!(discharged.len(), 1);
+    for validation in [
+        &sentence(&argument.root, 1).validation,
+        &argument.root.validation,
+    ] {
+        assert!(
+            matches!(deduction(validation), NaturalDeductionProof::Reuse { premise, exact: true } if premise.expression == sentence(block, 1).sentence),
+            "expected exported fact reuse, got {:?}",
+            deduction(validation)
+        );
+    }
+    assert_counterexample(&sentence(&argument.root, 2).validation);
+}
+
+#[test]
+fn explicit_universal_introduction_exports_a_fact_available_for_instantiation() {
+    use linalg_sandbox::natural_deduction::NaturalDeductionProof;
+    let argument = validate_fixture("Explicit universal introduction exports a quantified fact");
+    let block = child(&argument.root, 0);
+    assert!(is_verified(&block.validation));
+    assert!(is_verified(&sentence(block, 0).validation));
+    let NaturalDeductionProof::UniversalIntroduction {
+        premise,
+        assignments,
+        discharged,
+    } = deduction(&sentence(block, 1).validation)
+    else {
+        panic!("ordinary sentence must use universal introduction");
+    };
+    assert_eq!(premise.expression, sentence(block, 0).sentence);
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[&linalg_sandbox::Variable::new("t")].name, "a");
+    assert_eq!(discharged.len(), 1);
+    assert!(
+        matches!(deduction(&sentence(&argument.root, 1).validation), NaturalDeductionProof::Reuse { premise, exact: true } if premise.expression == sentence(block, 1).sentence)
+    );
+    // After instantiation, generalizing b discharges the remaining parent
+    // declaration and gives the final goal a proof with fewer dependencies.
+    let NaturalDeductionProof::UniversalIntroduction {
+        premise,
+        assignments,
+        discharged,
+    } = deduction(&argument.root.validation)
+    else {
+        panic!("final goal must generalize the established parent instance");
+    };
+    assert_eq!(premise.expression, sentence(&argument.root, 2).sentence);
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[&linalg_sandbox::Variable::new("t")].name, "b");
+    assert_eq!(discharged.len(), 1);
+    let NaturalDeductionProof::UniversalElimination {
+        source,
+        assignments,
+        ..
+    } = deduction(&sentence(&argument.root, 2).validation)
+    else {
+        panic!("parent must instantiate the exported universal");
+    };
+    assert_eq!(source.expression, sentence(block, 1).sentence);
+    assert_eq!(assignments.len(), 1);
+    assert!(
+        matches!(&assignments[&linalg_sandbox::Variable::new("t")].raw, RawExpr::Variable(v) if v.name == "b")
+    );
+    assert_undefined_a(&sentence(&argument.root, 3).validation);
+}
+
+#[test]
+fn universal_introduction_cannot_discharge_a_remaining_restriction() {
+    let argument = validate_fixture("Remaining assumptions prevent universal introduction");
+    let block = child(&argument.root, 0);
+    assert!(is_verified(&block.validation));
+    assert_counterexample(&sentence(block, 0).validation);
+    assert_counterexample(&sentence(&argument.root, 1).validation);
+    assert_counterexample(&argument.root.validation);
+}
+
+#[test]
+fn witnesses_remain_local_and_are_not_arbitrary_parameters() {
+    let argument = validate_fixture("Local existential witnesses cannot be generalized");
+    let block = child(&argument.root, 0);
+    assert!(
+        matches!(sentence(block, 0).validation.checks.as_slice(), [StepCheck::ExistentialElimination { fact, assignments }] if fact == &argument.root.givens[0] && assignments.len() == 1 && assignments[0].0.name == "x" && assignments[0].1.name == "a")
+    );
+    assert!(is_verified(&block.validation));
+    assert_counterexample(&sentence(block, 1).validation);
+    assert_undefined_a(&sentence(&argument.root, 1).validation);
+    assert_counterexample(&argument.root.validation);
+}
