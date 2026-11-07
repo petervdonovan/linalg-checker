@@ -5,7 +5,7 @@ use crate::unification::Unifier;
 pub(crate) struct Match {
     pub assignments: BTreeMap<Variable, Expr<()>>,
     pub nonce_pairs: BTreeSet<(ImplicitDimension, ImplicitDimension)>,
-    pub premises: Vec<Premise>,
+    pub premises: Vec<ProofInput>,
     pub supporting_facts: Vec<Expr<()>>,
 }
 
@@ -52,6 +52,10 @@ pub(crate) fn views(context: &ProofContext) -> Vec<(Premise, Expr<()>)> {
                     let premise = Premise {
                         fact: fact.id,
                         derivation: derivation.id,
+                        assumption: match derivation.proof {
+                            NaturalDeductionProof::Assumption { assumption } => Some(assumption),
+                            _ => None,
+                        },
                         expression: fact.expression.clone(),
                         alternative,
                         conjunct,
@@ -94,6 +98,62 @@ pub(crate) fn match_assumption_requirements(
     match_views(context, binders, requirements, initial, assumptions)
 }
 
+/// Matches context views and conjunction assembly only; never invokes rule search.
+fn match_one(
+    context: &ProofContext,
+    binders: &BTreeSet<Variable>,
+    requirement: &Expr<()>,
+    state: &Match,
+    available: &[(Premise, Expr<()>)],
+) -> Vec<Match> {
+    let accessible = context.types.types.keys().cloned().collect();
+    let mut result = Vec::new();
+    for (premise, expression) in available {
+        if binders.is_empty() && requirement != expression {
+            continue;
+        }
+        if let Some(mut matched) =
+            match_expression(requirement, expression, binders, &accessible, state)
+        {
+            matched
+                .premises
+                .push(super::proof::view_input(context, premise));
+            let fact = context.facts.iter().find(|f| f.id == premise.fact).unwrap();
+            let supporting = premise
+                .alternative
+                .map(|i| &fact.alternatives[i])
+                .unwrap_or(&fact.formula)
+                .meaning();
+            if !matched.supporting_facts.contains(&supporting) {
+                matched.supporting_facts.push(supporting);
+            }
+            result.push(matched);
+        }
+    }
+    if let RawExpr::Finop(Finop::And, operands) = &requirement.raw
+        && !operands.is_empty()
+    {
+        let offset = state.premises.len();
+        let mut states = vec![state.clone()];
+        for operand in operands {
+            states = states
+                .iter()
+                .flat_map(|s| match_one(context, binders, operand, s, available))
+                .collect();
+        }
+        for mut matched in states {
+            let premises = matched.premises.split_off(offset);
+            let conclusion =
+                crate::formula::substitute_free_variables(requirement, &matched.assignments);
+            matched.premises.push(ProofInput::local(
+                conclusion,
+                NaturalDeductionProof::ConjunctionIntroduction { premises },
+            ));
+            result.push(matched);
+        }
+    }
+    result
+}
 fn match_views(
     context: &ProofContext,
     binders: &BTreeSet<Variable>,
@@ -101,32 +161,12 @@ fn match_views(
     initial: Match,
     views: Vec<(Premise, Expr<()>)>,
 ) -> Vec<Match> {
-    let accessible = context.types.types.keys().cloned().collect();
     let mut states = vec![initial];
     for requirement in requirements {
-        let mut next = Vec::new();
-        for state in &states {
-            for (premise, expression) in &views {
-                if let Some(mut matched) =
-                    match_expression(requirement, expression, binders, &accessible, state)
-                {
-                    if !matched.premises.contains(premise) {
-                        matched.premises.push(premise.clone());
-                    }
-                    let fact = context.facts.iter().find(|f| f.id == premise.fact).unwrap();
-                    let supporting = premise
-                        .alternative
-                        .map(|i| &fact.alternatives[i])
-                        .unwrap_or(&fact.formula);
-                    let supporting = supporting.meaning();
-                    if !matched.supporting_facts.contains(&supporting) {
-                        matched.supporting_facts.push(supporting);
-                    }
-                    next.push(matched);
-                }
-            }
-        }
-        states = next;
+        states = states
+            .iter()
+            .flat_map(|s| match_one(context, binders, requirement, s, &views))
+            .collect();
         if states.is_empty() {
             break;
         }

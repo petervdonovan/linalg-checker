@@ -561,3 +561,29 @@ WTS $\forall t \in \mathbb{R}, t > 0$
    1. $a > 0$
    2. $\forall t \in \mathbb{R}, t > 0$
 2. $a = a$
+
+# Explicit conjunction rules
+
+Given:
+
+- $x \in \mathbb{R}$
+- $y \in \mathbb{R}$
+- $x > 0 \land x < 2$
+- $y > 0$
+
+WTS $x < 2 \land y > 0$
+
+1. $x < 2$
+2. $x > 0 \land y > 0$
+
+# Conjunction preparation for universal elimination
+
+Given:
+
+- $\forall t \in \mathbb{R}, t > 0 \land t < 2, t = t$
+- $1 > 0 \land 3 > 0$
+- $1 < 2 \land 3 < 4$
+
+WTS $1 = 1$
+
+1. $1 = 1$

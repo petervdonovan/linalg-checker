@@ -1,14 +1,15 @@
 # One-step natural deduction
 
 `follows_from_natural_deduction(context, written, interpreter, checks)` checks a
-single rule application against the visible context. The interpreter resolves the
+single principal inference with conjunction preparation against the visible context. The interpreter resolves the
 new occurrence in its lexical scope. The returned established result contains
 both its `CheckedFormula` and derivation proposals; acceptance uses that checked
 conclusion directly. Facts accepted as verified or likely are equally available.
 
 The supported rules are existential introduction, witness opening, universal
-introduction/elimination, implication introduction, and contextual reuse. Missing
-premises are not proved recursively. Dimension evidence retains scope dependencies
+introduction/elimination, implication introduction, conjunction introduction/elimination,
+and contextual reuse. Conjunction premises may be assembled from contextual views;
+missing premises are not proved by another implication or quantifier rule. Dimension evidence retains scope dependencies
 without propagating verification statuses.
 
 ## Immutable interpretations
@@ -61,3 +62,22 @@ stable IDs. Deltas and checked formulas from another root store are rejected.
 Assumption dependencies describe scope only. Independent facts from failed goals
 may export; facts requiring local assumptions or free parameters remain local.
 Externally checked SMT facts retain the existing conservative dependency policy.
+
+## Local evidence and rendering
+
+`ProofInput` distinguishes contextual leaves from intermediate conclusions and
+local rule applications. Conjunction projections record immediate operand indices;
+nested projections form explicit elimination chains. Conjunction introduction
+preserves operand order and nesting. Neither operation admits intermediate facts.
+`ReuseKind` distinguishes literal repetitions, resolved meanings, and checked
+elaborated views rather than using a conjunction projection as generic reuse.
+
+`NaturalDeductionProof::to_tex(conclusion)` renders a math-mode proof tree, and
+`details(conclusion)` provides shared Markdown explanations plus that tree,
+omitting trees consisting only of literal or resolved contextual reuse. Neither
+operation accesses the proof store: contextual facts remain leaves even when their
+archived proofs are long. Discharged formulas are saved with the local evidence
+and assigned deterministic presentation labels. The validator supplies summaries,
+HTML wrappers, and validation-specific warnings only. A final elaborated view is
+shown explicitly, including when a witness proves an existential equivalent to a
+surface membership statement.

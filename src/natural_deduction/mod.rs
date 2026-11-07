@@ -1,5 +1,6 @@
-//! One-step natural deduction over established facts. Matching never searches
-//! recursively or calls an SMT solver. Type/dimension obligations are delegated
+//! Local natural deduction over established facts. Conjunction matching may
+//! recurse, but never chains implication/quantifier rules or calls an SMT solver.
+//! Type/dimension obligations are delegated
 //! to a deliberately restricted side-condition interface.
 use crate::{
     Expr, Finop, ImplicitDimension, Logic, RawExpr, TypeExpr, Variable,
@@ -12,6 +13,8 @@ mod context;
 pub use checked::{CheckedFormula, FormulaInterpreter, SurfaceInterpreter};
 mod matching;
 
+mod proof;
+mod render;
 mod rules;
 pub use crate::type_resolver::{QuantifierKind, QuantifierSpec, analyze_quantifier};
 pub use context::*;
@@ -21,12 +24,29 @@ use matching::{Match, match_requirements};
 pub struct Premise {
     pub fact: FactId,
     pub derivation: DerivationId,
+    /// Identity when this contextual leaf is itself an open assumption.
+    pub assumption: Option<AssumptionId>,
     /// Original source retained even after its lexical scope has closed.
     pub expression: Expr<()>,
     /// None means the original expression; Some indexes an elaborated alternative.
     pub alternative: Option<usize>,
-    /// Index in the deterministic, depth-first conjunction views (zero is whole).
+    /// Internal matching-view index. Materialized proof leaves always use zero.
     pub conjunct: usize,
+}
+/// Evidence for an input to the current inference. Context leaves are never expanded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProofInput {
+    Context(Premise),
+    Local {
+        conclusion: Expr<()>,
+        proof: Box<NaturalDeductionProof>,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReuseKind {
+    Literal,
+    Resolved,
+    Elaborated,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NaturalDeductionProof {
@@ -41,33 +61,42 @@ pub enum NaturalDeductionProof {
         cases: Vec<DerivationId>,
     },
     Reuse {
-        premise: Premise,
-        /// Whole-fact reuse with the same written expression and frozen meaning.
-        exact: bool,
+        premise: ProofInput,
+        kind: ReuseKind,
+    },
+    ConjunctionIntroduction {
+        premises: Vec<ProofInput>,
+    },
+    ConjunctionElimination {
+        premise: ProofInput,
+        /// Zero-based immediate operand index. Nested projections form a chain.
+        operand: usize,
     },
     ExistentialIntroduction {
-        premises: Vec<Premise>,
+        premises: Vec<ProofInput>,
         assignments: BTreeMap<Variable, Expr<()>>,
     },
     /// Opens a witness scope; recording the result creates its assumption.
     ExistentialElimination {
-        source: Premise,
+        source: ProofInput,
         assignments: BTreeMap<Variable, Variable>,
         introduced_types: BTreeMap<Variable, TypeExpr<()>>,
     },
     UniversalElimination {
-        source: Premise,
-        premises: Vec<Premise>,
+        source: ProofInput,
+        premises: Vec<ProofInput>,
         assignments: BTreeMap<Variable, Expr<()>>,
     },
     UniversalIntroduction {
-        premise: Premise,
+        premise: ProofInput,
         assignments: BTreeMap<Variable, Variable>,
         discharged: BTreeSet<AssumptionId>,
+        discharged_formulas: BTreeMap<AssumptionId, Expr<()>>,
     },
     ImplicationIntroduction {
-        premise: Premise,
+        premise: ProofInput,
         discharged: BTreeSet<AssumptionId>,
+        discharged_formulas: BTreeMap<AssumptionId, Expr<()>>,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,7 +176,7 @@ pub fn follows_from_natural_deduction(
                 }
                 if let Ok(checked)=interpreter.check(&scope,conclusion)
                     && let rules::RuleResult::Established(derivations)=rules::check(context,&checked.meaning(),checked.free_variables(),None,checks)
-                    && let Some(source)=derivations.into_iter().find(|d|matches!(&d.proof,NaturalDeductionProof::ExistentialElimination{source,introduced_types:verified,..} if source.derivation==source_id && *verified==introduced_types)) {
+                    && let Some(source)=derivations.into_iter().find(|d|matches!(&d.proof,NaturalDeductionProof::ExistentialElimination{source,introduced_types:verified,..} if source.leaves()[0].derivation==source_id && *verified==introduced_types)) {
                     return NaturalDeductionResult::Established{conclusion:checked,derivations:vec![source]};
                 }
             }
@@ -158,10 +187,18 @@ pub fn follows_from_natural_deduction(
 fn attach_checked(conclusion: CheckedFormula, result: rules::RuleResult) -> NaturalDeductionResult {
     let result = if let rules::RuleResult::Established(mut derivations) = result {
         for d in &mut derivations {
-            if let NaturalDeductionProof::Reuse { premise, exact } = &mut d.proof {
-                *exact = premise.alternative.is_none()
-                    && premise.conjunct == 0
-                    && premise.expression == *conclusion.written();
+            if let NaturalDeductionProof::Reuse {
+                premise: ProofInput::Context(premise),
+                kind,
+            } = &mut d.proof
+            {
+                *kind = if premise.alternative.is_some() {
+                    ReuseKind::Elaborated
+                } else if premise.expression == *conclusion.written() {
+                    ReuseKind::Literal
+                } else {
+                    ReuseKind::Resolved
+                };
             }
         }
         rules::RuleResult::Established(derivations)

@@ -1,3 +1,4 @@
+use linalg_sandbox::natural_deduction::{NaturalDeductionProof as NdProof, ReuseKind};
 use linalg_sandbox::validate_argument::{
     ArgumentItem, Arguments, StepCheck, StepValidationData, ToFromMd,
 };
@@ -165,7 +166,7 @@ fn validates_quantified_steps_and_goal_evidence() {
     };
     assert!(existential.validation.checks.iter().any(|check| matches!(
         check,
-        StepCheck::ExistentialWitness { assignments, .. }
+        StepCheck::NaturalDeduction { proof: NdProof::ExistentialIntroduction { assignments, .. }, .. }
             if assignments.iter().any(|(variable, value)|
                 variable.name == "z" && value.as_latex().to_string() == "1")
     )));
@@ -189,14 +190,13 @@ fn validates_quantified_steps_and_goal_evidence() {
         .iter()
         .find(|argument| argument.name == "Existential evidence from direct subgoals")
         .expect("missing direct-evidence argument");
-    assert!(
-        direct
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
-    );
+    assert!(direct.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialIntroduction { .. },
+            ..
+        }
+    )));
 
     let inferred_dimensions = arguments
         .0
@@ -206,7 +206,7 @@ fn validates_quantified_steps_and_goal_evidence() {
     let witness_is_b = |check: &StepCheck| {
         matches!(
             check,
-            StepCheck::ExistentialWitness { assignments, .. }
+            StepCheck::NaturalDeduction { proof: NdProof::ExistentialIntroduction { assignments, .. }, .. }
                 if assignments.iter().any(|(variable, value)|
                     variable.name == "C"
                         && matches!(&value.raw, RawExpr::Variable(value) if value.name == "B"))
@@ -320,17 +320,21 @@ fn assert_descendant_witness(
     inner: &linalg_sandbox::validate_argument::Goal,
 ) {
     let [
-        StepCheck::ExistentialWitness {
-            assignments,
-            supporting_facts,
+        StepCheck::NaturalDeduction {
+            proof: proof @ NdProof::ExistentialIntroduction { assignments, .. },
+            ..
         },
     ] = validation.checks.as_slice()
     else {
         panic!("expected existential evidence from descendants, got {validation:?}");
     };
     assert_eq!(assignments.len(), 1);
-    assert_eq!(assignments[0].0.name, "x");
-    assert_eq!(assignments[0].1.as_latex().to_string(), "1");
+    assert_eq!(assignments.keys().next().unwrap().name, "x");
+    assert_eq!(
+        assignments.values().next().unwrap().as_latex().to_string(),
+        "1"
+    );
+    let supporting_facts = proof.supporting_facts();
     assert_eq!(supporting_facts.len(), 2);
     for i in 0..2 {
         assert!(is_verified(&sentence(inner, i).validation));
@@ -347,13 +351,13 @@ fn independent_descendants_cross_multiple_scope_boundaries() {
     assert!(is_verified(&outer.validation));
     assert!(is_verified(&inner.validation));
     assert_descendant_witness(&argument.root.validation, inner);
-    let NaturalDeductionProof::Reuse { premise, exact } =
+    let NaturalDeductionProof::Reuse { premise, kind } =
         deduction(&sentence(&argument.root, 1).validation)
     else {
         panic!("the parent must reuse the exported descendant");
     };
-    assert!(*exact);
-    assert_eq!(premise.expression, sentence(inner, 2).sentence);
+    assert_eq!(*kind, ReuseKind::Literal);
+    assert_eq!(premise.leaves()[0].expression, sentence(inner, 2).sentence);
 }
 
 #[test]
@@ -375,18 +379,19 @@ fn explicit_implication_introduction_exports_only_the_discharged_fact() {
     let NaturalDeductionProof::ImplicationIntroduction {
         premise,
         discharged,
+        ..
     } = deduction(&sentence(block, 1).validation)
     else {
         panic!("ordinary sentence must use implication introduction");
     };
-    assert_eq!(premise.expression, block.givens[0]);
+    assert_eq!(premise.leaves()[0].expression, block.givens[0]);
     assert_eq!(discharged.len(), 1);
     for validation in [
         &sentence(&argument.root, 1).validation,
         &argument.root.validation,
     ] {
         assert!(
-            matches!(deduction(validation), NaturalDeductionProof::Reuse { premise, exact: true } if premise.expression == sentence(block, 1).sentence),
+            matches!(deduction(validation), NaturalDeductionProof::Reuse { premise, kind: ReuseKind::Literal } if premise.leaves()[0].expression == sentence(block, 1).sentence),
             "expected exported fact reuse, got {:?}",
             deduction(validation)
         );
@@ -405,16 +410,17 @@ fn explicit_universal_introduction_exports_a_fact_available_for_instantiation() 
         premise,
         assignments,
         discharged,
+        ..
     } = deduction(&sentence(block, 1).validation)
     else {
         panic!("ordinary sentence must use universal introduction");
     };
-    assert_eq!(premise.expression, sentence(block, 0).sentence);
+    assert_eq!(premise.leaves()[0].expression, sentence(block, 0).sentence);
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[&linalg_sandbox::Variable::new("t")].name, "a");
     assert_eq!(discharged.len(), 1);
     assert!(
-        matches!(deduction(&sentence(&argument.root, 1).validation), NaturalDeductionProof::Reuse { premise, exact: true } if premise.expression == sentence(block, 1).sentence)
+        matches!(deduction(&sentence(&argument.root, 1).validation), NaturalDeductionProof::Reuse { premise, kind: ReuseKind::Literal } if premise.leaves()[0].expression == sentence(block, 1).sentence)
     );
     // After instantiation, generalizing b discharges the remaining parent
     // declaration and gives the final goal a proof with fewer dependencies.
@@ -422,11 +428,15 @@ fn explicit_universal_introduction_exports_a_fact_available_for_instantiation() 
         premise,
         assignments,
         discharged,
+        ..
     } = deduction(&argument.root.validation)
     else {
         panic!("final goal must generalize the established parent instance");
     };
-    assert_eq!(premise.expression, sentence(&argument.root, 2).sentence);
+    assert_eq!(
+        premise.leaves()[0].expression,
+        sentence(&argument.root, 2).sentence
+    );
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[&linalg_sandbox::Variable::new("t")].name, "b");
     assert_eq!(discharged.len(), 1);
@@ -438,7 +448,7 @@ fn explicit_universal_introduction_exports_a_fact_available_for_instantiation() 
     else {
         panic!("parent must instantiate the exported universal");
     };
-    assert_eq!(source.expression, sentence(block, 1).sentence);
+    assert_eq!(source.leaves()[0].expression, sentence(block, 1).sentence);
     assert_eq!(assignments.len(), 1);
     assert!(
         matches!(&assignments[&linalg_sandbox::Variable::new("t")].raw, RawExpr::Variable(v) if v.name == "b")
@@ -461,10 +471,117 @@ fn witnesses_remain_local_and_are_not_arbitrary_parameters() {
     let argument = validate_fixture("Local existential witnesses cannot be generalized");
     let block = child(&argument.root, 0);
     assert!(
-        matches!(sentence(block, 0).validation.checks.as_slice(), [StepCheck::ExistentialElimination { fact, assignments }] if fact == &argument.root.givens[0] && assignments.len() == 1 && assignments[0].0.name == "x" && assignments[0].1.name == "a")
+        matches!(sentence(block, 0).validation.checks.as_slice(), [StepCheck::NaturalDeduction { proof: NdProof::ExistentialElimination { source, assignments, .. }, .. }] if source.leaves()[0].expression == argument.root.givens[0] && assignments.len() == 1 && assignments.keys().next().unwrap().name == "x" && assignments.values().next().unwrap().name == "a")
     );
     assert!(is_verified(&block.validation));
     assert_counterexample(&sentence(block, 1).validation);
     assert_undefined_a(&sentence(&argument.root, 1).validation);
     assert_counterexample(&argument.root.validation);
+}
+
+#[test]
+fn explicit_conjunction_rules_render_local_trees() {
+    let argument = validate_fixture("Explicit conjunction rules");
+    assert!(matches!(
+        deduction(&sentence(&argument.root, 0).validation),
+        NdProof::ConjunctionElimination { operand: 1, .. }
+    ));
+    let NdProof::ConjunctionIntroduction { premises } =
+        deduction(&sentence(&argument.root, 1).validation)
+    else {
+        panic!()
+    };
+    assert_eq!(premises.len(), 2);
+    assert!(
+        matches!(&premises[0], linalg_sandbox::natural_deduction::ProofInput::Local { proof, .. } if matches!(**proof, NdProof::ConjunctionElimination { operand: 0, .. }))
+    );
+    assert!(matches!(
+        deduction(&argument.root.validation),
+        NdProof::ConjunctionIntroduction { .. }
+    ));
+    let output = argument.to_string();
+    assert!(output.contains("✅ verified by conjunction introduction"));
+    assert!(output.contains("✅ verified by conjunction elimination"));
+    assert!(output.contains("Proof tree:"));
+    assert!(output.contains(r"\land E_{2}"));
+}
+
+#[test]
+fn universal_step_tree_contains_only_local_conjunction_preparation() {
+    use linalg_sandbox::natural_deduction::ProofInput;
+    let argument = validate_fixture("Conjunction preparation for universal elimination");
+    let proof = deduction(&sentence(&argument.root, 0).validation);
+    let NdProof::UniversalElimination {
+        premises,
+        assignments,
+        ..
+    } = proof
+    else {
+        panic!()
+    };
+    assert_eq!(
+        assignments.values().next().unwrap().as_latex().to_string(),
+        "1"
+    );
+    let [
+        ProofInput::Local {
+            proof: assembled, ..
+        },
+    ] = premises.as_slice()
+    else {
+        panic!()
+    };
+    let NdProof::ConjunctionIntroduction { premises } = &**assembled else {
+        panic!()
+    };
+    assert_eq!(premises.len(), 2);
+    assert!(premises.iter().all(|p| matches!(p, ProofInput::Local { proof, .. } if matches!(**proof, NdProof::ConjunctionElimination { .. }))));
+    let tex = proof.to_tex(&sentence(&argument.root, 0).sentence);
+    assert_eq!(tex.matches(r"\dfrac").count(), 4);
+    assert_eq!(proof.supporting_facts().len(), 3);
+    // The goal repeats the accepted sentence without expanding its earlier tree.
+    let repeat = deduction(&argument.root.validation);
+    assert!(matches!(
+        repeat,
+        NdProof::Reuse {
+            kind: ReuseKind::Literal,
+            ..
+        }
+    ));
+    assert_eq!(
+        repeat
+            .to_tex(&argument.root.conclusion)
+            .matches(r"\dfrac")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn elaborated_witness_conclusion_keeps_both_local_inference_and_surface_view() {
+    use linalg_sandbox::natural_deduction::ProofInput;
+    let argument = validate_fixture("Range is closed under linear combinations");
+    let step = sentence(&argument.root, 3);
+    let proof = deduction(&step.validation);
+    let NdProof::Reuse {
+        kind: ReuseKind::Elaborated,
+        premise: ProofInput::Local {
+            conclusion,
+            proof: inner,
+        },
+    } = proof
+    else {
+        panic!("{proof:?}")
+    };
+    assert!(matches!(**inner, NdProof::ExistentialIntroduction { .. }));
+    assert!(matches!(
+        proof.inference(),
+        NdProof::ExistentialIntroduction { .. }
+    ));
+    assert!(matches!(conclusion.raw, RawExpr::Finop(Finop::Exists, _)));
+    let tex = proof.to_tex(&step.sentence);
+    assert_eq!(tex.matches(r"\dfrac").count(), 2);
+    assert!(tex.contains(r"\exists I"));
+    assert!(tex.contains(r"\text{elaboration}"));
+    assert!(argument.to_string().contains("✅ witness found"));
 }

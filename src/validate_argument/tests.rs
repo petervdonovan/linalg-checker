@@ -1,3 +1,4 @@
+use crate::natural_deduction::{NaturalDeductionProof as NdProof, ReuseKind};
 use crate::timing::Timings;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -473,19 +474,33 @@ Given:
 WTS $\exists x > 0, x < y$"#,
     );
     witness.validate(1, &Timings::default()).unwrap();
-    let StepCheck::ExistentialWitness { assignments, .. } = witness
+    let StepCheck::NaturalDeduction {
+        proof: NdProof::ExistentialIntroduction { assignments, .. },
+        ..
+    } = witness
         .root
         .validation
         .checks
         .iter()
-        .find(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
+        .find(|check| {
+            matches!(
+                check,
+                StepCheck::NaturalDeduction {
+                    proof: NdProof::ExistentialIntroduction { .. },
+                    ..
+                }
+            )
+        })
         .expect("missing existential witness")
     else {
         unreachable!()
     };
     assert_eq!(assignments.len(), 1);
-    assert_eq!(assignments[0].0.name, "x");
-    assert_eq!(assignments[0].1.as_latex().to_string(), "1");
+    assert_eq!(assignments.keys().next().unwrap().name, "x");
+    assert_eq!(
+        assignments.values().next().unwrap().as_latex().to_string(),
+        "1"
+    );
 
     let mut incompatible = Argument::parse_str(
         r#"# Incompatible witnesses
@@ -615,7 +630,7 @@ fn existential_witness_matching_sees_through_contextual_conjunctions() {
         panic!("missing witness")
     };
     assert!(
-        matches!(&derivations[0].proof,crate::natural_deduction::NaturalDeductionProof::ExistentialIntroduction{assignments,premises} if assignments[&Variable::new("w")]==expression("a") && premises[0].expression==facts[0])
+        matches!(&derivations[0].proof,crate::natural_deduction::NaturalDeductionProof::ExistentialIntroduction{assignments,premises} if assignments[&Variable::new("w")]==expression("a") && premises[0].leaves()[0].expression==facts[0])
     );
 }
 
@@ -637,7 +652,10 @@ WTS $u = u$
     argument.validate(2, &Timings::default()).unwrap();
     assert!(matches!(
         sentence(&argument, 0).validation.checks.as_slice(),
-        [StepCheck::ExistentialElimination { .. }]
+        [StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialElimination { .. },
+            ..
+        }]
     ));
     assert!(
         argument
@@ -665,14 +683,13 @@ WTS $\exists x > 0, x < y$
 2. WTS $1 < y$"#,
     );
     direct.validate(1, &Timings::default()).unwrap();
-    assert!(
-        direct
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
-    );
+    assert!(direct.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialIntroduction { .. },
+            ..
+        }
+    )));
 
     let mut hidden = Argument::parse_str(
         r#"# Independent internal evidence is exported
@@ -685,14 +702,13 @@ WTS $\exists x > 0, x = x$
    2. $1 = 1$"#,
     );
     hidden.validate(1, &Timings::default()).unwrap();
-    assert!(
-        hidden
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
-    );
+    assert!(hidden.root.validation.checks.iter().any(|check| matches!(
+        check,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialIntroduction { .. },
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1042,7 +1058,7 @@ WTS $y = y$
     ] {
         let mut argument = Argument::parse_str(source);
         argument.validate(2, &Timings::default()).unwrap();
-        assert!(argument.root.validation.checks.iter().any(|c| matches!(c, StepCheck::NaturalDeduction { proof: crate::natural_deduction::NaturalDeductionProof::UniversalElimination { .. }, .. })), "{:?}", argument.root.validation);
+        assert!(argument.root.validation.checks.iter().any(|c| matches!(c, StepCheck::NaturalDeduction { proof: crate::natural_deduction::NaturalDeductionProof::UniversalElimination { .. }, .. })), "{}\n{:?}\n{}", argument.name, argument.root.validation, argument);
         assert!(argument.to_string().contains("universal elimination"));
     }
 }
@@ -1103,7 +1119,7 @@ WTS $\exists t \in \mathbb{R}, t = t, x > 0 \implies x > 0$
             .iter()
             .any(|c| matches!(c, StepCheck::Counterexample { .. }))
     );
-    assert!(argument.root.validation.checks.iter().any(|c| matches!(c,StepCheck::ExistentialWitness { supporting_facts, .. } if supporting_facts.contains(&sentence_child(child,0).sentence))));
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(c,StepCheck::NaturalDeduction { proof: proof @ NdProof::ExistentialIntroduction { .. }, .. } if proof.supporting_facts().contains(&sentence_child(child,0).sentence))));
 }
 
 fn sentence_child(goal: &super::Goal, index: usize) -> &super::ArgumentStep {
@@ -1127,14 +1143,13 @@ WTS $\exists x > 0, x = x$
    2. $1 = 1$"#,
     );
     argument.validate(2, &Timings::default()).unwrap();
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|c| matches!(c, StepCheck::ExistentialWitness { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialIntroduction { .. },
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1151,14 +1166,13 @@ WTS $\exists x \in \mathbb{R}^{2}, x = y$
 1. $y = y$"#,
     );
     argument.validate(3, &Timings::default()).unwrap();
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .all(|c| !matches!(c, StepCheck::ExistentialWitness { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().all(|c| !matches!(
+        c,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialIntroduction { .. },
+            ..
+        }
+    )));
     assert!(
         argument
             .root
@@ -1222,14 +1236,13 @@ Given:
 WTS $a > 0$"#,
     );
     argument.validate(2, &Timings::default()).unwrap();
-    assert!(
-        argument
-            .root
-            .validation
-            .checks
-            .iter()
-            .any(|c| matches!(c, StepCheck::ExistentialElimination { .. }))
-    );
+    assert!(argument.root.validation.checks.iter().any(|c| matches!(
+        c,
+        StepCheck::NaturalDeduction {
+            proof: NdProof::ExistentialElimination { .. },
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1436,7 +1449,7 @@ WTS $a > 0$"#,
     );
     argument.validate(2, &Timings::default()).unwrap();
     assert!(
-        matches!(argument.root.validation.checks.as_slice(),[StepCheck::ExistentialElimination{fact,..}] if fact==&argument.root.givens[0])
+        matches!(argument.root.validation.checks.as_slice(),[StepCheck::NaturalDeduction { proof: NdProof::ExistentialElimination { source, .. }, .. }] if source.leaves()[0].expression==argument.root.givens[0])
     );
 }
 
@@ -1566,7 +1579,6 @@ WTS $\forall x \in \mathbb{R}, \left(\exists y \in \mathbb{R}, x = y\right) \lan
 
 #[test]
 fn reuse_rendering_distinguishes_repetition_from_contextual_views() {
-    use crate::natural_deduction::NaturalDeductionProof;
     for (source, conclusion, exact) in [
         ("x > 0", "x > 0", true),
         (r"x > 0 \land x < 2", "x > 0", false),
@@ -1576,21 +1588,31 @@ fn reuse_rendering_distinguishes_repetition_from_contextual_views() {
         );
         let mut argument = Argument::parse_str(&input);
         argument.validate(2, &Timings::default()).unwrap();
-        let StepCheck::NaturalDeduction {
-            proof: NaturalDeductionProof::Reuse { premise, .. },
-            supporting_facts,
-        } = &argument.root.validation.checks[0]
-        else {
+        let StepCheck::NaturalDeduction { proof, .. } = &argument.root.validation.checks[0] else {
             panic!("expected structured reuse: {:?}", argument.root.validation);
         };
-        assert_eq!(premise.expression, argument.root.givens[1]);
-        assert_eq!(supporting_facts, &[argument.root.givens[1].clone()]);
+        assert_eq!(proof.leaves()[0].expression, argument.root.givens[1]);
+        assert_eq!(
+            proof.supporting_facts(),
+            vec![argument.root.givens[1].clone()]
+        );
+        assert!(if exact {
+            matches!(
+                proof,
+                NdProof::Reuse {
+                    kind: ReuseKind::Literal,
+                    ..
+                }
+            )
+        } else {
+            matches!(proof, NdProof::ConjunctionElimination { .. })
+        });
         let rendered = argument.to_string();
         if exact {
             assert!(rendered.contains("✅ repeats established fact"));
             assert!(!rendered.contains("This follows from the following facts"));
         } else {
-            assert!(rendered.contains("✅ follows from established fact"));
+            assert!(rendered.contains("✅ verified by conjunction elimination"));
             assert!(!rendered.contains("✅ repeats established fact"));
         }
     }
@@ -1611,7 +1633,7 @@ fn an_elaborated_context_view_retains_its_source_in_the_explanation() {
         panic!("expected reuse of the context view");
     };
     assert!(
-        matches!(&derivations[0].proof, NaturalDeductionProof::Reuse { premise, .. } if premise.alternative == Some(0) && premise.expression == source)
+        matches!(&derivations[0].proof, NaturalDeductionProof::Reuse { premise, .. } if premise.leaves()[0].alternative == Some(0) && premise.leaves()[0].expression == source)
     );
     let mut argument = Argument::parse_str("# Context view\n\nWTS $x > 0$");
     argument
@@ -1620,7 +1642,7 @@ fn an_elaborated_context_view_retains_its_source_in_the_explanation() {
         .checks
         .push(StepCheck::NaturalDeduction {
             proof: derivations[0].proof.clone(),
-            supporting_facts: vec![source.clone()],
+            conclusion: alternative,
         });
     let rendered = argument.to_string();
     assert!(rendered.contains("✅ follows from established fact"));

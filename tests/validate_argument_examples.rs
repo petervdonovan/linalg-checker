@@ -51,7 +51,6 @@ fn has_success_check(validation: &StepValidationData) -> bool {
             check,
             StepCheck::Unsat { .. }
                 | StepCheck::Counterexample { .. }
-                | StepCheck::ExistentialWitness { .. }
                 | StepCheck::TacticEstablished
                 | StepCheck::NaturalDeduction { .. }
         )

@@ -267,7 +267,7 @@ fn contextual_conjuncts_are_views_with_provenance() {
     test_assume(&mut c, expression(r"1 > 0 \land 1 < y"), Vec::new());
     let ds = prove(&c, &expression(r"\exists x > 0, x < y"));
     assert!(
-        matches!(&ds[0].proof,NaturalDeductionProof::ExistentialIntroduction { premises, .. } if premises.len()==2 && premises.iter().all(|p| p.conjunct > 0))
+        matches!(&ds[0].proof,NaturalDeductionProof::ExistentialIntroduction { premises, .. } if premises.len()==2 && premises.iter().all(|p| matches!(p, ProofInput::Local { proof, .. } if matches!(**proof, NaturalDeductionProof::ConjunctionElimination { .. }))))
     );
 }
 
@@ -698,4 +698,322 @@ fn provisional_witness_types_support_simultaneous_binder_renaming() {
         .open_witness(conclusion, Vec::new(), derivations.remove(0))
         .unwrap();
     assert_eq!(context.types.types[&variable("u")], TypeExpr::Nat);
+}
+
+fn conjunction(operands: Vec<Expr<()>>) -> Expr<()> {
+    Expr::new(RawExpr::Finop(Finop::And, operands))
+}
+
+#[test]
+fn conjunction_rules_preserve_nested_structure_and_source_dependencies() {
+    let mut c = typed(&["x", "y", "z"]);
+    let source = conjunction(vec![
+        expression("x>0"),
+        conjunction(vec![expression("y>0"), expression("z>0")]),
+    ]);
+    let id = test_assume(&mut c, source.clone(), Vec::new());
+    let before = c.store_counts();
+    let ds = prove(&c, &expression("z>0"));
+    let NaturalDeductionProof::ConjunctionElimination {
+        operand: 1,
+        premise: ProofInput::Local { proof, .. },
+    } = &ds[0].proof
+    else {
+        panic!("{:?}", ds[0]);
+    };
+    assert!(matches!(
+        **proof,
+        NaturalDeductionProof::ConjunctionElimination { operand: 1, .. }
+    ));
+    assert_eq!(ds[0].proof.leaves()[0].expression, source);
+    assert_eq!(ds[0].assumptions, BTreeSet::from([id]));
+    let target = conjunction(vec![
+        expression("z>0"),
+        conjunction(vec![expression("x>0"), expression("y>0")]),
+    ]);
+    let ds = prove(&c, &target);
+    let NaturalDeductionProof::ConjunctionIntroduction { premises } = &ds[0].proof else {
+        panic!()
+    };
+    assert_eq!(premises.len(), 2);
+    assert!(
+        matches!(&premises[1], ProofInput::Local { proof, .. } if matches!(**proof, NaturalDeductionProof::ConjunctionIntroduction { .. }))
+    );
+    assert_eq!(ds[0].assumptions, BTreeSet::from([id]));
+    assert_eq!(c.store_counts(), before);
+    assert!(matches!(
+        follows_from_natural_deduction(
+            &c,
+            &conjunction(vec![expression("x>0"), expression("z<0")]),
+            &mut Structural
+        ),
+        NaturalDeductionResult::NoMatch { .. }
+    ));
+}
+
+#[test]
+fn conjunction_assembly_supports_discharge_and_all_quantifier_premise_positions() {
+    let mut c = typed(&["a"]);
+    let positive = test_assume(&mut c, expression("a>0"), vec![]);
+    let upper = test_assume(&mut c, expression("a<2"), vec![]);
+    let body = conjunction(vec![expression("a>0"), expression("a<2")]);
+    let ds = prove(&c, &implication(expression("a>0"), body));
+    assert_eq!(ds[0].assumptions, BTreeSet::from([upper]));
+    assert!(
+        matches!(&ds[0].proof, NaturalDeductionProof::ImplicationIntroduction { premise: ProofInput::Local { proof, .. }, discharged, .. }
+        if discharged.contains(&positive) && matches!(**proof, NaturalDeductionProof::ConjunctionIntroduction { .. }))
+    );
+    let ds = prove(&c, &expression(r"\exists x \in \mathbb{R}, x>0 \land x<2"));
+    assert!(
+        matches!(&ds[0].proof, NaturalDeductionProof::ExistentialIntroduction { premises, assignments }
+        if assignments[&variable("x")] == expression("a") && matches!(&premises[0], ProofInput::Local { proof, .. } if matches!(**proof, NaturalDeductionProof::ConjunctionIntroduction { .. })))
+    );
+    let mut c = typed(&["a"]);
+    test_record_external(&mut c, expression("a=a"), vec![]);
+    test_record_external(&mut c, expression(r"a a\ge0"), vec![]);
+    let ds = prove(
+        &c,
+        &expression(r"\forall x \in \mathbb{R}, x=x \land x x\ge0"),
+    );
+    assert!(
+        matches!(&ds[0].proof, NaturalDeductionProof::UniversalIntroduction { premise: ProofInput::Local { proof, .. }, .. } if matches!(**proof, NaturalDeductionProof::ConjunctionIntroduction { .. }))
+    );
+    let mut c = typed(&[]);
+    test_assume(
+        &mut c,
+        expression(r"\forall t \in \mathbb{R}, t>0 \land t<2, t=t"),
+        vec![],
+    );
+    test_assume(&mut c, expression("1>0"), vec![]);
+    test_assume(&mut c, expression("1<2"), vec![]);
+    let ds = prove(&c, &expression("1=1"));
+    assert!(
+        matches!(&ds[0].proof, NaturalDeductionProof::UniversalElimination { premises, .. }
+        if matches!(&premises[0], ProofInput::Local { proof, .. } if matches!(**proof, NaturalDeductionProof::ConjunctionIntroduction { .. })))
+    );
+}
+
+#[test]
+fn conjunction_matching_shares_substitutions_without_searching_for_missing_facts() {
+    let mut c = typed(&[]);
+    test_assume(&mut c, expression("1>0"), vec![]);
+    test_assume(&mut c, expression("2<3"), vec![]);
+    assert!(matches!(
+        follows_from_natural_deduction(
+            &c,
+            &expression(r"\exists x \in \mathbb{R}, x>0 \land x<3"),
+            &mut Structural
+        ),
+        NaturalDeductionResult::NoMatch { .. }
+    ));
+    test_assume(&mut c, expression(r"\forall t \in \mathbb{R}, t>0"), vec![]);
+    // Deriving 2>0 would require an additional quantifier inference beneath ∧I.
+    assert!(matches!(
+        follows_from_natural_deduction(&c, &expression(r"2>0 \land 2<3"), &mut Structural),
+        NaturalDeductionResult::NoMatch { .. }
+    ));
+    assert!(matches!(
+        follows_from_natural_deduction(
+            &c,
+            &expression(r"\exists x \in \mathbb{R}, x=7"),
+            &mut Structural
+        ),
+        NaturalDeductionResult::NoMatch { .. }
+    ));
+}
+
+#[test]
+fn conjunction_alternatives_preserve_independent_discharge_and_export_choices() {
+    let mut c = typed(&["x"]);
+    let a = test_assume(&mut c, expression("x>0"), vec![]);
+    let b = test_assume(&mut c, expression("x<2"), vec![]);
+    let ds = prove(&c, &expression(r"x>0 \land x<2"));
+    assert_eq!(ds[0].assumptions, BTreeSet::from([a, b]));
+    // An independent existing whole conjunction must remain available too.
+    let mut independent = typed(&["x"]);
+    test_record_external(&mut independent, expression(r"x>0 \land x<2"), vec![]);
+    let x = test_assume(&mut independent, expression("x>0"), vec![]);
+    let ds = prove(&independent, &expression(r"x>0 \implies x>0 \land x<2"));
+    assert!(ds.iter().any(|d| !d.assumptions.contains(&x)));
+}
+
+#[test]
+fn local_rendering_distinguishes_reuse_kinds_and_never_expands_context_proofs() {
+    let mut c = typed(&["x"]);
+    let written = expression("x+0>0");
+    let meaning = expression("x>0");
+    let checked = CheckedFormula::from_interpreted(&c, &written, meaning.clone()).unwrap();
+    c.assume(checked, vec![]).unwrap();
+    assert!(
+        !prove(&c, &meaning)[0]
+            .proof
+            .details(&meaning)
+            .contains("Proof tree:")
+    );
+    assert!(matches!(
+        prove(&c, &meaning)[0].proof,
+        NaturalDeductionProof::Reuse {
+            kind: ReuseKind::Resolved,
+            ..
+        }
+    ));
+    let mut c = typed(&["x"]);
+    test_assume(&mut c, expression("0<x"), vec![meaning.clone()]);
+    assert!(
+        prove(&c, &meaning)[0]
+            .proof
+            .details(&meaning)
+            .contains("Proof tree:")
+    );
+    assert!(matches!(
+        prove(&c, &meaning)[0].proof,
+        NaturalDeductionProof::Reuse {
+            kind: ReuseKind::Elaborated,
+            ..
+        }
+    ));
+    let mut c = typed(&["x"]);
+    test_assume(&mut c, meaning.clone(), vec![]);
+    let conclusion = implication(meaning.clone(), meaning.clone());
+    let NaturalDeductionResult::Established {
+        conclusion: checked,
+        derivations,
+    } = follows_from_natural_deduction(&c, &conclusion, &mut Structural)
+    else {
+        panic!()
+    };
+    assert!(
+        derivations[0]
+            .proof
+            .to_tex(&conclusion)
+            .contains("Rightarrow I")
+    );
+    c.record(checked, vec![], derivations).unwrap();
+    let proof = &prove(&c, &conclusion)[0].proof;
+    assert!(matches!(
+        proof,
+        NaturalDeductionProof::Reuse {
+            kind: ReuseKind::Literal,
+            ..
+        }
+    ));
+    let tree = proof.to_tex(&conclusion);
+    assert!(!proof.details(&conclusion).contains("Proof tree:"));
+    assert_eq!(tree.matches("\\dfrac").count(), 1);
+    assert!(!tree.contains("Rightarrow I"));
+}
+
+#[test]
+fn local_rule_tex_and_details_snapshots() {
+    let mut cases = Vec::new();
+    let mut c = typed(&[]);
+    test_assume(&mut c, expression("1>0"), vec![]);
+    test_assume(&mut c, expression("1<2"), vec![]);
+    for tex in [
+        "1>0",
+        r"1>0 \land 1<2",
+        r"\exists x>0, x<2",
+        r"1>0 \implies 1>0",
+    ] {
+        let conclusion = expression(tex);
+        let proof = &prove(&c, &conclusion)[0].proof;
+        cases.push(proof.details(&conclusion));
+    }
+    let mut c = typed(&[]);
+    test_assume(&mut c, expression(r"1>0 \land 1<2"), vec![]);
+    cases.push(
+        prove(&c, &expression("1<2"))[0]
+            .proof
+            .details(&expression("1<2")),
+    );
+    let mut c = typed(&["a"]);
+    test_assume(&mut c, expression(r"a \in \mathbb{R}"), vec![]);
+    test_record_external(&mut c, expression("a=a"), vec![]);
+    let conclusion = expression(r"\forall t \in \mathbb{R}, t=t");
+    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    let mut c = typed(&[]);
+    test_assume(&mut c, expression(r"\forall t \in \mathbb{R}, t=t"), vec![]);
+    cases.push(
+        prove(&c, &expression("1=1"))[0]
+            .proof
+            .details(&expression("1=1")),
+    );
+    let mut c = typed(&[]);
+    test_assume(&mut c, expression(r"\exists t \in \mathbb{R}, t>0"), vec![]);
+    cases.push(
+        prove(&c, &expression("a>0"))[0]
+            .proof
+            .details(&expression("a>0")),
+    );
+    let mut c = typed(&["x"]);
+    let written = expression("x+0>0");
+    let conclusion = expression("x>0");
+    let checked = CheckedFormula::from_interpreted(&c, &written, conclusion.clone()).unwrap();
+    c.assume(checked, vec![]).unwrap();
+    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    let mut c = typed(&["x"]);
+    test_assume(&mut c, expression("0<x"), vec![conclusion.clone()]);
+    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    expect_test::expect_file!["snapshots/local_proofs.md"].assert_eq(&cases.join("\n\n---\n\n"));
+}
+
+#[test]
+fn discharge_labels_distinguish_identical_assumption_occurrences() {
+    let mut c = typed(&["x"]);
+    test_assume(&mut c, expression("x>0"), vec![]);
+    c.enter_scope();
+    test_assume(&mut c, expression("x>0"), vec![]);
+    let conclusion = implication(expression("x>0"), expression("x>0"));
+    let proof = &prove(&c, &conclusion)[0].proof;
+    let NaturalDeductionProof::ImplicationIntroduction {
+        discharged,
+        discharged_formulas,
+        ..
+    } = proof
+    else {
+        panic!()
+    };
+    assert_eq!(discharged.len(), 2);
+    assert_eq!(discharged_formulas.len(), 2);
+    let tex = proof.to_tex(&conclusion);
+    assert!(tex.contains(r"\left[x > 0\right]^{a_{1}}"));
+    assert!(!tex.contains(r"\left[x > 0\right]^{a_{1},a_{2}}"));
+    assert!(tex.contains(r"\,[a_{1},a_{2}]"));
+}
+
+#[test]
+fn local_evidence_references_cannot_publish_hidden_context_facts() {
+    let mut parent = typed(&["x"]);
+    let mut child = parent.clone();
+    child.enter_scope();
+    test_record_external(&mut child, expression("x>0"), vec![]);
+    test_record_external(&mut child, expression("x<2"), vec![]);
+    let target = expression(r"x>0 \land x<2");
+    let derivations = prove(&child, &target);
+    let checked = parent.check(&target).unwrap();
+    let before = parent.store_counts();
+    assert!(matches!(
+        parent.record(checked, vec![], derivations),
+        Err(ContextError::InaccessibleProof(_))
+    ));
+    assert_eq!(parent.store_counts(), before);
+    assert!(parent.facts().is_empty());
+}
+
+#[test]
+fn assumption_external_and_scoped_goal_render_as_established_boundaries() {
+    let mut c = typed(&[]);
+    let conclusion = expression("1>0");
+    let assumption = test_assume(&mut c, conclusion.clone(), vec![]);
+    for proof in [
+        NaturalDeductionProof::Assumption { assumption },
+        NaturalDeductionProof::External,
+        NaturalDeductionProof::ScopedGoal {
+            givens: vec![conclusion.clone()],
+            conclusion: conclusion.clone(),
+            cases: vec![c.facts()[0].derivations[0].id],
+        },
+    ] {
+        assert_eq!(proof.to_tex(&conclusion), "1 > 0");
+    }
 }

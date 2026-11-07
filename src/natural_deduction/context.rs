@@ -390,7 +390,7 @@ impl ProofContext {
         source: Derivation,
     ) -> Result<FactId, ContextError> {
         if !matches!(
-            source.proof,
+            source.proof.inference(),
             NaturalDeductionProof::ExistentialElimination { .. }
         ) {
             return Err(ContextError::InvalidWitness);
@@ -408,19 +408,7 @@ impl ProofContext {
         {
             return Err(ContextError::InaccessibleProof(d.id));
         }
-        let premises = match &d.proof {
-            NaturalDeductionProof::Reuse { premise, .. }
-            | NaturalDeductionProof::UniversalIntroduction { premise, .. }
-            | NaturalDeductionProof::ImplicationIntroduction { premise, .. } => vec![premise],
-            NaturalDeductionProof::ExistentialIntroduction { premises, .. } => {
-                premises.iter().collect()
-            }
-            NaturalDeductionProof::ExistentialElimination { source, .. } => vec![source],
-            NaturalDeductionProof::UniversalElimination {
-                source, premises, ..
-            } => std::iter::once(source).chain(premises).collect(),
-            _ => Vec::new(),
-        };
+        let premises = d.proof.leaves();
         for p in premises {
             if !self.store.borrow().facts.contains_key(&p.fact) {
                 return Err(ContextError::UnknownFact(p.fact));
@@ -434,41 +422,25 @@ impl ProofContext {
             }
         }
         let mut refs = d.side_condition_premises.clone();
-        match &d.proof {
-            NaturalDeductionProof::Reuse { premise, .. }
-            | NaturalDeductionProof::UniversalIntroduction { premise, .. }
-            | NaturalDeductionProof::ImplicationIntroduction { premise, .. } => {
-                refs.push(premise.derivation)
-            }
-            NaturalDeductionProof::ExistentialIntroduction { premises, .. } => {
-                refs.extend(premises.iter().map(|p| p.derivation))
-            }
-            NaturalDeductionProof::ExistentialElimination { source, .. } => {
-                refs.push(source.derivation)
-            }
-            NaturalDeductionProof::UniversalElimination {
-                source, premises, ..
-            } => {
-                refs.push(source.derivation);
-                refs.extend(premises.iter().map(|p| p.derivation));
-            }
-            NaturalDeductionProof::ScopedGoal { cases, .. } => {
-                for id in cases {
-                    if self.derivation(*id).is_none() {
-                        return Err(ContextError::UnknownProof(*id));
-                    }
-                }
-            }
-            _ => {}
-        }
+        refs.extend(d.proof.references());
+        let visible_refs = d
+            .proof
+            .leaves()
+            .iter()
+            .map(|p| p.derivation)
+            .chain(d.side_condition_premises.iter().copied())
+            .collect::<BTreeSet<_>>();
         for id in refs {
             if self.derivation(id).is_none() {
                 return Err(ContextError::UnknownProof(id));
             }
-            if !self
-                .facts
-                .iter()
-                .any(|f| f.derivations.iter().any(|d| d.id == id))
+            // Scoped-goal cases are archival references across a closed scope;
+            // contextual inputs and side-condition evidence must still be visible.
+            if visible_refs.contains(&id)
+                && !self
+                    .facts
+                    .iter()
+                    .any(|f| f.derivations.iter().any(|d| d.id == id))
             {
                 return Err(ContextError::InaccessibleProof(id));
             }
@@ -489,7 +461,7 @@ impl ProofContext {
             .find_map(|d| {
                 if let NaturalDeductionProof::ExistentialElimination {
                     introduced_types, ..
-                } = &d.proof
+                } = d.proof.inference()
                 {
                     Some(introduced_types.clone())
                 } else {
@@ -497,7 +469,7 @@ impl ProofContext {
                 }
             })
             .unwrap_or_default();
-        if derivations.iter().any(|d|matches!(&d.proof,NaturalDeductionProof::ExistentialElimination{introduced_types,..} if introduced_types.is_empty())) {return Err(ContextError::InvalidWitness);}
+        if derivations.iter().any(|d|matches!(d.proof.inference(),NaturalDeductionProof::ExistentialElimination{introduced_types,..} if introduced_types.is_empty())) {return Err(ContextError::InvalidWitness);}
         if !opening.is_empty()
             && (derivations.len() != 1 || opening.keys().any(|v| self.parameters.contains_key(v)))
         {
@@ -505,7 +477,7 @@ impl ProofContext {
         }
         if !opening.is_empty() {
             let NaturalDeductionProof::ExistentialElimination { assignments, .. } =
-                &derivations[0].proof
+                derivations[0].proof.inference()
             else {
                 return Err(ContextError::InvalidWitness);
             };
@@ -529,7 +501,7 @@ impl ProofContext {
                 source,
                 assignments,
                 introduced_types,
-            } = &d.proof
+            } = d.proof.inference()
             {
                 let assumption = AssumptionId(fresh());
                 let mut variables = BTreeSet::new();
@@ -570,7 +542,7 @@ impl ProofContext {
                     scope,
                     assumption,
                     variables,
-                    source: source.derivation,
+                    source: source.leaves()[0].derivation,
                 });
                 d.assumptions.insert(assumption);
             }

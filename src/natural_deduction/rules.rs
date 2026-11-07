@@ -6,13 +6,9 @@ pub(super) enum RuleResult {
 use super::matching::{match_expression, views};
 use super::*;
 
-fn derived(
-    context: &ProofContext,
-    proof: NaturalDeductionProof,
-    premises: &[Premise],
-) -> Derivation {
+fn derived(context: &ProofContext, proof: NaturalDeductionProof) -> Derivation {
     let mut result = Derivation::new(proof);
-    for premise in premises {
+    for premise in result.proof.leaves() {
         let d = context
             .derivation(premise.derivation)
             .expect("context premise has a derivation");
@@ -95,6 +91,14 @@ fn discharge_sets(context: &ProofContext, expression: &Expr<()>) -> Vec<BTreeSet
         vec![BTreeSet::new(), discharged]
     }
 }
+fn discharge_formulas(
+    context: &ProofContext,
+    ids: &BTreeSet<AssumptionId>,
+) -> BTreeMap<AssumptionId, Expr<()>> {
+    ids.iter()
+        .map(|id| (*id, context.assumptions[id].expression.clone()))
+        .collect()
+}
 fn substituted(expression: &Expr<()>, assignments: &BTreeMap<Variable, Expr<()>>) -> Expr<()> {
     crate::formula::substitute_free_variables(expression, assignments)
 }
@@ -111,17 +115,20 @@ pub(super) fn check(
     let available = views(context);
     let accessible = context.types.types.keys().cloned().collect::<BTreeSet<_>>();
 
-    for (premise, expression) in &available {
-        if expression == conclusion {
-            results.push(derived(
-                context,
-                NaturalDeductionProof::Reuse {
-                    premise: premise.clone(),
-                    exact: false,
-                },
-                std::slice::from_ref(premise),
-            ));
-        }
+    for state in match_requirements(context, &BTreeSet::new(), &[conclusion], Match::default()) {
+        let input = state
+            .premises
+            .into_iter()
+            .next()
+            .expect("matched conclusion");
+        let proof = match input {
+            ProofInput::Context(premise) => NaturalDeductionProof::Reuse {
+                premise: ProofInput::Context(premise),
+                kind: ReuseKind::Resolved,
+            },
+            ProofInput::Local { proof, .. } => *proof,
+        };
+        results.push(derived(context, proof));
     }
 
     if let Some(spec) = conclusion_spec {
@@ -141,7 +148,6 @@ pub(super) fn check(
                                     premises: state.premises.clone(),
                                     assignments: state.assignments,
                                 },
-                                &state.premises,
                             ),
                             checks,
                         ));
@@ -149,16 +155,11 @@ pub(super) fn check(
                 }
             }
             QuantifierKind::Forall => {
-                for (premise, expression) in &available {
-                    let Some(state) = match_expression(
-                        &spec.body,
-                        expression,
-                        &spec.introduced,
-                        &accessible,
-                        &Match::default(),
-                    ) else {
-                        continue;
-                    };
+                for mut state in
+                    match_requirements(context, &spec.introduced, &[&spec.body], Match::default())
+                {
+                    let premise = state.premises.remove(0);
+                    let expression = premise.conclusion().clone();
                     // Restrictions may provide parameters absent from the body.
                     // Only assumptions are eligible to be discharged here.
                     // Unused restrictions can be discharged vacuously. Matching
@@ -177,7 +178,7 @@ pub(super) fn check(
                         restriction_matches = next;
                     }
                     for mut matched in restriction_matches {
-                        matched.supporting_facts.push((*expression).clone());
+                        matched.supporting_facts.push(expression.clone());
                         if !side_conditions(checks, spec, &matched, &mut reasons) {
                             continue;
                         }
@@ -220,8 +221,8 @@ pub(super) fn check(
                                     premise: premise.clone(),
                                     assignments: assignments.clone(),
                                     discharged: discharged.clone(),
+                                    discharged_formulas: discharge_formulas(context, &discharged),
                                 },
-                                std::slice::from_ref(premise),
                             );
                             let mut d = with_side_conditions(context, d, checks);
                             d.assumptions.retain(|a| !discharged.contains(a));
@@ -275,18 +276,15 @@ pub(super) fn check(
                     if !side_conditions(checks, &spec, &state, &mut reasons) {
                         continue;
                     }
-                    let mut premises = state.premises.clone();
-                    premises.push(source.clone());
                     results.push(with_side_conditions(
                         context,
                         derived(
                             context,
                             NaturalDeductionProof::UniversalElimination {
-                                source: source.clone(),
+                                source: super::proof::view_input(context, source),
                                 premises: state.premises,
                                 assignments: state.assignments,
                             },
-                            &premises,
                         ),
                         checks,
                     ));
@@ -350,11 +348,10 @@ pub(super) fn check(
                     results.push(derived(
                         context,
                         NaturalDeductionProof::ExistentialElimination {
-                            source: source.clone(),
+                            source: super::proof::view_input(context, source),
                             assignments,
                             introduced_types,
                         },
-                        std::slice::from_ref(source),
                     ));
                 }
             }
@@ -366,18 +363,21 @@ pub(super) fn check(
         && let RawExpr::LogicChain(chain) = &conclusion.raw
         && let [(Logic::Imp, consequent)] = chain.assertions.as_slice()
     {
-        for (premise, expression) in &available {
-            if expression != consequent {
-                continue;
-            }
+        for state in match_requirements(context, &BTreeSet::new(), &[consequent], Match::default())
+        {
+            let premise = state
+                .premises
+                .into_iter()
+                .next()
+                .expect("matched consequent");
             for discharged in discharge_sets(context, &chain.start) {
                 let mut d = derived(
                     context,
                     NaturalDeductionProof::ImplicationIntroduction {
                         premise: premise.clone(),
                         discharged: discharged.clone(),
+                        discharged_formulas: discharge_formulas(context, &discharged),
                     },
-                    std::slice::from_ref(premise),
                 );
                 d.assumptions.retain(|a| !discharged.contains(a));
                 results.push(d);

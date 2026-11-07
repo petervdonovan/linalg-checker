@@ -523,51 +523,6 @@ fn validate_induction(
     Ok(result)
 }
 
-fn proof_check(proof: &nd::NaturalDeductionProof) -> StepCheck {
-    use nd::NaturalDeductionProof::*;
-    let premises: Vec<&nd::Premise> = match proof {
-        Reuse { premise, .. }
-        | UniversalIntroduction { premise, .. }
-        | ImplicationIntroduction { premise, .. } => vec![premise],
-        ExistentialIntroduction { premises, .. } => premises.iter().collect(),
-        ExistentialElimination { source, .. } => vec![source],
-        UniversalElimination {
-            source, premises, ..
-        } => std::iter::once(source).chain(premises).collect(),
-        _ => Vec::new(),
-    };
-    let mut supporting_facts = Vec::new();
-    for p in premises {
-        if !supporting_facts.contains(&p.expression) {
-            supporting_facts.push(p.expression.clone());
-        }
-    }
-    match proof {
-        ExistentialIntroduction { assignments, .. } => StepCheck::ExistentialWitness {
-            assignments: assignments
-                .iter()
-                .map(|(v, e)| (v.clone(), e.clone()))
-                .collect(),
-            supporting_facts,
-        },
-        ExistentialElimination {
-            source,
-            assignments,
-            ..
-        } => StepCheck::ExistentialElimination {
-            fact: source.expression.clone(),
-            assignments: assignments
-                .iter()
-                .map(|(a, b)| (a.clone(), b.clone()))
-                .collect(),
-        },
-        _ => StepCheck::NaturalDeduction {
-            proof: proof.clone(),
-            supporting_facts,
-        },
-    }
-}
-
 fn check_definedness(
     prepared: &PreparedExpression,
     context: &nd::ProofContext,
@@ -663,7 +618,7 @@ pub(super) fn validate_claim(
     if let Some(ds) = &proof
         && let nd::NaturalDeductionProof::ExistentialElimination {
             introduced_types, ..
-        } = &ds[0].proof
+        } = ds[0].proof.inference()
     {
         let scope = checking_scope.to_mut();
         // Adopt the provisional binding scopes that were checked by the proposal.
@@ -705,14 +660,26 @@ pub(super) fn validate_claim(
                 timings: &run.timings,
                 evidence: Vec::new(),
             };
-            if let nd::NaturalDeductionResult::Established { derivations, .. } =
-                nd::follows_from_natural_deduction(
-                    context,
-                    &view.meaning(),
-                    &nd::SurfaceInterpreter,
-                    &mut checks,
-                )
-            {
+            if let nd::NaturalDeductionResult::Established {
+                mut derivations,
+                conclusion: view_conclusion,
+            } = nd::follows_from_natural_deduction(
+                context,
+                &view.meaning(),
+                &nd::SurfaceInterpreter,
+                &mut checks,
+            ) {
+                if view_conclusion.meaning() != meaning {
+                    for d in &mut derivations {
+                        d.proof = nd::NaturalDeductionProof::Reuse {
+                            premise: nd::ProofInput::Local {
+                                conclusion: view_conclusion.meaning(),
+                                proof: Box::new(d.proof.clone()),
+                            },
+                            kind: nd::ReuseKind::Elaborated,
+                        };
+                    }
+                }
                 proof = Some(derivations);
                 break;
             }
@@ -720,11 +687,11 @@ pub(super) fn validate_claim(
     }
     if let Some(mut derivations) = proof {
         let opening = matches!(
-            derivations[0].proof,
+            derivations[0].proof.inference(),
             nd::NaturalDeductionProof::ExistentialElimination { .. }
         );
         if let nd::NaturalDeductionProof::UniversalElimination { assignments, .. } =
-            &derivations[0].proof
+            derivations[0].proof.inference()
         {
             for term in assignments.values() {
                 let reflexivity = Expr::new(RawExpr::CmpChain(CmpChain {
@@ -750,7 +717,10 @@ pub(super) fn validate_claim(
             return Ok(None);
         }
         validation.environments_exhaustive = true;
-        validation.checks.push(proof_check(&derivations[0].proof));
+        validation.checks.push(StepCheck::NaturalDeduction {
+            proof: derivations[0].proof.clone(),
+            conclusion: checked.meaning(),
+        });
         if let Ok(spec) = QuantifierSpec::from_analyzed(checked.analyzed())
             && !spec.questionable.is_empty()
         {

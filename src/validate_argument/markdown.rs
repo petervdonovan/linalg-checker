@@ -451,116 +451,35 @@ fn validation_details(
                 .to_owned(),
         );
     }
-    if let Some(StepCheck::ExistentialWitness {
-        assignments,
-        supporting_facts,
-    }) = validation
-        .checks
-        .iter()
-        .find(|check| matches!(check, StepCheck::ExistentialWitness { .. }))
-    {
-        let assignments = assignments
-            .iter()
-            .map(|(variable, expression)| {
-                format!("- ${} = {}$", variable.z3_name(), expression.as_latex())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let warning = validation
-            .checks
-            .iter()
-            .find_map(|check| match check {
-                StepCheck::QuestionableQuantifier { premises } => Some(format!(
-                    "\n\nThe following premises do not reference a variable introduced by their quantifier:\n\n{}",
-                    expression_bullets(premises)
-                )),
-                _ => None,
-            })
-            .unwrap_or_default();
-        return Some(format!(
-            "<details>\n<summary>✅ witness found</summary>\n\nWitness:\n\n{assignments}\n\nMatched facts:\n\n{}{warning}\n</details>",
-            expression_bullets(supporting_facts)
-        ));
-    }
-    if let Some(StepCheck::ExistentialElimination { fact, assignments }) = validation
-        .checks
-        .iter()
-        .find(|check| matches!(check, StepCheck::ExistentialElimination { .. }))
-    {
-        let assignments = assignments
-            .iter()
-            .map(|(binder, witness)| {
-                format!(
-                    "- ${}$ as a witness for ${}$",
-                    witness.z3_name(),
-                    binder.z3_name()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(format!(
-            "<details>\n<summary>✅ witness introduced</summary>\n\nFrom ${}$:\n\n{assignments}\n</details>",
-            fact.as_latex()
-        ));
-    }
-    if let Some(StepCheck::NaturalDeduction {
-        proof,
-        supporting_facts,
-    }) = validation
+    if let Some(StepCheck::NaturalDeduction { proof, conclusion }) = validation
         .checks
         .iter()
         .find(|check| matches!(check, StepCheck::NaturalDeduction { .. }))
     {
-        use crate::natural_deduction::NaturalDeductionProof;
-        if let NaturalDeductionProof::Reuse { exact, .. } = proof {
-            let (summary, explanation) = if *exact {
-                (
-                    "✅ repeats established fact",
-                    "This statement is already established in the current context.".to_owned(),
-                )
-            } else {
-                (
-                    "✅ follows from established fact",
-                    format!(
-                        "Established fact:\n\n{}",
-                        expression_bullets(supporting_facts)
-                    ),
-                )
-            };
-            return Some(format!(
-                "<details>\n<summary>{summary}</summary>\n\n{explanation}\n</details>"
-            ));
-        }
-        let (rule, detail) = match proof {
-            NaturalDeductionProof::UniversalElimination { assignments, .. } => (
-                "universal elimination",
-                assignments
-                    .iter()
-                    .map(|(v, e)| format!("- ${} = {}$", v.z3_name(), e.as_latex()))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            NaturalDeductionProof::UniversalIntroduction {
-                assignments,
-                discharged,
+        use crate::natural_deduction::{NaturalDeductionProof as Proof, ReuseKind};
+        let summary = match proof.inference() {
+            Proof::Reuse {
+                kind: ReuseKind::Literal,
                 ..
-            } => (
-                "universal introduction",
-                format!(
-                    "Generalized {} parameter(s), discharging {} assumption(s).",
-                    assignments.len(),
-                    discharged.len()
-                ),
-            ),
-            NaturalDeductionProof::ImplicationIntroduction { discharged, .. } => (
-                "implication introduction",
-                format!("Discharged {} assumption(s).", discharged.len()),
-            ),
-            _ => ("contextual fact", String::new()),
+            } => "✅ repeats established fact",
+            Proof::Reuse { .. } => "✅ follows from established fact",
+            Proof::ExistentialIntroduction { .. } => "✅ witness found",
+            Proof::ExistentialElimination { .. } => "✅ witness introduced",
+            Proof::ConjunctionIntroduction { .. } => "✅ verified by conjunction introduction",
+            Proof::ConjunctionElimination { .. } => "✅ verified by conjunction elimination",
+            Proof::UniversalElimination { .. } => "✅ verified by universal elimination",
+            Proof::UniversalIntroduction { .. } => "✅ verified by universal introduction",
+            Proof::ImplicationIntroduction { .. } => "✅ verified by implication introduction",
+            _ => "✅ verified",
         };
+        let warning = validation.checks.iter().find_map(|check| match check {
+            StepCheck::QuestionableQuantifier { premises } => Some(format!(
+                "\n\nThe following premises do not reference a variable introduced by their quantifier:\n\n{}", expression_bullets(premises))),
+            _ => None,
+        }).unwrap_or_default();
         return Some(format!(
-            "<details>\n<summary>✅ verified by {rule}</summary>\n\n{detail}\n\nSupporting facts:\n\n{}\n</details>",
-            expression_bullets(supporting_facts)
+            "<details>\n<summary>{summary}</summary>\n\n{}{warning}\n</details>",
+            proof.details(conclusion)
         ));
     }
     if let Some(StepCheck::QuestionableQuantifier { premises }) = validation

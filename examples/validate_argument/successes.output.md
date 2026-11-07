@@ -239,6 +239,12 @@ This statement is already established in the current context.
    From $\vec{x} \in \operatorname{Range}(A)$:
 
    - $\vec{u}$ as a witness for $w_{preimage of A}$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{\vec{x} \in \operatorname{Range}(A)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, \vec{x} = A w_{\text{preimage of A}}}\;(\text{elaboration})}{\vec{x} = A \vec{u}}\;(\text{witness opening})
+   $$
    </details>
 2. $\vec{y} = A \vec{v}$
 
@@ -248,6 +254,12 @@ This statement is already established in the current context.
    From $\vec{y} \in \operatorname{Range}(A)$:
 
    - $\vec{v}$ as a witness for $w_{preimage of A}$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{\vec{y} \in \operatorname{Range}(A)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, \vec{y} = A w_{\text{preimage of A}}}\;(\text{elaboration})}{\vec{y} = A \vec{v}}\;(\text{witness opening})
+   $$
    </details>
 3. $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 
@@ -273,6 +285,12 @@ This statement is already established in the current context.
    Matched facts:
 
    - $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, a \vec{x} + b \vec{y} = A w_{\text{preimage of A}}}\;(\exists I)}{a \vec{x} + b \vec{y} \in \operatorname{Range}(A)}\;(\text{elaboration})
+   $$
    </details>
 
 # Powers of two by explicit induction obligations
@@ -360,6 +378,12 @@ Matched facts:
 
 - $1 > 0$
 - $1 < y$
+
+Proof tree:
+
+$$
+\dfrac{1 > 0 \qquad 1 < y}{\exists x > 0, x < y}\;(\exists I)
+$$
 </details>
 
 1. $1 > 0$

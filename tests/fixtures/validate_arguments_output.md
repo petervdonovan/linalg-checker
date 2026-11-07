@@ -368,6 +368,12 @@ WTS $0 = 0$
 Supporting facts:
 
 - $\forall y \in \mathbb{R}, y = y$
+
+Proof tree:
+
+$$
+\dfrac{\forall y \in \mathbb{R}, y = y}{0 = 0}\;(\forall E)
+$$
 </details>
 
 1. Given:
@@ -610,6 +616,12 @@ This statement is already established in the current context.
 
    - $1 > 0$
    - $1 < y$
+
+   Proof tree:
+
+   $$
+   \dfrac{1 > 0 \qquad 1 < y}{\exists z > 0, z < y}\;(\exists I)
+   $$
    </details>
 2. $\forall x \in \mathbb{R}, x x \ge 0$
 
@@ -639,6 +651,12 @@ Matched facts:
 
 - $1 > 0$
 - $1 < y$
+
+Proof tree:
+
+$$
+\dfrac{1 > 0 \qquad 1 < y}{\exists x > 0, x < y}\;(\exists I)
+$$
 </details>
 
 1. WTS $1 > 0$
@@ -675,6 +693,12 @@ Witness:
 Matched facts:
 
 - $B A = I$
+
+Proof tree:
+
+$$
+\dfrac{B A = I}{\exists C, C A = I}\;(\exists I)
+$$
 </details>
 
 1. $B A = I$
@@ -700,6 +724,12 @@ Matched facts:
    Matched facts:
 
    - $B A = I$
+
+   Proof tree:
+
+   $$
+   \dfrac{B A = I}{\exists C, C A = I}\;(\exists I)
+   $$
    </details>
 
 # Determinant of a diagonal matrix
@@ -1049,6 +1079,12 @@ This statement is already established in the current context.
    From $\vec{x} \in \operatorname{Range}(A)$:
 
    - $\vec{u}$ as a witness for $w_{preimage of A}$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{\vec{x} \in \operatorname{Range}(A)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, \vec{x} = A w_{\text{preimage of A}}}\;(\text{elaboration})}{\vec{x} = A \vec{u}}\;(\text{witness opening})
+   $$
    </details>
 2. $\vec{y} = A \vec{v}$
 
@@ -1058,6 +1094,12 @@ This statement is already established in the current context.
    From $\vec{y} \in \operatorname{Range}(A)$:
 
    - $\vec{v}$ as a witness for $w_{preimage of A}$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{\vec{y} \in \operatorname{Range}(A)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, \vec{y} = A w_{\text{preimage of A}}}\;(\text{elaboration})}{\vec{y} = A \vec{v}}\;(\text{witness opening})
+   $$
    </details>
 3. $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
 
@@ -1083,6 +1125,12 @@ This statement is already established in the current context.
    Matched facts:
 
    - $a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{a \vec{x} + b \vec{y} = A \left(a \vec{u} + b \vec{v}\right)}{\exists w_{\text{preimage of A}} \in \mathbb{R}^{2}, a \vec{x} + b \vec{y} = A w_{\text{preimage of A}}}\;(\exists I)}{a \vec{x} + b \vec{y} \in \operatorname{Range}(A)}\;(\text{elaboration})
+   $$
    </details>
 
 # Sequence entries form a finite set
@@ -1137,11 +1185,19 @@ Given:
 WTS $c > 0$
 
 <details>
-<summary>✅ follows from established fact</summary>
+<summary>✅ verified by conjunction elimination</summary>
 
-Established fact:
+Selected conjunct 1.
+
+Supporting facts:
 
 - $c > 0 \land \left(\exists a, a > 0\right)$
+
+Proof tree:
+
+$$
+\dfrac{c > 0 \land \left(\exists a, a > 0\right)}{c > 0}\;(\land E_{1})
+$$
 </details>
 
 # Negative universal skolemization
@@ -1180,6 +1236,12 @@ Matched facts:
 
 - $1 > 0$
 - $1 = 1$
+
+Proof tree:
+
+$$
+\dfrac{1 > 0 \qquad 1 = 1}{\exists x > 0, x = x}\;(\exists I)
+$$
 </details>
 
 1. WTS $0 = 0$
@@ -1242,6 +1304,12 @@ Matched facts:
 
 - $1 > 0$
 - $1 = 1$
+
+Proof tree:
+
+$$
+\dfrac{1 > 0 \qquad 1 = 1}{\exists x > 0, x = x}\;(\exists I)
+$$
 </details>
 
 1. WTS $0 = 1$
@@ -1322,9 +1390,19 @@ This statement is already established in the current context.
 
       Discharged 1 assumption(s).
 
+      Discharged assumptions:
+
+      - $a_{1}$: $x > 0$
+
       Supporting facts:
 
       - $x > 0$
+
+      Proof tree:
+
+      $$
+      \dfrac{\left[x > 0\right]^{a_{1}}}{x > 0 \implies x > 0}\;(\Rightarrow I\,[a_{1}])
+      $$
       </details>
 2. $x > 0 \implies x > 0$
 
@@ -1356,9 +1434,21 @@ WTS $\forall t \in \mathbb{R}, t t \ge 0$
 
 Generalized 1 parameter(s), discharging 1 assumption(s).
 
+- $b$ generalized as $t$
+
+Discharged assumptions:
+
+- $a_{1}$: $b \in \mathbb{R}$
+
 Supporting facts:
 
 - $b b \ge 0$
+
+Proof tree:
+
+$$
+\dfrac{b b \ge 0}{\forall t \in \mathbb{R}, t t \ge 0}\;(\forall I\,[a_{1}])
+$$
 </details>
 
 1. Given:
@@ -1387,9 +1477,21 @@ Supporting facts:
 
       Generalized 1 parameter(s), discharging 1 assumption(s).
 
+      - $a$ generalized as $t$
+
+      Discharged assumptions:
+
+      - $a_{1}$: $a \in \mathbb{R}$
+
       Supporting facts:
 
       - $a a \ge 0$
+
+      Proof tree:
+
+      $$
+      \dfrac{a a \ge 0}{\forall t \in \mathbb{R}, t t \ge 0}\;(\forall I\,[a_{1}])
+      $$
       </details>
 2. $\forall t \in \mathbb{R}, t t \ge 0$
 
@@ -1408,6 +1510,12 @@ Supporting facts:
    Supporting facts:
 
    - $\forall t \in \mathbb{R}, t t \ge 0$
+
+   Proof tree:
+
+   $$
+   \dfrac{\forall t \in \mathbb{R}, t t \ge 0}{b b \ge 0}\;(\forall E)
+   $$
    </details>
 4. $a = a$
 
@@ -1494,6 +1602,12 @@ The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
       From $\exists x \in \mathbb{R}, x > 0$:
 
       - $a$ as a witness for $x$
+
+      Proof tree:
+
+      $$
+      \dfrac{\exists x \in \mathbb{R}, x > 0}{a > 0}\;(\text{witness opening})
+      $$
       </details>
    2. $\forall t \in \mathbb{R}, t > 0$
 
@@ -1511,4 +1625,104 @@ The negation of $\forall t \in \mathbb{R}, t > 0$ is satisfied by:
    <summary>Unsupported step</summary>
 
    reference to undefined variable $a$
+   </details>
+
+# Explicit conjunction rules
+
+Given:
+
+- $x \in \mathbb{R}$
+- $y \in \mathbb{R}$
+- $x > 0 \land x < 2$
+- $y > 0$
+
+WTS $x < 2 \land y > 0$
+
+<details>
+<summary>✅ verified by conjunction introduction</summary>
+
+Combined the established conjuncts.
+
+Supporting facts:
+
+- $x > 0 \land x < 2$
+- $y > 0$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{x > 0 \land x < 2}{x < 2}\;(\land E_{2}) \qquad y > 0}{x < 2 \land y > 0}\;(\land I)
+$$
+</details>
+
+1. $x < 2$
+
+   <details>
+   <summary>✅ verified by conjunction elimination</summary>
+
+   Selected conjunct 2.
+
+   Supporting facts:
+
+   - $x > 0 \land x < 2$
+
+   Proof tree:
+
+   $$
+   \dfrac{x > 0 \land x < 2}{x < 2}\;(\land E_{2})
+   $$
+   </details>
+2. $x > 0 \land y > 0$
+
+   <details>
+   <summary>✅ verified by conjunction introduction</summary>
+
+   Combined the established conjuncts.
+
+   Supporting facts:
+
+   - $x > 0 \land x < 2$
+   - $y > 0$
+
+   Proof tree:
+
+   $$
+   \dfrac{\dfrac{x > 0 \land x < 2}{x > 0}\;(\land E_{1}) \qquad y > 0}{x > 0 \land y > 0}\;(\land I)
+   $$
+   </details>
+
+# Conjunction preparation for universal elimination
+
+Given:
+
+- $\forall t \in \mathbb{R}, t > 0 \land t < 2, t = t$
+- $1 > 0 \land 3 > 0$
+- $1 < 2 \land 3 < 4$
+
+WTS $1 = 1$
+
+<details>
+<summary>✅ repeats established fact</summary>
+
+This statement is already established in the current context.
+</details>
+
+1. $1 = 1$
+
+   <details>
+   <summary>✅ verified by universal elimination</summary>
+
+   - $t = 1$
+
+   Supporting facts:
+
+   - $\forall t \in \mathbb{R}, t > 0 \land t < 2, t = t$
+   - $1 > 0 \land 3 > 0$
+   - $1 < 2 \land 3 < 4$
+
+   Proof tree:
+
+   $$
+   \dfrac{\forall t \in \mathbb{R}, t > 0 \land t < 2, t = t \qquad \dfrac{\dfrac{1 > 0 \land 3 > 0}{1 > 0}\;(\land E_{1}) \qquad \dfrac{1 < 2 \land 3 < 4}{1 < 2}\;(\land E_{1})}{1 > 0 \land 1 < 2}\;(\land I)}{1 = 1}\;(\forall E)
+   $$
    </details>

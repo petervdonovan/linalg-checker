@@ -75,7 +75,7 @@ impl From<ModelFindingError> for ArgumentValidationError {
 pub enum StepCheck {
     NaturalDeduction {
         proof: crate::natural_deduction::NaturalDeductionProof,
-        supporting_facts: Vec<Expr<()>>,
+        conclusion: Expr<()>,
     },
     Unsat {
         environment: Rc<Environment>,
@@ -114,14 +114,6 @@ pub enum StepCheck {
     },
     QuestionableQuantifier {
         premises: Vec<Expr<()>>,
-    },
-    ExistentialWitness {
-        assignments: Vec<(Variable, Expr<()>)>,
-        supporting_facts: Vec<Expr<()>>,
-    },
-    ExistentialElimination {
-        fact: Expr<()>,
-        assignments: Vec<(Variable, Variable)>,
     },
     InvalidExistentialElimination {
         message: String,
