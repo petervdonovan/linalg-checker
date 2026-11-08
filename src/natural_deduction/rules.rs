@@ -6,20 +6,7 @@ pub(super) enum RuleResult {
 use super::matching::{match_expression, views};
 use super::*;
 
-fn derived(context: &ProofContext, proof: NaturalDeductionProof) -> Derivation {
-    let mut result = Derivation::new(proof);
-    for premise in result.proof.leaves() {
-        let d = context
-            .derivation(premise.derivation)
-            .expect("context premise has a derivation");
-        result.assumptions.extend(&d.assumptions);
-        result
-            .required_variables
-            .extend(d.required_variables.iter().cloned());
-        result.required_scopes.extend(&d.required_scopes);
-    }
-    result
-}
+use super::proof::derived;
 fn with_side_conditions(
     context: &ProofContext,
     mut derivation: Derivation,

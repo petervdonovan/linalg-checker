@@ -81,3 +81,35 @@ and assigned deterministic presentation labels. The validator supplies summaries
 HTML wrappers, and validation-specific warnings only. A final elaborated view is
 shown explicitly, including when a witness proves an existential equivalent to a
 surface membership statement.
+
+## Standalone SMT proof search
+
+`smt_backend::find_proof(context, conclusion, interpreter, limits)` searches for
+n-ary conjunction introductions over whole visible contextual facts. It returns
+one checked conclusion and a `Derivation` for the caller to record explicitly.
+Assumptions and accepted external facts (including likely facts) are ordinary
+leaves. The backend does not project conjuncts, consult elaborated alternatives,
+expand archived proofs, or change ordinary argument validation.
+
+`SearchLimits` supplies a bound on distinct reachable non-leaf proof values, a
+premise-list capacity, and an optional timeout. Active slots form a distinct
+prefix in canonical breadth-first first-encounter order, with the root in slot
+zero. Repeated subproofs share a slot; references may point in either index
+direction, and unreachable active slots are forbidden. Guarded child-reference
+and discovery predicates implement `../../docs/symmetry-breaking.md`, using
+O(a n²) constraints for n slots and premise capacity a. No node IDs are added.
+Contextual reuse needs zero slots, even at zero premise capacity. Empty
+introductions are not supported, and conjunction order/nesting are preserved.
+
+The query uses `smt_dt::ProofDatatype` fragments for bounded structure and local
+rule constraints. Models are evaluated and checked against the query before
+being converted directly into existing local proof evidence. Selected leaf
+references supply dependencies through the same constructor as ordinary rule
+checking, followed by existing scope and witness-discharge bookkeeping. Failure
+within the bounds, timeout, unknown, unsupported syntax, invalid analysis, and
+inconsistent models have distinct errors. No proof is silently admitted.
+
+See `snapshots/smt_backend.md` for found proofs and bounded failures, and
+`../smt_dt/snapshots/proof_tree.smt2` for an actual datatype-only query. The generic
+`smt_dt::selector_child` helper describes guarded immediate selector edges;
+semantic proof-premise edges additionally traverse the bounded premise list.

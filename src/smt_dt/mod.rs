@@ -25,7 +25,11 @@
 //! // solver.to_smt2() includes the referenced datatype declarations.
 //! ```
 
+mod proof;
 mod schema;
+pub use proof::{ProofDatatype, ProofNode, ProofRule, selector_child};
+#[cfg(test)]
+mod proof_tests;
 #[cfg(test)]
 mod tests;
 
@@ -45,6 +49,7 @@ pub enum Error {
     Unsupported(&'static str),
     Malformed(&'static str),
     WrongSort,
+    UnregisteredDatatype,
     UnevaluatedTerm,
     UnknownAtom { kind: &'static str, id: u64 },
     NumericOverflow,
@@ -54,6 +59,7 @@ impl fmt::Display for Error {
         match self {
             Self::Unsupported(kind) => write!(f, "unsupported core expression: {kind}"),
             Self::Malformed(reason) => write!(f, "malformed datatype expression: {reason}"),
+            Self::UnregisteredDatatype => f.write_str("parent datatype is not registered"),
             Self::WrongSort => f.write_str("term has a different datatype sort"),
             Self::UnevaluatedTerm => f.write_str("expected an evaluated constructor term"),
             Self::UnknownAtom { kind, id } => write!(f, "unknown {kind} ID {id} in this codec"),
@@ -116,6 +122,36 @@ impl ExprDatatype {
     }
     pub fn sort(&self) -> &DatatypeSort {
         &self.schema.expr
+    }
+    /// All datatype definitions belonging to this codec, for selector inspection.
+    pub fn datatypes(&self) -> [&DatatypeSort; 11] {
+        let s = &self.schema;
+        [
+            &s.natural,
+            &s.positive,
+            &s.monop.sort,
+            &s.binop.sort,
+            &s.finop.sort,
+            &s.quantifier.sort,
+            &s.comparison.sort,
+            &s.seqop.sort,
+            &s.expr,
+            &s.ty,
+            &s.list,
+        ]
+    }
+    /// Construct an operator application containing symbolic expression terms.
+    pub fn finite(&self, op: Finop, arguments: &[Datatype]) -> Result<Datatype, Error> {
+        if arguments
+            .iter()
+            .any(|a| a.get_sort() != self.schema.expr.sort)
+        {
+            return Err(Error::WrongSort);
+        }
+        Ok(self.node(
+            "Finite",
+            &[self.schema.finop.encode(op)?, self.list(arguments.to_vec())],
+        ))
     }
     pub fn constant(&self, name: impl Into<Symbol>) -> Datatype {
         Datatype::new_const(name, &self.schema.expr.sort)

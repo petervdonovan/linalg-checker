@@ -157,3 +157,18 @@ pub(crate) fn view_input(context: &ProofContext, view: &Premise) -> ProofInput {
     }
     input
 }
+
+pub(super) fn derived(context: &ProofContext, proof: NaturalDeductionProof) -> Derivation {
+    let mut result = Derivation::new(proof);
+    for premise in result.proof.leaves() {
+        let d = context
+            .derivation(premise.derivation)
+            .expect("context premise has a derivation");
+        result.assumptions.extend(&d.assumptions);
+        result
+            .required_variables
+            .extend(d.required_variables.iter().cloned());
+        result.required_scopes.extend(&d.required_scopes);
+    }
+    result
+}

@@ -16,6 +16,7 @@ mod matching;
 mod proof;
 mod render;
 mod rules;
+pub mod smt_backend;
 pub use crate::type_resolver::{QuantifierKind, QuantifierSpec, analyze_quantifier};
 pub use context::*;
 use matching::{Match, match_requirements};
