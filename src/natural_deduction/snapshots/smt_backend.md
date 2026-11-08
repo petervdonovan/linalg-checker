@@ -562,3 +562,183 @@ Proof tree:
 $$
 \dfrac{p \qquad p}{p \land p}\;(\land I)
 $$
+
+# First disjunct
+
+Context:
+
+- $p$
+
+Goal: $p \lor q \lor r$
+
+Limits: 1 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p$.
+
+Established disjunct 1.
+
+Supporting facts:
+
+- $p$
+
+Proof tree:
+
+$$
+\dfrac{p}{p \lor q \lor r}\;(\lor I_{1})
+$$
+
+# Middle disjunct
+
+Context:
+
+- $q$
+
+Goal: $p \lor q \lor r$
+
+Limits: 1 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $q$.
+
+Established disjunct 2.
+
+Supporting facts:
+
+- $q$
+
+Proof tree:
+
+$$
+\dfrac{q}{p \lor q \lor r}\;(\lor I_{2})
+$$
+
+# Last disjunct
+
+Context:
+
+- $r$
+
+Goal: $p \lor q \lor r$
+
+Limits: 1 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $r$.
+
+Established disjunct 3.
+
+Supporting facts:
+
+- $r$
+
+Proof tree:
+
+$$
+\dfrac{r}{p \lor q \lor r}\;(\lor I_{3})
+$$
+
+# Nested disjunction introduction
+
+Context:
+
+- $q$
+
+Goal: $p \lor q \lor r$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $q$.
+
+Established disjunct 2.
+
+Supporting facts:
+
+- $q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{q}{q \lor r}\;(\lor I_{1})}{p \lor q \lor r}\;(\lor I_{2})
+$$
+
+# Disjunction under implication introduction
+
+Context:
+
+(empty)
+
+Goal: $p \implies p \lor q$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}}}{p \lor q}\;(\lor I_{1})}{p \implies p \lor q}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Closed implication as a disjunct
+
+Context:
+
+(empty)
+
+Goal: $\left(p \implies p\right) \lor q$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Established disjunct 1.
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}}}{p \implies p}\;(\Rightarrow I\,[a_{1}])}{\left(p \implies p\right) \lor q}\;(\lor I_{1})
+$$
+
+# Disjunction has no established operand
+
+Context:
+
+(empty)
+
+Goal: $p \lor q$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, unbounded root dependencies.
+
+no proof within encoding and budget (2 rule slots, 1 premises, finop arity 3, root dependencies unbounded)
+
+# Disjunction does not eliminate
+
+Context:
+
+- $p \lor q$
+
+Goal: $p$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, unbounded root dependencies.
+
+no proof within encoding and budget (2 rule slots, 1 premises, finop arity 3, root dependencies unbounded)

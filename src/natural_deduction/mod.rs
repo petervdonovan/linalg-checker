@@ -73,6 +73,11 @@ pub enum NaturalDeductionProof {
         /// Zero-based immediate operand index. Nested projections form a chain.
         operand: usize,
     },
+    DisjunctionIntroduction {
+        premise: ProofInput,
+        /// Zero-based first matching immediate disjunct, retained as evidence.
+        operand: usize,
+    },
     ExistentialIntroduction {
         premises: Vec<ProofInput>,
         assignments: BTreeMap<Variable, Expr<()>>,

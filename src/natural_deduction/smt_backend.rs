@@ -1,4 +1,5 @@
-//! Standalone bounded conjunction introduction/elimination and implication introduction with exact
+//! Standalone bounded conjunction introduction/elimination, disjunction introduction,
+//! and implication introduction with exact
 //! assumption dependencies. The budget counts distinct
 //! reachable non-leaf proof values, numbered in canonical BFS order. Context facts
 //! stay leaves, and finding a proof never commits it to the context.
@@ -7,10 +8,7 @@ use crate::smt_dt::{
     self, AssumptionRef, ExprDatatype, ProofDatatype, ProofNode, ProofRule, at_most,
 };
 use crate::timing::Timings;
-use std::{
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{cell::Cell, fmt};
 use z3::{
     Params, SatResult, Solver,
     ast::{Ast, Bool, Datatype},
@@ -132,9 +130,17 @@ impl<'a> Query<'a> {
         limits: SearchLimits,
     ) -> Result<Self, SearchError> {
         // Codecs have independent intern tables, so each search needs its own
-        // namespace in the shared thread-local Z3 context. IDs are not rendered.
-        static NEXT_QUERY: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_QUERY.fetch_add(1, Ordering::Relaxed);
+        // namespace in the shared thread-local Z3 context. A per-thread counter
+        // also keeps test-thread scheduling from changing solver symbol names.
+        thread_local! { static NEXT_QUERY: Cell<u64> = const { Cell::new(0) }; }
+        let id = NEXT_QUERY.with(|next| {
+            let id = next.get();
+            next.set(
+                id.checked_add(1)
+                    .expect("query namespace counter exhausted"),
+            );
+            id
+        });
         let namespace = format!("nd_search_{id}");
         Self::build(context, conclusion, interpreter, limits, &namespace)
     }
@@ -325,13 +331,17 @@ impl<'a> Query<'a> {
                         .push(and_case.implies(self.dependencies[i][a].eq(Bool::or(&child_bits))));
                 }
                 if premises.len() == 1 {
-                    let elimination_case = Bool::and(&[
+                    let copy_case = Bool::and(&[
                         shape.clone(),
-                        self.proofs
-                            .and_elimination(&self.expressions, &premises[0], slot)?,
+                        Bool::or(&[
+                            self.proofs
+                                .and_elimination(&self.expressions, &premises[0], slot)?,
+                            self.proofs
+                                .or_introduction(&self.expressions, &premises[0], slot)?,
+                        ]),
                     ]);
                     for a in 0..self.assumption_formulas.len() {
-                        constraints.push(elimination_case.implies(
+                        constraints.push(copy_case.implies(
                             self.dependencies[i][a].eq(self.dependency(&premises[0], a)?),
                         ));
                     }
@@ -576,6 +586,30 @@ impl<'a, 'c> Decoder<'a, 'c> {
                                 )
                             })?;
                         NaturalDeductionProof::ConjunctionElimination {
+                            premise: inputs.remove(0),
+                            operand,
+                        }
+                    }
+                    ProofRule::OrIntroduction => {
+                        if inputs.len() != 1 {
+                            return Err(SearchError::InvalidModel(
+                                "disjunction introduction requires one premise".into(),
+                            ));
+                        }
+                        let RawExpr::Finop(Finop::Or, operands) = &meaning.raw else {
+                            return Err(SearchError::InvalidModel(
+                                "disjunction conclusion expected".into(),
+                            ));
+                        };
+                        let operand = operands
+                            .iter()
+                            .position(|p| p == inputs[0].conclusion())
+                            .ok_or_else(|| {
+                                SearchError::InvalidModel(
+                                    "premise is not an immediate disjunct".into(),
+                                )
+                            })?;
+                        NaturalDeductionProof::DisjunctionIntroduction {
                             premise: inputs.remove(0),
                             operand,
                         }

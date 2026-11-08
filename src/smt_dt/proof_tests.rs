@@ -656,3 +656,82 @@ fn single_elimination_rule_selects_any_immediate_conjunct_and_nothing_else() {
     solver.assert(p.conclusion(&root).unwrap().eq(&values[2]));
     assert_eq!(solver.check(), SatResult::Unsat);
 }
+
+#[test]
+fn single_disjunction_rule_uses_any_immediate_operand_with_one_proof_premise() {
+    let mut e = ExprDatatype::with_max_finop_arity("disjoin_expr", 5);
+    let p = ProofDatatype::new("disjoin", &e);
+    let values = ["p", "q", "r", "s", "t"].map(|name| e.encode(&atom(name)).unwrap());
+    let conclusion = e.finite(Finop::Or, &values).unwrap();
+    for (index, value) in values.iter().enumerate() {
+        let premise = p.established(value, index as u64, &e).unwrap();
+        let root = p.constant("or_parent");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(p.or_introduction(&e, &premise, &root).unwrap());
+        solver.assert(p.conclusion(&root).unwrap().eq(&conclusion));
+        solver.assert(
+            p.bounded_structure(
+                &root,
+                std::slice::from_ref(&root),
+                std::slice::from_ref(&premise),
+                1,
+            )
+            .unwrap(),
+        );
+        assert_eq!(solver.check(), SatResult::Sat);
+        let ProofNode::Inference { rule, premises, .. } = p
+            .inspect(&solver.get_model().unwrap().eval(&root, true).unwrap(), &e)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(rule, ProofRule::OrIntroduction);
+        assert_eq!(p.read_premises(&premises, 1).unwrap(), vec![premise]);
+    }
+    let premise = p.established(&values[0], 0, &e).unwrap();
+    for (formula, valid) in [
+        (e.finite(Finop::Or, &[]).unwrap(), false),
+        (e.finite(Finop::Or, &values[..1]).unwrap(), true),
+        (
+            e.finite(Finop::Or, &[values[0].clone(), values[0].clone()])
+                .unwrap(),
+            true,
+        ),
+        (e.finite(Finop::Or, &values[1..]).unwrap(), false),
+        (e.finite(Finop::And, &values).unwrap(), false),
+        (e.finite(Finop::Plus, &values).unwrap(), false),
+        (values[0].clone(), false),
+        (
+            e.finite(
+                Finop::Or,
+                &[
+                    e.finite(Finop::Or, &values[..2]).unwrap(),
+                    values[2].clone(),
+                ],
+            )
+            .unwrap(),
+            false,
+        ),
+    ] {
+        let root = p.constant("or_checked");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(p.or_introduction(&e, &premise, &root).unwrap());
+        solver.assert(p.conclusion(&root).unwrap().eq(formula));
+        assert_eq!(
+            solver.check(),
+            if valid {
+                SatResult::Sat
+            } else {
+                SatResult::Unsat
+            }
+        );
+    }
+    let solver = Solver::new_for_logic("QF_DT").unwrap();
+    let root = p.constant("or_unused");
+    solver.assert(p.or_introduction(&e, &p.unused(), &root).unwrap());
+    assert_eq!(solver.check(), SatResult::Unsat);
+    assert!(matches!(
+        p.or_introduction(&e, &premise, &values[0]),
+        Err(Error::WrongSort)
+    ));
+}

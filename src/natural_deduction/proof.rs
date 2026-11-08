@@ -35,6 +35,7 @@ impl NaturalDeductionProof {
         match self {
             Self::Reuse { premise, .. }
             | Self::ConjunctionElimination { premise, .. }
+            | Self::DisjunctionIntroduction { premise, .. }
             | Self::UniversalIntroduction { premise, .. }
             | Self::ImplicationIntroduction { premise, .. } => vec![premise],
             Self::ConjunctionIntroduction { premises }

@@ -39,6 +39,7 @@ pub fn selector_child(
 pub enum ProofRule {
     AndIntroduction,
     AndElimination,
+    OrIntroduction,
     ImplicationIntroduction,
 }
 
@@ -177,6 +178,7 @@ impl ProofDatatype {
             DatatypeBuilder::new(rule_name)
                 .variant(&format!("{namespace}.AndIntroduction"), vec![])
                 .variant(&format!("{namespace}.AndElimination"), vec![])
+                .variant(&format!("{namespace}.OrIntroduction"), vec![])
                 .variant(&format!("{namespace}.ImplicationIntroduction"), vec![]),
             DatatypeBuilder::new(assumption_name)
                 .variant(
@@ -294,6 +296,7 @@ impl ProofDatatype {
         let rule = match rule {
             ProofRule::AndIntroduction => app(&self.rule, "AndIntroduction", &[]),
             ProofRule::AndElimination => app(&self.rule, "AndElimination", &[]),
+            ProofRule::OrIntroduction => app(&self.rule, "OrIntroduction", &[]),
             ProofRule::ImplicationIntroduction => app(&self.rule, "ImplicationIntroduction", &[]),
         };
         Ok(app(
@@ -348,6 +351,7 @@ impl ProofDatatype {
                 let rule = match tag(&field(value, 1)?, &self.rule)?.as_str() {
                     "AndIntroduction" => ProofRule::AndIntroduction,
                     "AndElimination" => ProofRule::AndElimination,
+                    "OrIntroduction" => ProofRule::OrIntroduction,
                     "ImplicationIntroduction" => ProofRule::ImplicationIntroduction,
                     _ => return Err(Error::Malformed("unknown proof rule")),
                 };
@@ -420,7 +424,7 @@ impl ProofDatatype {
         parent: &Datatype,
     ) -> Result<Bool, Error> {
         let conclusion = self.conclusion(parent)?;
-        let choices = expressions.conjunct_choices(&self.conclusion(premise)?)?;
+        let choices = expressions.finop_choices(&self.conclusion(premise)?, Finop::And)?;
         let member = Bool::or(
             &choices
                 .into_iter()
@@ -433,6 +437,32 @@ impl ProofDatatype {
             parent.eq(self.inference(
                 &conclusion,
                 ProofRule::AndElimination,
+                std::slice::from_ref(premise),
+            )?),
+        ]))
+    }
+    /// One n-ary disjunction-introduction rule, establishing any immediate disjunct.
+    pub fn or_introduction(
+        &self,
+        expressions: &ExprDatatype,
+        premise: &Datatype,
+        parent: &Datatype,
+    ) -> Result<Bool, Error> {
+        let conclusion = self.conclusion(parent)?;
+        let premise_conclusion = self.conclusion(premise)?;
+        let choices = expressions.finop_choices(&conclusion, Finop::Or)?;
+        let member = Bool::or(
+            &choices
+                .into_iter()
+                .map(|(present, value)| Bool::and(&[present, value.eq(&premise_conclusion)]))
+                .collect::<Vec<_>>(),
+        );
+        Ok(Bool::and(&[
+            self.is_unused(premise)?.not(),
+            member,
+            parent.eq(self.inference(
+                &conclusion,
+                ProofRule::OrIntroduction,
                 std::slice::from_ref(premise),
             )?),
         ]))
@@ -631,6 +661,7 @@ impl ProofDatatype {
                 let mut applications = vec![self.and_introduction(expressions, &premises, slot)?];
                 if premises.len() == 1 {
                     applications.push(self.and_elimination(expressions, &premises[0], slot)?);
+                    applications.push(self.or_introduction(expressions, &premises[0], slot)?);
                     applications.push(self.implication_introduction(
                         expressions,
                         &premises[0],

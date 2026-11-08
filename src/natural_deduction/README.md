@@ -85,7 +85,8 @@ surface membership statement.
 ## Standalone SMT proof search
 
 `smt_backend::find_proof(context, conclusion, interpreter, limits, timings)` searches
-for conjunction introduction/elimination and implication introduction over visible
+for conjunction introduction/elimination, disjunction introduction, and implication
+introduction over visible
 contextual sources and temporary assumptions. It returns one checked conclusion and a `Derivation` for
 the caller to record explicitly. Every visible nondominated contextual derivation
 has its own source identity; equal formulas do not erase assumption identities or
@@ -111,7 +112,8 @@ introductions are not supported, and conjunction order/nesting are preserved.
 
 Each slot and the root have exact Boolean dependency vectors over ambient and
 temporary assumption identities. Conjunction introduction unions premise sets;
-conjunction elimination copies its whole premise dependency set unchanged;
+conjunction elimination and disjunction introduction copy their whole premise
+dependency sets unchanged;
 implication introduction removes the used assumptions whose encoded formula
 matches its whole antecedent. Discharge is local to the resulting node, and
 vacuous discharge is permitted. Conjunction antecedents require explicit elimination
@@ -130,6 +132,20 @@ consumes one proof premise even when the conjunction contains many operands. A
 single elimination rule selects any immediate operand; nested projection needs
 multiple steps. Empty conjunctions have no eliminations. Decoding retains the
 first matching operand index as evidence, without separate left/right rules.
+
+Disjunction introduction is also unary. Its conclusion must be an Or whose
+immediate operand equals the premise conclusion. Other disjuncts need no proofs,
+but the complete conclusion must be well-typed. Empty disjunctions have no
+introduction applications; singleton and duplicate-operand disjunctions are kept
+structurally. The first matching index is retained for explanations, without
+separate left/right rules or positional choices in the SMT datatype. Nested
+disjunctions require separate introductions. There is no disjunction elimination.
+
+The bounded, constructor-guarded `ExprDatatype::finop_choices` traversal is shared
+by conjunction elimination and disjunction introduction. Proofs decode to
+`NaturalDeductionProof::DisjunctionIntroduction` and render with display fractions
+and indexed `\lor I` labels. Source identity, scope, discharge, and root-bound
+handling are unchanged.
 
 Search uses `ExprDatatype::with_max_finop_arity`, whose capacity-indexed cons-list
 sorts structurally bound every `Finite` application (Plus, Times, And, Or) at any

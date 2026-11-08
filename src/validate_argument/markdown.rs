@@ -467,6 +467,7 @@ fn validation_details(
             Proof::ExistentialElimination { .. } => "✅ witness introduced",
             Proof::ConjunctionIntroduction { .. } => "✅ verified by conjunction introduction",
             Proof::ConjunctionElimination { .. } => "✅ verified by conjunction elimination",
+            Proof::DisjunctionIntroduction { .. } => "✅ verified by disjunction introduction",
             Proof::UniversalElimination { .. } => "✅ verified by universal elimination",
             Proof::UniversalIntroduction { .. } => "✅ verified by universal introduction",
             Proof::ImplicationIntroduction { .. } => "✅ verified by implication introduction",

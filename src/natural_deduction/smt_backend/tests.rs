@@ -4,6 +4,9 @@ use crate::{Cmp, CmpChain, Monop};
 fn atom(name: &str) -> Expr<()> {
     Expr::new(RawExpr::Variable(Variable::new(name)))
 }
+fn or(xs: Vec<Expr<()>>) -> Expr<()> {
+    Expr::new(RawExpr::Finop(Finop::Or, xs))
+}
 fn and(xs: Vec<Expr<()>>) -> Expr<()> {
     Expr::new(RawExpr::Finop(Finop::And, xs))
 }
@@ -93,6 +96,14 @@ fn replay(
                 panic!()
             };
             assert_eq!(values[*operand], *conclusion);
+            set
+        }
+        NaturalDeductionProof::DisjunctionIntroduction { premise, operand } => {
+            let (formula, set) = replay_input(c, premise);
+            let RawExpr::Finop(Finop::Or, values) = &conclusion.raw else {
+                panic!()
+            };
+            assert_eq!(values[*operand], formula);
             set
         }
         NaturalDeductionProof::ImplicationIntroduction {
@@ -443,6 +454,10 @@ enum ReferenceProof {
         source: usize,
     },
     And(Vec<ReferenceProof>),
+    Or {
+        conclusion: Expr<()>,
+        premise: Box<ReferenceProof>,
+    },
     Elim {
         premise: Box<ReferenceProof>,
         operand: usize,
@@ -521,6 +536,25 @@ fn reference_proofs(
         result.extend(products.into_iter().map(ReferenceProof::And));
     }
     if capacity > 0
+        && let RawExpr::Finop(Finop::Or, operands) = &goal.raw
+    {
+        for (index, operand) in operands.iter().enumerate() {
+            // The wire proof stores the premise and complete conclusion, not a
+            // positional choice. Duplicate disjuncts cannot create distinct nodes.
+            if operands[..index].contains(operand) {
+                continue;
+            }
+            result.extend(
+                reference_proofs(operand, assumptions, capacity)
+                    .into_iter()
+                    .map(|premise| ReferenceProof::Or {
+                        conclusion: goal.clone(),
+                        premise: Box::new(premise),
+                    }),
+            );
+        }
+    }
+    if capacity > 0
         && let RawExpr::LogicChain(chain) = &goal.raw
         && let [(Logic::Imp, body)] = chain.assertions.as_slice()
     {
@@ -547,7 +581,7 @@ fn reference_search(
     // temporary formulas cannot increase proof size or change ambient support.
     fn antecedents(goal: &Expr<()>, output: &mut Vec<Expr<()>>) {
         match &goal.raw {
-            RawExpr::Finop(Finop::And, values) => {
+            RawExpr::Finop(Finop::And | Finop::Or, values) => {
                 for v in values {
                     antecedents(v, output)
                 }
@@ -566,7 +600,9 @@ fn reference_search(
     fn dependencies(proof: &ReferenceProof, assumptions: &[Expr<()>]) -> BTreeSet<usize> {
         match proof {
             ReferenceProof::Leaf { source, .. } => BTreeSet::from([*source]),
-            ReferenceProof::Elim { premise, .. } => dependencies(premise, assumptions),
+            ReferenceProof::Elim { premise, .. } | ReferenceProof::Or { premise, .. } => {
+                dependencies(premise, assumptions)
+            }
             ReferenceProof::And(children) => children
                 .iter()
                 .flat_map(|c| dependencies(c, assumptions))
@@ -581,7 +617,9 @@ fn reference_search(
         match proof {
             ReferenceProof::Leaf { .. } => vec![],
             ReferenceProof::And(c) => c.iter().collect(),
-            ReferenceProof::Elim { premise, .. } => vec![premise],
+            ReferenceProof::Elim { premise, .. } | ReferenceProof::Or { premise, .. } => {
+                vec![premise]
+            }
             ReferenceProof::Imp { body, .. } => vec![body],
         }
     }
@@ -640,6 +678,11 @@ fn small_generated_queries_match_independent_bfs_dependencies_and_replay() {
         implication(atom("p"), and(vec![atom("p"), atom("p")])),
         implication(atom("p"), implication(atom("q"), atom("p"))),
         and(vec![implication(atom("p"), atom("p")), atom("p")]),
+        or(vec![atom("p"), atom("q")]),
+        or(vec![atom("p"), atom("p")]),
+        or(vec![atom("p"), or(vec![atom("q"), atom("r")])]),
+        implication(atom("p"), or(vec![atom("p"), atom("q")])),
+        or(vec![implication(atom("p"), atom("p")), atom("q")]),
     ];
     let mut successes = 0;
     let mut failures = 0;
@@ -886,9 +929,75 @@ fn backend_proof_snapshots() {
             Some(1),
         ),
     ];
+    let disjunction_cases = [
+        (
+            "First disjunct",
+            vec![atom("p")],
+            or(vec![atom("p"), atom("q"), atom("r")]),
+            1,
+            1,
+            Some(1),
+        ),
+        (
+            "Middle disjunct",
+            vec![atom("q")],
+            or(vec![atom("p"), atom("q"), atom("r")]),
+            1,
+            1,
+            Some(1),
+        ),
+        (
+            "Last disjunct",
+            vec![atom("r")],
+            or(vec![atom("p"), atom("q"), atom("r")]),
+            1,
+            1,
+            Some(1),
+        ),
+        (
+            "Nested disjunction introduction",
+            vec![atom("q")],
+            or(vec![atom("p"), or(vec![atom("q"), atom("r")])]),
+            2,
+            1,
+            Some(1),
+        ),
+        (
+            "Disjunction under implication introduction",
+            vec![],
+            implication(atom("p"), or(vec![atom("p"), atom("q")])),
+            2,
+            1,
+            Some(0),
+        ),
+        (
+            "Closed implication as a disjunct",
+            vec![],
+            or(vec![implication(atom("p"), atom("p")), atom("q")]),
+            2,
+            1,
+            Some(0),
+        ),
+        (
+            "Disjunction has no established operand",
+            vec![],
+            or(vec![atom("p"), atom("q")]),
+            2,
+            1,
+            None,
+        ),
+        (
+            "Disjunction does not eliminate",
+            vec![or(vec![atom("p"), atom("q")])],
+            atom("p"),
+            2,
+            1,
+            None,
+        ),
+    ];
     let mut sections = Vec::new();
     let mut records = Vec::new();
-    for (name, facts, goal, n, capacity, bound) in cases {
+    for (name, facts, goal, n, capacity, bound) in cases.into_iter().chain(disjunction_cases) {
         let c = context(&facts);
         let timing = Timings::new(name, 0);
         let search_limits = SearchLimits {
@@ -1687,4 +1796,216 @@ fn generated_predicates_can_use_existing_parameters_absent_from_the_input_facts(
     assert_eq!(query.solver.check(), SatResult::Sat);
     let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
     assert_eq!(d.assumptions.len(), 1);
+}
+
+#[test]
+fn disjunction_introduction_selects_each_nary_operand_without_other_proofs() {
+    let values = ["p", "q", "r", "s"].map(atom).to_vec();
+    let goal = or(values.clone());
+    for (index, premise) in values.iter().enumerate() {
+        let c = context(std::slice::from_ref(premise));
+        let before = c.store_counts();
+        let (checked, d) = find_proof(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            SearchLimits {
+                max_finop_arity: 4,
+                max_root_dependencies: Some(1),
+                ..limits(1, 1)
+            },
+            &Timings::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&d.proof,NaturalDeductionProof::DisjunctionIntroduction {operand,..} if *operand==index)
+        );
+        assert_eq!(replay(&c, &d.proof, &goal), d.assumptions);
+        assert_eq!(d.assumptions.len(), 1);
+        assert_eq!(c.store_counts(), before);
+        let mut accepted = c.clone();
+        accepted.record(checked, vec![], vec![d]).unwrap();
+    }
+    let c = context(&[atom("p")]);
+    for goal in [or(vec![atom("p")]), or(vec![atom("p"), atom("p")])] {
+        let (_, d) = bounded(&c, &goal, 1, Some(1)).unwrap();
+        assert!(matches!(
+            d.proof,
+            NaturalDeductionProof::DisjunctionIntroduction { operand: 0, .. }
+        ));
+    }
+    let repeated = or(vec![atom("p"), atom("p")]);
+    let shared = and(vec![repeated.clone(), repeated]);
+    assert!(matches!(
+        bounded(&c, &shared, 1, Some(1)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let (_, d) = bounded(&c, &shared, 2, Some(1)).unwrap();
+    assert_eq!(replay(&c, &d.proof, &shared), d.assumptions);
+    assert!(matches!(
+        find_proof(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            limits(1, 1),
+            &Timings::default()
+        ),
+        Err(SearchError::Encoding(smt_dt::Error::ArityLimit {
+            actual: 4,
+            limit: 3
+        }))
+    ));
+}
+
+#[test]
+fn disjunction_introduction_respects_nesting_and_does_not_eliminate_or_create_assumptions() {
+    let c = context(&[atom("q")]);
+    let goal = or(vec![atom("p"), or(vec![atom("q"), atom("r")])]);
+    assert!(matches!(
+        search(&c, &goal, 1, 1),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let (_, d) = search(&c, &goal, 2, 1).unwrap();
+    assert_eq!(replay(&c, &d.proof, &goal), d.assumptions);
+    let c = context(&[]);
+    assert!(matches!(
+        search(&c, &or(vec![atom("p"), atom("q")]), 2, 1),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let c = context(&[or(vec![atom("p"), atom("q")])]);
+    assert!(matches!(
+        search(&c, &atom("p"), 2, 1),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let c = context(&[atom("p")]);
+    assert!(matches!(
+        bounded(&c, &or(vec![atom("p"), atom("q")]), 1, Some(0)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let c = context(&[]);
+    for goal in [
+        implication(atom("p"), or(vec![atom("p"), atom("q")])),
+        or(vec![implication(atom("p"), atom("p")), atom("q")]),
+    ] {
+        let (checked, d) = bounded(&c, &goal, 2, Some(0)).unwrap();
+        assert!(d.assumptions.is_empty());
+        assert_eq!(replay(&c, &d.proof, &goal), d.assumptions);
+        assert!(d.proof.to_tex(&goal).contains(r"\lor I"));
+        assert!(d.proof.to_tex(&goal).contains(r"\left[p\right]^{a_{1}}"));
+        let mut accepting = c.clone();
+        accepting.record(checked, vec![], vec![d]).unwrap();
+    }
+}
+
+#[test]
+fn disjunction_dependencies_are_copied_and_root_bound_selects_an_independent_source() {
+    let c = context(&[atom("p"), atom("q")]);
+    let goal = or(vec![atom("p"), atom("q")]);
+    let query = Query::new(&c, &goal, &SurfaceInterpreter, limits(1, 1)).unwrap();
+    let forced = query
+        .proofs
+        .inference(
+            &query.target,
+            ProofRule::OrIntroduction,
+            &[query.leaves[0].value.clone()],
+        )
+        .unwrap();
+    query.solver.assert(query.root.eq(forced));
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
+    assert_eq!(
+        d.assumptions,
+        query
+            .context
+            .derivation(query.leaves[0].premise.as_ref().unwrap().derivation)
+            .unwrap()
+            .assumptions
+    );
+    query.solver.push();
+    query.solver.assert(&query.root_dependencies[1]);
+    assert_eq!(query.solver.check(), SatResult::Unsat);
+    query.solver.pop(1);
+    let mut c = context(&[atom("p")]);
+    let checked = c.check(&atom("q")).unwrap();
+    c.record(
+        checked,
+        vec![],
+        vec![Derivation::new(NaturalDeductionProof::External)],
+    )
+    .unwrap();
+    let (_, d) = bounded(&c, &goal, 1, Some(0)).unwrap();
+    assert!(matches!(
+        &d.proof,
+        NaturalDeductionProof::DisjunctionIntroduction { operand: 1, .. }
+    ));
+    assert!(d.assumptions.is_empty());
+    assert_eq!(d.proof.supporting_facts(), vec![atom("q")]);
+}
+
+#[test]
+fn disjunction_model_decoding_rejects_malformed_and_ill_typed_generated_conclusions() {
+    let c = context(&[atom("p")]);
+    let goal = or(vec![atom("p"), atom("q")]);
+    let mut query = Query::new(&c, &goal, &SurfaceInterpreter, limits(3, 2)).unwrap();
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let model = query.solver.get_model().unwrap();
+    for (formula, premises) in [
+        (query.target.clone(), vec![]),
+        (query.target.clone(), vec![query.leaves[0].value.clone(); 2]),
+        (
+            query.proofs.conclusion(&query.leaves[0].value).unwrap(),
+            vec![query.leaves[0].value.clone()],
+        ),
+    ] {
+        let invalid = query
+            .proofs
+            .inference(&formula, ProofRule::OrIntroduction, &premises)
+            .unwrap();
+        assert!(matches!(
+            Decoder::new(&query, &model)
+                .unwrap()
+                .decode_value(&invalid, 3),
+            Err(SearchError::InvalidModel(_))
+        ));
+    }
+    let one = query
+        .expressions
+        .encode(&Expr::<()>::new(RawExpr::NatLiteral(1)))
+        .unwrap();
+    let p = query
+        .proofs
+        .conclusion(&query.leaves[0].value)
+        .unwrap()
+        .simplify();
+    let bad_or = query
+        .expressions
+        .finite(Finop::Or, &[p.clone(), one])
+        .unwrap();
+    let bad = query
+        .proofs
+        .inference(
+            &bad_or,
+            ProofRule::OrIntroduction,
+            &[query.leaves[0].value.clone()],
+        )
+        .unwrap();
+    assert!(
+        matches!(Decoder::new(&query,&model).unwrap().decode_value(&bad,3),Err(SearchError::InvalidModel(message)) if message.contains("ill-typed inference conclusion"))
+    );
+    let q = query.expressions.encode(&atom("q")).unwrap();
+    let wrong_member = query.expressions.finite(Finop::Or, &[q]).unwrap();
+    let invalid = query
+        .proofs
+        .inference(
+            &wrong_member,
+            ProofRule::OrIntroduction,
+            &[query.leaves[0].value.clone()],
+        )
+        .unwrap();
+    assert!(matches!(
+        Decoder::new(&query, &model)
+            .unwrap()
+            .decode_value(&invalid, 3),
+        Err(SearchError::InvalidModel(_))
+    ));
 }

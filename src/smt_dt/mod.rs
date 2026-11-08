@@ -197,13 +197,17 @@ impl ExprDatatype {
         }
         Ok(tail)
     }
-    /// Guarded immediate conjunction operands. Requires a structurally bounded codec.
-    pub fn conjunct_choices(&self, value: &Datatype) -> Result<Vec<(Bool, Datatype)>, Error> {
+    /// Guarded immediate operands of a selected finop. Requires a bounded codec.
+    pub fn finop_choices(
+        &self,
+        value: &Datatype,
+        operator: Finop,
+    ) -> Result<Vec<(Bool, Datatype)>, Error> {
         if value.get_sort() != self.schema.expr.sort {
             return Err(Error::WrongSort);
         }
         let max = self.max_finop_arity().ok_or(Error::Unsupported(
-            "and-elimination requires a finite arity bound",
+            "finop traversal requires a finite arity bound",
         ))?;
         let constructor = self
             .schema
@@ -218,7 +222,7 @@ impl ExprDatatype {
             .unwrap();
         let mut present = Bool::and(&[
             constructor.tester.apply(&[value]).as_bool().unwrap(),
-            op.eq(self.schema.finop.encode(Finop::And)?),
+            op.eq(self.schema.finop.encode(operator)?),
         ]);
         let mut tail = constructor.accessors[1]
             .apply(&[value])

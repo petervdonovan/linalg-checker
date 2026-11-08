@@ -18,6 +18,7 @@ impl NaturalDeductionProof {
             Self::Reuse { .. } => "\\text{reuse}",
             Self::ConjunctionIntroduction { .. } => "\\land I",
             Self::ConjunctionElimination { .. } => "\\land E",
+            Self::DisjunctionIntroduction { .. } => "\\lor I",
             Self::ExistentialIntroduction { .. } => "\\exists I",
             Self::ExistentialElimination { .. } => "\\text{witness opening}",
             Self::UniversalIntroduction { .. } => "\\forall I",
@@ -107,7 +108,8 @@ impl NaturalDeductionProof {
             .collect::<Vec<_>>()
             .join(" \\qquad ");
         let suffix = match self {
-            Self::ConjunctionElimination { operand, .. } => format!("_{{{}}}", operand + 1),
+            Self::ConjunctionElimination { operand, .. }
+            | Self::DisjunctionIntroduction { operand, .. } => format!("_{{{}}}", operand + 1),
             Self::ImplicationIntroduction { .. } | Self::UniversalIntroduction { .. }
                 if !own.is_empty() =>
             {
@@ -209,6 +211,9 @@ impl NaturalDeductionProof {
                     }
                     Self::ConjunctionIntroduction { .. } => {
                         "Combined the established conjuncts.".to_owned()
+                    }
+                    Self::DisjunctionIntroduction { operand, .. } => {
+                        format!("Established disjunct {}.", operand + 1)
                     }
                     Self::ConjunctionElimination { operand, .. } => {
                         format!("Selected conjunct {}.", operand + 1)
