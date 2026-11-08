@@ -38,6 +38,7 @@ pub fn selector_child(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofRule {
     AndIntroduction,
+    AndElimination,
     ImplicationIntroduction,
 }
 
@@ -175,6 +176,7 @@ impl ProofDatatype {
                 ),
             DatatypeBuilder::new(rule_name)
                 .variant(&format!("{namespace}.AndIntroduction"), vec![])
+                .variant(&format!("{namespace}.AndElimination"), vec![])
                 .variant(&format!("{namespace}.ImplicationIntroduction"), vec![]),
             DatatypeBuilder::new(assumption_name)
                 .variant(
@@ -291,6 +293,7 @@ impl ProofDatatype {
         }
         let rule = match rule {
             ProofRule::AndIntroduction => app(&self.rule, "AndIntroduction", &[]),
+            ProofRule::AndElimination => app(&self.rule, "AndElimination", &[]),
             ProofRule::ImplicationIntroduction => app(&self.rule, "ImplicationIntroduction", &[]),
         };
         Ok(app(
@@ -344,6 +347,7 @@ impl ProofDatatype {
             "Inference" => {
                 let rule = match tag(&field(value, 1)?, &self.rule)?.as_str() {
                     "AndIntroduction" => ProofRule::AndIntroduction,
+                    "AndElimination" => ProofRule::AndElimination,
                     "ImplicationIntroduction" => ProofRule::ImplicationIntroduction,
                     _ => return Err(Error::Malformed("unknown proof rule")),
                 };
@@ -388,6 +392,12 @@ impl ProofDatatype {
                 "conjunction introduction requires premises",
             ));
         }
+        if expressions
+            .max_finop_arity()
+            .is_some_and(|max| premises.len() > max)
+        {
+            return Ok(Bool::from_bool(false));
+        }
         let mut guards = Vec::new();
         let mut conclusions = Vec::new();
         for p in premises {
@@ -401,6 +411,31 @@ impl ProofDatatype {
             premises,
         )?));
         Ok(Bool::and(&guards))
+    }
+    /// One n-ary conjunction-elimination rule, selecting any immediate operand.
+    pub fn and_elimination(
+        &self,
+        expressions: &ExprDatatype,
+        premise: &Datatype,
+        parent: &Datatype,
+    ) -> Result<Bool, Error> {
+        let conclusion = self.conclusion(parent)?;
+        let choices = expressions.conjunct_choices(&self.conclusion(premise)?)?;
+        let member = Bool::or(
+            &choices
+                .into_iter()
+                .map(|(present, value)| Bool::and(&[present, value.eq(&conclusion)]))
+                .collect::<Vec<_>>(),
+        );
+        Ok(Bool::and(&[
+            self.is_unused(premise)?.not(),
+            member,
+            parent.eq(self.inference(
+                &conclusion,
+                ProofRule::AndElimination,
+                std::slice::from_ref(premise),
+            )?),
+        ]))
     }
     pub fn implication_introduction(
         &self,
@@ -584,12 +619,18 @@ impl ProofDatatype {
         slots: &[Datatype],
         max_premises: usize,
     ) -> Result<Bool, Error> {
+        if expressions.max_finop_arity().is_none() {
+            return Err(Error::Unsupported(
+                "proof rule search requires a finite finop arity bound",
+            ));
+        }
         let mut constraints = Vec::new();
         for slot in slots {
             let mut rules = Vec::new();
             for (shape, premises) in self.premise_cases(slot, max_premises)? {
                 let mut applications = vec![self.and_introduction(expressions, &premises, slot)?];
                 if premises.len() == 1 {
+                    applications.push(self.and_elimination(expressions, &premises[0], slot)?);
                     applications.push(self.implication_introduction(
                         expressions,
                         &premises[0],

@@ -6,7 +6,7 @@ Context:
 
 Goal: $p$
 
-Limits: 0 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 0 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -23,7 +23,7 @@ Context:
 
 Goal: $p \land q$
 
-Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -52,7 +52,7 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -82,9 +82,9 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (1 rule slots, 3 premises, root dependencies unbounded)
+no proof within encoding and budget (1 rule slots, 3 premises, finop arity 3, root dependencies unbounded)
 
 # Nested introduction: sufficient slots
 
@@ -96,7 +96,7 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -126,9 +126,9 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 4 rule slots, 2 premises per inference, unbounded root dependencies.
+Limits: 4 rule slots, 2 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (4 rule slots, 2 premises, root dependencies unbounded)
+no proof within encoding and budget (4 rule slots, 2 premises, finop arity 3, root dependencies unbounded)
 
 # Flat conjunction: capacity three
 
@@ -140,7 +140,7 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -169,7 +169,7 @@ Context:
 
 Goal: $p \land q \land p \land q$
 
-Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -199,9 +199,9 @@ Context:
 
 Goal: $p \land q \land r \land p \land q \land s$
 
-Limits: 3 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 3 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (3 rule slots, 3 premises, root dependencies unbounded)
+no proof within encoding and budget (3 rule slots, 3 premises, finop arity 3, root dependencies unbounded)
 
 # Shared descendant: four distinct nodes
 
@@ -214,7 +214,7 @@ Context:
 
 Goal: $p \land q \land r \land p \land q \land s$
 
-Limits: 4 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 4 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
 Found proof.
 
@@ -243,11 +243,11 @@ Context:
 
 Goal: $p \land q$
 
-Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (2 rule slots, 3 premises, root dependencies unbounded)
+no proof within encoding and budget (2 rule slots, 3 premises, finop arity 3, root dependencies unbounded)
 
-# Elimination is not an available rule
+# Conjunction elimination
 
 Context:
 
@@ -255,9 +255,101 @@ Context:
 
 Goal: $p$
 
-Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (2 rule slots, 3 premises, root dependencies unbounded)
+Found proof.
+
+Remaining assumptions (1): $p \land q$.
+
+Selected conjunct 1.
+
+Supporting facts:
+
+- $p \land q$
+
+Proof tree:
+
+$$
+\dfrac{p \land q}{p}\;(\land E_{1})
+$$
+
+# Third conjunct of an n-ary assumption
+
+Context:
+
+- $p \land q \land r$
+
+Goal: $r$
+
+Limits: 1 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \land q \land r$.
+
+Selected conjunct 3.
+
+Supporting facts:
+
+- $p \land q \land r$
+
+Proof tree:
+
+$$
+\dfrac{p \land q \land r}{r}\;(\land E_{3})
+$$
+
+# Nested conjunction elimination
+
+Context:
+
+- $p \land q \land r$
+
+Goal: $r$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \land q \land r$.
+
+Selected conjunct 2.
+
+Supporting facts:
+
+- $p \land q \land r$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{p \land q \land r}{q \land r}\;(\land E_{2})}{r}\;(\land E_{2})
+$$
+
+# Projection under implication introduction
+
+Context:
+
+(empty)
+
+Goal: $p \land q \implies q$
+
+Limits: 2 rule slots, 1 premises per inference, finop arity 3, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p \land q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p \land q\right]^{a_{1}}}{q}\;(\land E_{2})}{p \land q \implies q}\;(\Rightarrow I\,[a_{1}])
+$$
 
 # Temporary assumption identity
 
@@ -267,7 +359,7 @@ Context:
 
 Goal: $p \implies p$
 
-Limits: 1 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 Found proof.
 
@@ -293,7 +385,7 @@ Context:
 
 Goal: $p \implies p \land p$
 
-Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 Found proof.
 
@@ -319,7 +411,7 @@ Context:
 
 Goal: $p \implies \left(q \implies p\right)$
 
-Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 Found proof.
 
@@ -345,7 +437,7 @@ Context:
 
 Goal: $p \implies \left(q \implies p \land q\right)$
 
-Limits: 3 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 3 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 Found proof.
 
@@ -372,7 +464,7 @@ Context:
 
 Goal: $\left(p \implies p\right) \land \left(q \implies q\right)$
 
-Limits: 3 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 3 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 Found proof.
 
@@ -399,9 +491,9 @@ Context:
 
 Goal: $\left(p \implies p\right) \land p$
 
-Limits: 3 rule slots, 3 premises per inference, unbounded root dependencies.
+Limits: 3 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
 
-no proof within encoding and budget (3 rule slots, 3 premises, root dependencies unbounded)
+no proof within encoding and budget (3 rule slots, 3 premises, finop arity 3, root dependencies unbounded)
 
 # Remaining ambient dependency
 
@@ -411,7 +503,7 @@ Context:
 
 Goal: $p \implies p \land q$
 
-Limits: 2 rule slots, 3 premises per inference, 1 root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, 1 root dependencies.
 
 Found proof.
 
@@ -441,9 +533,9 @@ Context:
 
 Goal: $p \implies p \land q$
 
-Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+Limits: 2 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
-no proof within encoding and budget (2 rule slots, 3 premises, root dependencies 0)
+no proof within encoding and budget (2 rule slots, 3 premises, finop arity 3, root dependencies 0)
 
 # One ambient assumption used twice
 
@@ -453,7 +545,7 @@ Context:
 
 Goal: $p \land p$
 
-Limits: 1 rule slots, 3 premises per inference, 1 root dependencies.
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, 1 root dependencies.
 
 Found proof.
 

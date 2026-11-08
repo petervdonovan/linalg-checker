@@ -1,4 +1,4 @@
-//! Standalone bounded conjunction/implication-introduction search with exact
+//! Standalone bounded conjunction introduction/elimination and implication introduction with exact
 //! assumption dependencies. The budget counts distinct
 //! reachable non-leaf proof values, numbered in canonical BFS order. Context facts
 //! stay leaves, and finding a proof never commits it to the context.
@@ -22,6 +22,8 @@ pub struct SearchLimits {
     pub max_rule_slots: usize,
     /// Maximum premises at an inference; list cells do not consume slots.
     pub max_premises: usize,
+    /// Maximum operands of any encoded Plus, Times, And, or Or at every depth.
+    pub max_finop_arity: usize,
     /// Maximum true ambient dependency bits at the root; None is unrestricted.
     pub max_root_dependencies: Option<usize>,
     /// None is unlimited. Some(0) is rejected to avoid Z3's unlimited-zero policy.
@@ -45,9 +47,10 @@ impl fmt::Display for SearchError {
             Self::InvalidOptions(s) => write!(f, "invalid search options: {s}"),
             Self::NoProofWithinBounds(l) => write!(
                 f,
-                "no proof within encoding and budget ({} rule slots, {} premises, root dependencies {})",
+                "no proof within encoding and budget ({} rule slots, {} premises, finop arity {}, root dependencies {})",
                 l.max_rule_slots,
                 l.max_premises,
+                l.max_finop_arity,
                 l.max_root_dependencies
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unbounded".into())
@@ -150,7 +153,17 @@ impl<'a> Query<'a> {
         let checked = interpreter
             .check(context, conclusion)
             .map_err(SearchError::InvalidConclusion)?;
-        let mut expressions = ExprDatatype::new(&format!("{namespace}.expr"));
+        let mut expressions = ExprDatatype::with_max_finop_arity(
+            &format!("{namespace}.expr"),
+            limits.max_finop_arity,
+        );
+        // Generated predicates may use any existing parameter, including names
+        // absent from the requested conclusion and currently established facts.
+        let mut parameters = context.types.types.keys().cloned().collect::<Vec<_>>();
+        parameters.sort();
+        for variable in parameters {
+            expressions.encode(&Expr::<()>::new(RawExpr::Variable(variable)))?;
+        }
         let proofs = ProofDatatype::new(&format!("{namespace}.proof"), &expressions);
         let target = expressions.encode(&checked.meaning())?;
         let ambient = context.assumptions.keys().copied().collect::<Vec<_>>();
@@ -312,6 +325,16 @@ impl<'a> Query<'a> {
                         .push(and_case.implies(self.dependencies[i][a].eq(Bool::or(&child_bits))));
                 }
                 if premises.len() == 1 {
+                    let elimination_case = Bool::and(&[
+                        shape.clone(),
+                        self.proofs
+                            .and_elimination(&self.expressions, &premises[0], slot)?,
+                    ]);
+                    for a in 0..self.assumption_formulas.len() {
+                        constraints.push(elimination_case.implies(
+                            self.dependencies[i][a].eq(self.dependency(&premises[0], a)?),
+                        ));
+                    }
                     let implication_case = Bool::and(&[
                         shape,
                         self.proofs.implication_introduction(
@@ -513,6 +536,9 @@ impl<'a, 'c> Decoder<'a, 'c> {
                     .expressions
                     .decode(&conclusion)
                     .map_err(model_error)?;
+                self.query.context.check(&meaning).map_err(|e| {
+                    SearchError::InvalidModel(format!("ill-typed inference conclusion: {e}"))
+                })?;
                 let mut dependencies = child_sets
                     .iter()
                     .flat_map(|s| s.iter().copied())
@@ -530,6 +556,29 @@ impl<'a, 'c> Decoder<'a, 'c> {
                             ));
                         }
                         NaturalDeductionProof::ConjunctionIntroduction { premises: inputs }
+                    }
+                    ProofRule::AndElimination => {
+                        if inputs.len() != 1 {
+                            return Err(SearchError::InvalidModel(
+                                "conjunction elimination requires one premise".into(),
+                            ));
+                        }
+                        let RawExpr::Finop(Finop::And, operands) = &inputs[0].conclusion().raw
+                        else {
+                            return Err(SearchError::InvalidModel(
+                                "conjunction premise expected".into(),
+                            ));
+                        };
+                        let operand =
+                            operands.iter().position(|p| p == &meaning).ok_or_else(|| {
+                                SearchError::InvalidModel(
+                                    "conclusion is not an immediate conjunct".into(),
+                                )
+                            })?;
+                        NaturalDeductionProof::ConjunctionElimination {
+                            premise: inputs.remove(0),
+                            operand,
+                        }
                     }
                     ProofRule::ImplicationIntroduction => {
                         if inputs.len() != 1 {

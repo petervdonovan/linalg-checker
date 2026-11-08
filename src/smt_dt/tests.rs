@@ -506,3 +506,88 @@ fn syntax_encoding_does_not_evaluate_arithmetic() {
     solver.assert(sum.eq(&three));
     assert_eq!(solver.check(), SatResult::Unsat);
 }
+
+#[test]
+fn bounded_finop_lists_preserve_vectors_and_reject_overflow_at_any_depth() {
+    for max in 0..=4 {
+        let mut codec = ExprDatatype::with_max_finop_arity(&format!("bounded_{max}"), max);
+        assert_eq!(codec.max_finop_arity(), Some(max));
+        for len in 0..=max {
+            let input = Expr::new(RawExpr::Finop(
+                Finop::Plus,
+                (0..len).map(|n| literal(n as u64)).collect(),
+            ));
+            assert_eq!(model_roundtrip(&mut codec, &input), input);
+        }
+        let input = Expr::new(RawExpr::Finop(Finop::Plus, vec![literal(1); max + 1]));
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        let term = codec.constant("bounded_term");
+        assert_eq!(
+            codec.assert_equal(&solver, &term, &input),
+            Err(Error::ArityLimit {
+                actual: max + 1,
+                limit: max
+            })
+        );
+        assert!(solver.get_assertions().is_empty());
+        let nested = Expr::new(RawExpr::Monop(Monop::Neg, input));
+        assert_eq!(
+            codec.encode(&nested),
+            Err(Error::ArityLimit {
+                actual: max + 1,
+                limit: max
+            })
+        );
+        // Each cons tail has strictly less capacity, so synthesized nested terms
+        // cannot hide an overlong Finite argument list from the global bound.
+        assert_eq!(codec.schema.finite_lists[0].variants.len(), 1);
+        for capacity in 1..=max {
+            let sort = &codec.schema.finite_lists[capacity];
+            let symbolic = Datatype::new_const(format!("args_{capacity}"), &sort.sort);
+            assert_eq!(
+                sort.variants[1].accessors[1].apply(&[&symbolic]).get_sort(),
+                codec.schema.finite_lists[capacity - 1].sort
+            );
+        }
+    }
+    let mut deep = Expr::new(RawExpr::NatLiteral(1));
+    for _ in 0..12 {
+        deep = Expr::new(RawExpr::Finop(Finop::Plus, vec![literal(1), deep]));
+    }
+    let mut codec = ExprDatatype::with_max_finop_arity("deep_bounded_finops", 2);
+    assert_eq!(model_roundtrip(&mut codec, &deep), deep);
+    let mut unbounded = ExprDatatype::new("unbounded_vectors");
+    let input = Expr::new(RawExpr::Finop(Finop::Plus, vec![literal(1); 8]));
+    assert_eq!(model_roundtrip(&mut unbounded, &input), input);
+}
+
+#[test]
+fn finop_arity_does_not_limit_matrix_sequence_or_quantifier_lists() {
+    let mut codec = ExprDatatype::with_max_finop_arity("separate_lists", 1);
+    for tex in [
+        r"\begin{bmatrix}1&2&3&4\end{bmatrix}",
+        "(1,2,3,4)",
+        r"\forall x\in\mathbb{R},y\in\mathbb{R},x>y,x=x",
+    ] {
+        let input = expression(tex);
+        assert_eq!(model_roundtrip(&mut codec, &input), input);
+    }
+    assert_eq!(
+        codec.encode(&expression("1<2<3<4")),
+        Err(Error::ArityLimit {
+            actual: 3,
+            limit: 1
+        })
+    );
+    let input = Expr::new(RawExpr::Type(TypeExpr::Matrix(
+        expression("1+2+3"),
+        literal(1),
+    )));
+    assert_eq!(
+        codec.encode(&input),
+        Err(Error::ArityLimit {
+            actual: 3,
+            limit: 1
+        })
+    );
+}

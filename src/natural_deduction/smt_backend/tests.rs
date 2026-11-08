@@ -22,6 +22,7 @@ fn limits(n: usize, capacity: usize) -> SearchLimits {
     SearchLimits {
         max_rule_slots: n,
         max_premises: capacity,
+        max_finop_arity: 3,
         max_root_dependencies: None,
         timeout_ms: None,
     }
@@ -85,6 +86,14 @@ fn replay(
             }
             assert_eq!(and(formulas), *conclusion);
             all
+        }
+        NaturalDeductionProof::ConjunctionElimination { premise, operand } => {
+            let (formula, set) = replay_input(c, premise);
+            let RawExpr::Finop(Finop::And, values) = &formula.raw else {
+                panic!()
+            };
+            assert_eq!(values[*operand], *conclusion);
+            set
         }
         NaturalDeductionProof::ImplicationIntroduction {
             premise,
@@ -202,7 +211,7 @@ fn sharing_and_bfs_numbering_bound_distinct_reachable_inferences() {
 }
 
 #[test]
-fn bounds_preserve_nary_structure_and_do_not_add_elimination() {
+fn bounds_preserve_nary_structure_and_allow_explicit_elimination() {
     let c = context(&[atom("p"), atom("q"), atom("r")]);
     let flat = and(vec![atom("p"), atom("q"), atom("r")]);
     assert!(matches!(
@@ -222,8 +231,8 @@ fn bounds_preserve_nary_structure_and_do_not_add_elimination() {
     ));
     let c = context(&[and(vec![atom("p"), atom("q")])]);
     assert!(matches!(
-        search(&c, &atom("p"), 3, 3),
-        Err(SearchError::NoProofWithinBounds(_))
+        search(&c, &atom("p"), 3, 3).unwrap().1.proof,
+        NaturalDeductionProof::ConjunctionElimination { .. }
     ));
     // A whole contextual formula needs no construction capacity.
     assert!(search(&c, &and(vec![atom("p"), atom("q")]), 0, 0).is_ok());
@@ -434,6 +443,10 @@ enum ReferenceProof {
         source: usize,
     },
     And(Vec<ReferenceProof>),
+    Elim {
+        premise: Box<ReferenceProof>,
+        operand: usize,
+    },
     Imp {
         antecedent: Expr<()>,
         body: Box<ReferenceProof>,
@@ -453,6 +466,40 @@ fn reference_proofs(
             source,
         })
         .collect::<Vec<_>>();
+    // Normal proofs need elimination chains from assumptions, not introduction-
+    // elimination detours. Keep this finite oracle restriction out of production.
+    fn projections(
+        formula: &Expr<()>,
+        proof: ReferenceProof,
+        goal: &Expr<()>,
+        result: &mut Vec<ReferenceProof>,
+    ) {
+        if let RawExpr::Finop(Finop::And, operands) = &formula.raw {
+            for (operand, value) in operands.iter().enumerate() {
+                let projected = ReferenceProof::Elim {
+                    premise: Box::new(proof.clone()),
+                    operand,
+                };
+                if value == goal {
+                    result.push(projected.clone());
+                }
+                projections(value, projected, goal, result);
+            }
+        }
+    }
+    if capacity > 0 {
+        for (source, formula) in assumptions.iter().enumerate() {
+            projections(
+                formula,
+                ReferenceProof::Leaf {
+                    formula: formula.clone(),
+                    source,
+                },
+                goal,
+                &mut result,
+            );
+        }
+    }
     if let RawExpr::Finop(Finop::And, operands) = &goal.raw
         && !operands.is_empty()
         && operands.len() <= capacity
@@ -495,7 +542,7 @@ fn reference_search(
     capacity: usize,
     bound: Option<usize>,
 ) -> bool {
-    // Conjunction and implication introduction have the subformula property.
+    // Normal conjunction/implication proofs have the subformula property.
     // One temporary identity per distinct antecedent is enough: merging equal
     // temporary formulas cannot increase proof size or change ambient support.
     fn antecedents(goal: &Expr<()>, output: &mut Vec<Expr<()>>) {
@@ -519,6 +566,7 @@ fn reference_search(
     fn dependencies(proof: &ReferenceProof, assumptions: &[Expr<()>]) -> BTreeSet<usize> {
         match proof {
             ReferenceProof::Leaf { source, .. } => BTreeSet::from([*source]),
+            ReferenceProof::Elim { premise, .. } => dependencies(premise, assumptions),
             ReferenceProof::And(children) => children
                 .iter()
                 .flat_map(|c| dependencies(c, assumptions))
@@ -533,6 +581,7 @@ fn reference_search(
         match proof {
             ReferenceProof::Leaf { .. } => vec![],
             ReferenceProof::And(c) => c.iter().collect(),
+            ReferenceProof::Elim { premise, .. } => vec![premise],
             ReferenceProof::Imp { body, .. } => vec![body],
         }
     }
@@ -733,13 +782,30 @@ fn backend_proof_snapshots() {
             3,
             None,
         ),
+        ("Conjunction elimination", vec![pair], p.clone(), 2, 3, None),
         (
-            "Elimination is not an available rule",
-            vec![pair],
-            p.clone(),
+            "Third conjunct of an n-ary assumption",
+            vec![and(vec![p.clone(), q.clone(), atom("r")])],
+            atom("r"),
+            1,
+            1,
+            Some(1),
+        ),
+        (
+            "Nested conjunction elimination",
+            vec![and(vec![p.clone(), and(vec![q.clone(), atom("r")])])],
+            atom("r"),
             2,
-            3,
-            None,
+            1,
+            Some(1),
+        ),
+        (
+            "Projection under implication introduction",
+            vec![],
+            implication(and(vec![p.clone(), q.clone()]), q.clone()),
+            2,
+            1,
+            Some(0),
         ),
         (
             "Temporary assumption identity",
@@ -825,16 +891,12 @@ fn backend_proof_snapshots() {
     for (name, facts, goal, n, capacity, bound) in cases {
         let c = context(&facts);
         let timing = Timings::new(name, 0);
-        let result = find_proof(
-            &c,
-            &goal,
-            &SurfaceInterpreter,
-            SearchLimits {
-                max_root_dependencies: bound,
-                ..limits(n, capacity)
-            },
-            &timing,
-        );
+        let search_limits = SearchLimits {
+            max_root_dependencies: bound,
+            ..limits(n, capacity)
+        };
+        let max_finop_arity = search_limits.max_finop_arity;
+        let result = find_proof(&c, &goal, &SurfaceInterpreter, search_limits, &timing);
         records.push(timing);
         let outcome = match result {
             Ok((_, d)) => {
@@ -860,7 +922,7 @@ fn backend_proof_snapshots() {
         let bound = bound
             .map(|b| b.to_string())
             .unwrap_or_else(|| "unbounded".into());
-        sections.push(format!("# {name}\n\nContext:\n\n{}\n\nGoal: ${}$\n\nLimits: {n} rule slots, {capacity} premises per inference, {bound} root dependencies.\n\n{outcome}",if facts.is_empty(){"(empty)".to_owned()}else{facts.iter().map(|e|format!("- ${}$",e.as_latex())).collect::<Vec<_>>().join("\n")},goal.as_latex()));
+        sections.push(format!("# {name}\n\nContext:\n\n{}\n\nGoal: ${}$\n\nLimits: {n} rule slots, {capacity} premises per inference, finop arity {max_finop_arity}, {bound} root dependencies.\n\n{outcome}",if facts.is_empty(){"(empty)".to_owned()}else{facts.iter().map(|e|format!("- ${}$",e.as_latex())).collect::<Vec<_>>().join("\n")},goal.as_latex()));
     }
     let csv = crate::timing::to_csv(records).expect("failed to serialize SMT backend timings");
     std::fs::write(
@@ -1070,12 +1132,9 @@ fn temporary_dependencies_cannot_escape_through_a_sibling_or_be_assumed_at_root(
             Err(SearchError::NoProofWithinBounds(_))
         ));
     }
-    // Implication introduction does not implicitly project a conjunction assumption.
+    // Projecting the temporary conjunction is now an explicit inference before discharge.
     let goal = implication(and(vec![atom("p"), atom("q")]), atom("p"));
-    assert!(matches!(
-        bounded(&c, &goal, 3, Some(0)),
-        Err(SearchError::NoProofWithinBounds(_))
-    ));
+    assert!(bounded(&c, &goal, 3, Some(0)).is_ok());
 }
 
 #[test]
@@ -1421,4 +1480,211 @@ fn identical_ambient_formulas_still_have_distinct_dependency_bits() {
         ),
         Err(SearchError::NoProofWithinBounds(_))
     ));
+}
+
+#[test]
+fn nary_elimination_uses_one_premise_and_preserves_the_whole_dependency_set() {
+    let mut c = context(&[]);
+    c.declare_parameter(Variable::new("t"), TypeExpr::Bool);
+    let operands = ["p", "q", "r", "s", "t"].map(atom).to_vec();
+    let source = and(operands.clone());
+    let checked = c.check(&source).unwrap();
+    let a = c.assume(checked, vec![]).unwrap();
+    for (index, goal) in operands.iter().enumerate() {
+        let limits = SearchLimits {
+            max_finop_arity: 5,
+            ..limits(1, 1)
+        };
+        let (_, d) =
+            find_proof(&c, goal, &SurfaceInterpreter, limits, &Timings::default()).unwrap();
+        assert!(
+            matches!(&d.proof,NaturalDeductionProof::ConjunctionElimination {operand,..} if *operand==index)
+        );
+        assert_eq!(d.assumptions, BTreeSet::from([a]));
+        assert_eq!(replay(&c, &d.proof, goal), d.assumptions);
+    }
+    assert!(matches!(
+        search(&c, &atom("p"), 1, 1),
+        Err(SearchError::Encoding(smt_dt::Error::ArityLimit {
+            actual: 5,
+            limit: 3
+        }))
+    ));
+    let c = context(&[atom("p"), atom("q")]);
+    let query = Query::new(&c, &atom("p"), &SurfaceInterpreter, limits(2, 2)).unwrap();
+    let conclusion = query
+        .expressions
+        .finite(
+            Finop::And,
+            &[
+                query.proofs.conclusion(&query.leaves[0].value).unwrap(),
+                query.proofs.conclusion(&query.leaves[1].value).unwrap(),
+            ],
+        )
+        .unwrap();
+    let assembled = query
+        .proofs
+        .inference(
+            &conclusion,
+            ProofRule::AndIntroduction,
+            &[query.leaves[0].value.clone(), query.leaves[1].value.clone()],
+        )
+        .unwrap();
+    let projected = query
+        .proofs
+        .inference(&query.target, ProofRule::AndElimination, &[assembled])
+        .unwrap();
+    query.solver.assert(query.root.eq(projected));
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
+    assert_eq!(d.assumptions.len(), 2);
+}
+
+#[test]
+fn elimination_is_immediate_and_requires_a_conjunction() {
+    let nested = and(vec![atom("p"), and(vec![atom("q"), atom("r")])]);
+    let c = context(&[nested]);
+    assert!(matches!(
+        search(&c, &atom("r"), 1, 1),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let (_, d) = search(&c, &atom("r"), 2, 1).unwrap();
+    assert_eq!(replay(&c, &d.proof, &atom("r")), d.assumptions);
+    let c = context(&[Expr::new(RawExpr::Finop(
+        Finop::Or,
+        vec![atom("p"), atom("q")],
+    ))]);
+    assert!(matches!(
+        search(&c, &atom("p"), 1, 1),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let c = context(&[]);
+    let goal = implication(and(vec![atom("p"), atom("q")]), atom("p"));
+    assert!(
+        bounded(&c, &goal, 2, Some(0))
+            .unwrap()
+            .1
+            .assumptions
+            .is_empty()
+    );
+    let c = context(&[and(vec![atom("p"), atom("p")])]);
+    let (_, d) = search(&c, &atom("p"), 1, 1).unwrap();
+    assert!(matches!(
+        d.proof,
+        NaturalDeductionProof::ConjunctionElimination { operand: 0, .. }
+    ));
+    let c = context(&[]);
+    let goal = implication(atom("p"), atom("p"));
+    assert!(
+        find_proof(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            SearchLimits {
+                max_finop_arity: 0,
+                ..limits(1, 1)
+            },
+            &Timings::default()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn decoded_discarded_intermediates_are_checked_by_the_central_type_checker() {
+    let c = context(&[atom("p")]);
+    let mut query = Query::new(&c, &atom("p"), &SurfaceInterpreter, limits(3, 2)).unwrap();
+    let p = query.target.clone();
+    let one = query
+        .expressions
+        .encode(&Expr::<()>::new(RawExpr::NatLiteral(1)))
+        .unwrap();
+    let malformed = query.expressions.implication(&one, &p).unwrap();
+    let bad_implication = query
+        .proofs
+        .inference(
+            &malformed,
+            ProofRule::ImplicationIntroduction,
+            &[query.leaves[0].value.clone()],
+        )
+        .unwrap();
+    let conjunction = query
+        .expressions
+        .finite(Finop::And, &[p.clone(), malformed])
+        .unwrap();
+    let assembled = query
+        .proofs
+        .inference(
+            &conjunction,
+            ProofRule::AndIntroduction,
+            &[query.leaves[0].value.clone(), bad_implication],
+        )
+        .unwrap();
+    let projected = query
+        .proofs
+        .inference(&p, ProofRule::AndElimination, &[assembled])
+        .unwrap();
+    query.solver.assert(query.root.eq(projected));
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    assert!(
+        matches!(query.decode(&query.solver.get_model().unwrap()),Err(SearchError::InvalidModel(message)) if message.contains("ill-typed inference conclusion"))
+    );
+    assert!(search(&c, &atom("p"), 0, 2).is_ok());
+}
+
+#[test]
+fn generated_predicates_can_use_existing_parameters_absent_from_the_input_facts() {
+    let mut c = context(&[atom("p")]);
+    c.declare_parameter(Variable::new("x"), TypeExpr::Real);
+    let query = Query::new(&c, &atom("p"), &SurfaceInterpreter, limits(3, 2)).unwrap();
+    // Parameters are registered in sorted order: p, q, r, s, x. No contextual fact
+    // mentions x, and the predicate x=x is absent from both the goal and facts.
+    let variable = query
+        .expressions
+        .sort()
+        .variants
+        .iter()
+        .find(|v| v.constructor.name().ends_with(".Var"))
+        .unwrap();
+    let q = variable
+        .constructor
+        .apply(&[&query.expressions.natural(4)])
+        .as_datatype()
+        .unwrap();
+    assert_eq!(query.expressions.decode(&q).unwrap(), atom("x"));
+    let predicate = Expr::new(RawExpr::CmpChain(CmpChain {
+        start: atom("x"),
+        assertions: vec![(Cmp::Eq, atom("x"))],
+    }));
+    let mut query = query;
+    let eq = query.expressions.encode(&predicate).unwrap();
+    let hypothesis = query
+        .proofs
+        .assumption(&eq, AssumptionRef::Temporary(0), &query.expressions)
+        .unwrap();
+    let closed = query.expressions.implication(&eq, &eq).unwrap();
+    let introduced = query
+        .proofs
+        .inference(&closed, ProofRule::ImplicationIntroduction, &[hypothesis])
+        .unwrap();
+    let pair = query
+        .expressions
+        .finite(Finop::And, &[query.target.clone(), closed])
+        .unwrap();
+    let assembled = query
+        .proofs
+        .inference(
+            &pair,
+            ProofRule::AndIntroduction,
+            &[query.leaves[0].value.clone(), introduced],
+        )
+        .unwrap();
+    let projected = query
+        .proofs
+        .inference(&query.target, ProofRule::AndElimination, &[assembled])
+        .unwrap();
+    query.solver.assert(query.root.eq(projected));
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
+    assert_eq!(d.assumptions.len(), 1);
 }

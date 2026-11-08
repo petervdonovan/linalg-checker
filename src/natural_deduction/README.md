@@ -85,8 +85,8 @@ surface membership statement.
 ## Standalone SMT proof search
 
 `smt_backend::find_proof(context, conclusion, interpreter, limits, timings)` searches
-for conjunction and implication introductions over visible contextual sources and
-temporary assumptions. It returns one checked conclusion and a `Derivation` for
+for conjunction introduction/elimination and implication introduction over visible
+contextual sources and temporary assumptions. It returns one checked conclusion and a `Derivation` for
 the caller to record explicitly. Every visible nondominated contextual derivation
 has its own source identity; equal formulas do not erase assumption identities or
 dependency alternatives. Accepted external facts, including likely facts, remain
@@ -96,8 +96,7 @@ Ambient assumption leaves carry existing assumption identities; established leav
 carry contextual derivation references and their recorded dependencies. Temporary
 leaves have query-local identities with symbolic formulas. There are at most as
 many temporary identities as inference slots, each reusable at several leaves.
-Assumptions and established facts consume no slots. The backend does not project
-conjuncts, consult elaborated alternatives, expand archived proofs, or change
+Assumptions and established facts consume no slots. The backend does not consult elaborated alternatives, expand archived proofs, or change
 ordinary argument validation.
 
 `SearchLimits` supplies a bound on distinct reachable non-leaf proof values, a
@@ -112,10 +111,11 @@ introductions are not supported, and conjunction order/nesting are preserved.
 
 Each slot and the root have exact Boolean dependency vectors over ambient and
 temporary assumption identities. Conjunction introduction unions premise sets;
+conjunction elimination copies its whole premise dependency set unchanged;
 implication introduction removes the used assumptions whose encoded formula
 matches its whole antecedent. Discharge is local to the resulting node, and
-vacuous discharge is permitted. Conjunction antecedents do not implicitly project
-their components. Temporary formulas used by a proof are checked as Boolean in
+vacuous discharge is permitted. Conjunction antecedents require explicit elimination
+nodes to project their components. Temporary formulas used by a proof are checked as Boolean in
 the existing typing context; no parameters or context facts are created.
 
 `SearchLimits::max_root_dependencies` bounds the number of true ambient root bits,
@@ -124,6 +124,28 @@ assumptions. All temporary root bits are always false. A pure Boolean sequential
 counter implements the bound, retaining QF_DT. The selected root set is read from
 the model, not prescribed or minimized automatically. A caller can repeat searches
 with smaller bounds while retaining the same proof-size and premise limits.
+
+`SearchLimits::max_finop_arity` is independent of `max_premises`: elimination
+consumes one proof premise even when the conjunction contains many operands. A
+single elimination rule selects any immediate operand; nested projection needs
+multiple steps. Empty conjunctions have no eliminations. Decoding retains the
+first matching operand index as evidence, without separate left/right rules.
+
+Search uses `ExprDatatype::with_max_finop_arity`, whose capacity-indexed cons-list
+sorts structurally bound every `Finite` application (Plus, Times, And, Or) at any
+expression depth. Oversized input formulas produce an explicit encoding error;
+symbolic terms cannot evade the bound in nested expressions. Matrix cells,
+sequence elements, and quantifier premises keep their separate list sorts.
+`ExprDatatype::new` remains available for unbounded structural encoding, while
+the complete proof-rule constraint builder requires a bounded codec.
+
+Generated formulas remain arbitrary expressions. No expression-height bound or
+relevant-formula restriction is imposed. Existing context parameters are registered
+for decoding new predicates even when absent from input facts. Every decoded
+inference conclusion is checked by the central formula analyzer. A structurally
+satisfiable query can therefore return `InvalidModel` for an ill-typed or otherwise
+unsupported generated term, even if another valid model exists. There is no
+model-blocking/retry loop, and this outcome is not a bounded non-derivability result.
 
 The query uses `smt_dt::ProofDatatype` fragments for bounded structure and local
 rule constraints. Models are checked against the assertions, and dependencies are

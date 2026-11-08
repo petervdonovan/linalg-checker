@@ -112,10 +112,14 @@ pub(super) struct Schema {
     pub expr: DatatypeSort,
     pub ty: DatatypeSort,
     pub list: DatatypeSort,
+    pub finite_lists: Vec<DatatypeSort>,
 }
 impl Schema {
-    pub fn new(ns: &str) -> Self {
-        let mut sorts = create_datatypes(vec![
+    pub fn new(ns: &str, max_finop_arity: Option<usize>) -> Self {
+        let finite_list = max_finop_arity
+            .map(|k| format!("FinopArgs{k}"))
+            .unwrap_or_else(|| "ExprList".into());
+        let mut definitions = vec![
             builder(
                 ns,
                 "Natural",
@@ -164,7 +168,7 @@ impl Schema {
                     ),
                     (
                         "Finite",
-                        &[("operator", "Finop"), ("arguments", "ExprList")],
+                        &[("operator", "Finop"), ("arguments", &finite_list)],
                     ),
                     (
                         "Compare",
@@ -226,8 +230,22 @@ impl Schema {
                     ("ExprCons", &[("head", "Expr"), ("tail", "ExprList")]),
                 ],
             ),
-        ])
-        .into_iter();
+        ];
+        if let Some(max) = max_finop_arity {
+            for capacity in 0..=max {
+                let sort = format!("FinopArgs{capacity}");
+                let nil = format!("FinopNil{capacity}");
+                let cons = format!("FinopCons{capacity}");
+                let previous = format!("FinopArgs{}", capacity.saturating_sub(1));
+                let mut variants = vec![(nil.as_str(), &[][..])];
+                let fields = [("head", "Expr"), ("tail", previous.as_str())];
+                if capacity > 0 {
+                    variants.push((cons.as_str(), &fields));
+                }
+                definitions.push(builder(ns, &sort, &variants));
+            }
+        }
+        let mut sorts = create_datatypes(definitions).into_iter();
         Self {
             natural: sorts.next().unwrap(),
             positive: sorts.next().unwrap(),
@@ -258,6 +276,7 @@ impl Schema {
             expr: sorts.next().unwrap(),
             ty: sorts.next().unwrap(),
             list: sorts.next().unwrap(),
+            finite_lists: sorts.collect(),
         }
     }
     pub fn natural(&self, n: u64) -> Datatype {

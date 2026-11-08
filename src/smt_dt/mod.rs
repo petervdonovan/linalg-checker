@@ -41,7 +41,7 @@ use schema::{Schema, app, field, tag};
 use std::{collections::HashMap, fmt, hash::Hash};
 use z3::{
     DatatypeSort, Solver, Symbol,
-    ast::{Ast, Datatype},
+    ast::{Ast, Bool, Datatype},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +53,7 @@ pub enum Error {
     UnevaluatedTerm,
     UnknownAtom { kind: &'static str, id: u64 },
     NumericOverflow,
+    ArityLimit { actual: usize, limit: usize },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -63,6 +64,10 @@ impl fmt::Display for Error {
             Self::WrongSort => f.write_str("term has a different datatype sort"),
             Self::UnevaluatedTerm => f.write_str("expected an evaluated constructor term"),
             Self::UnknownAtom { kind, id } => write!(f, "unknown {kind} ID {id} in this codec"),
+            Self::ArityLimit { actual, limit } => write!(
+                f,
+                "finop has {actual} operands, exceeding arity limit {limit}"
+            ),
             Self::NumericOverflow => {
                 f.write_str("datatype numeral does not fit the expression's numeric range")
             }
@@ -114,8 +119,16 @@ pub struct ExprDatatype {
 }
 impl ExprDatatype {
     pub fn new(namespace: &str) -> Self {
+        Self::build(namespace, None)
+    }
+    /// Bound every Finite argument list structurally, at every expression depth.
+    /// Other list-valued constructs keep their independent representations.
+    pub fn with_max_finop_arity(namespace: &str, max: usize) -> Self {
+        Self::build(namespace, Some(max))
+    }
+    fn build(namespace: &str, max_finop_arity: Option<usize>) -> Self {
         Self {
-            schema: Schema::new(namespace),
+            schema: Schema::new(namespace, max_finop_arity),
             variables: Atoms::default(),
             dimensions: Atoms::default(),
         }
@@ -124,9 +137,9 @@ impl ExprDatatype {
         &self.schema.expr
     }
     /// All datatype definitions belonging to this codec, for selector inspection.
-    pub fn datatypes(&self) -> [&DatatypeSort; 11] {
+    pub fn datatypes(&self) -> Vec<&DatatypeSort> {
         let s = &self.schema;
-        [
+        let mut sorts = vec![
             &s.natural,
             &s.positive,
             &s.monop.sort,
@@ -138,7 +151,9 @@ impl ExprDatatype {
             &s.expr,
             &s.ty,
             &s.list,
-        ]
+        ];
+        sorts.extend(&s.finite_lists);
+        sorts
     }
     /// Construct an operator application containing symbolic expression terms.
     pub fn finite(&self, op: Finop, arguments: &[Datatype]) -> Result<Datatype, Error> {
@@ -150,8 +165,74 @@ impl ExprDatatype {
         }
         Ok(self.node(
             "Finite",
-            &[self.schema.finop.encode(op)?, self.list(arguments.to_vec())],
+            &[self.schema.finop.encode(op)?, self.finite_list(arguments)?],
         ))
+    }
+    pub fn max_finop_arity(&self) -> Option<usize> {
+        self.schema.finite_lists.len().checked_sub(1)
+    }
+    fn finite_list(&self, values: &[Datatype]) -> Result<Datatype, Error> {
+        let Some(max) = self.max_finop_arity() else {
+            return Ok(self.list(values.to_vec()));
+        };
+        if values.len() > max {
+            return Err(Error::ArityLimit {
+                actual: values.len(),
+                limit: max,
+            });
+        }
+        let mut capacity = max - values.len();
+        let mut tail = app(
+            &self.schema.finite_lists[capacity],
+            &format!("FinopNil{capacity}"),
+            &[],
+        );
+        for value in values.iter().rev() {
+            capacity += 1;
+            tail = app(
+                &self.schema.finite_lists[capacity],
+                &format!("FinopCons{capacity}"),
+                &[value.clone(), tail],
+            );
+        }
+        Ok(tail)
+    }
+    /// Guarded immediate conjunction operands. Requires a structurally bounded codec.
+    pub fn conjunct_choices(&self, value: &Datatype) -> Result<Vec<(Bool, Datatype)>, Error> {
+        if value.get_sort() != self.schema.expr.sort {
+            return Err(Error::WrongSort);
+        }
+        let max = self.max_finop_arity().ok_or(Error::Unsupported(
+            "and-elimination requires a finite arity bound",
+        ))?;
+        let constructor = self
+            .schema
+            .expr
+            .variants
+            .iter()
+            .find(|v| v.constructor.name().ends_with(".Finite"))
+            .unwrap();
+        let op = constructor.accessors[0]
+            .apply(&[value])
+            .as_datatype()
+            .unwrap();
+        let mut present = Bool::and(&[
+            constructor.tester.apply(&[value]).as_bool().unwrap(),
+            op.eq(self.schema.finop.encode(Finop::And)?),
+        ]);
+        let mut tail = constructor.accessors[1]
+            .apply(&[value])
+            .as_datatype()
+            .unwrap();
+        let mut choices = Vec::new();
+        for capacity in (1..=max).rev() {
+            let cons = &self.schema.finite_lists[capacity].variants[1];
+            present = Bool::and(&[present, cons.tester.apply(&[&tail]).as_bool().unwrap()]);
+            let child = cons.accessors[0].apply(&[&tail]).as_datatype().unwrap();
+            choices.push((present.clone(), child));
+            tail = cons.accessors[1].apply(&[&tail]).as_datatype().unwrap();
+        }
+        Ok(choices)
     }
     /// Datatype naturals shared by expression atoms and proof source indices.
     pub fn natural(&self, n: u64) -> Datatype {
@@ -304,7 +385,11 @@ impl ExprDatatype {
             }
             RawExpr::Finop(op, values) => {
                 let op = self.schema.finop.encode(*op)?;
-                ("Finite", vec![op, self.encode_list(values)?])
+                let encoded = values
+                    .iter()
+                    .map(|v| self.encode(v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                ("Finite", vec![op, self.finite_list(&encoded)?])
             }
             RawExpr::CmpChain(chain) => {
                 if chain.assertions.is_empty() {
@@ -323,10 +408,7 @@ impl ExprDatatype {
                 if clauses.len() == 1 {
                     return Ok(clauses.pop().unwrap());
                 }
-                return Ok(self.node(
-                    "Finite",
-                    &[self.schema.finop.encode(Finop::And)?, self.list(clauses)],
-                ));
+                return self.finite(Finop::And, &clauses);
             }
             RawExpr::LogicChain(chain) => {
                 let [(Logic::Imp, right)] = chain.assertions.as_slice() else {
@@ -449,7 +531,7 @@ impl ExprDatatype {
             ),
             "Finite" => RawExpr::Finop(
                 self.schema.finop.decode(&field(value, 0)?)?,
-                self.decode_list(&field(value, 1)?)?,
+                self.decode_finite_list(&field(value, 1)?)?,
             ),
             "Compare" => RawExpr::CmpChain(CmpChain {
                 start: self.decode(&field(value, 1)?)?,
@@ -508,6 +590,25 @@ impl ExprDatatype {
     }
     fn read_size(&self, value: &Datatype) -> Result<usize, Error> {
         usize::try_from(self.schema.read_natural(value)?).map_err(|_| Error::NumericOverflow)
+    }
+    fn decode_finite_list(&self, value: &Datatype) -> Result<Vec<Expr<()>>, Error> {
+        let Some(mut capacity) = self.max_finop_arity() else {
+            return self.decode_list(value);
+        };
+        let mut tail = value.clone();
+        let mut result = Vec::new();
+        loop {
+            let name = tag(&tail, &self.schema.finite_lists[capacity])?;
+            if name == format!("FinopNil{capacity}") {
+                return Ok(result);
+            }
+            if capacity == 0 || name != format!("FinopCons{capacity}") {
+                return Err(Error::Malformed("invalid bounded finop list"));
+            }
+            result.push(self.decode(&field(&tail, 0)?)?);
+            tail = field(&tail, 1)?;
+            capacity -= 1;
+        }
     }
     fn decode_list(&self, value: &Datatype) -> Result<Vec<Expr<()>>, Error> {
         let mut tail = value.clone();

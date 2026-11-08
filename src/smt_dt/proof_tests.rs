@@ -28,6 +28,12 @@ fn query(
         .collect::<Vec<_>>();
     let solver = Solver::new_for_logic("QF_DT").unwrap();
     solver.assert(
+        expressions
+            .encode(goal)
+            .unwrap()
+            .eq(proofs.conclusion(&root).unwrap()),
+    );
+    solver.assert(
         proofs
             .bounded_structure(&root, &slots, leaves, capacity)
             .unwrap(),
@@ -36,12 +42,6 @@ fn query(
         proofs
             .rule_constraints(expressions, &slots, capacity)
             .unwrap(),
-    );
-    solver.assert(
-        proofs
-            .conclusion(&root)
-            .unwrap()
-            .eq(expressions.encode(goal).unwrap()),
     );
     (solver, root, slots)
 }
@@ -62,7 +62,7 @@ fn conjunction(
 
 #[test]
 fn proof_query_snapshot_is_datatype_only_and_recovers_nested_structure() {
-    let mut e = ExprDatatype::new("tree_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("tree_expr", 3);
     let p = ProofDatatype::new("tree", &e);
     let leaves = ["p", "q", "r"].map(|name| {
         p.established(&e.encode(&atom(name)).unwrap(), 0, &e)
@@ -108,7 +108,7 @@ fn proof_query_snapshot_is_datatype_only_and_recovers_nested_structure() {
 
 #[test]
 fn selector_children_are_guarded_immediate_and_sort_aware() {
-    let mut e = ExprDatatype::new("children_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("children_expr", 3);
     let p = ProofDatatype::new("children", &e);
     let formula = e.encode(&atom("p")).unwrap();
     let other = e.encode(&atom("q")).unwrap();
@@ -116,7 +116,7 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
     let literal = e
         .encode(&Expr::<()>::new(RawExpr::BoolLiteral(true)))
         .unwrap();
-    let mut registry = e.datatypes().to_vec();
+    let mut registry = e.datatypes();
     registry.extend(p.datatypes());
     let solver = Solver::new_for_logic("QF_DT").unwrap();
     solver.assert(selector_child(&registry, &dt(&leaf), &dt(&formula)).unwrap());
@@ -174,7 +174,7 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
         .as_bool(),
         Some(true)
     );
-    let foreign = ExprDatatype::new("foreign_children");
+    let foreign = ExprDatatype::with_max_finop_arity("foreign_children", 3);
     assert!(matches!(
         selector_child(&registry, &dt(&foreign.constant("foreign")), &dt(&leaf)),
         Err(Error::UnregisteredDatatype)
@@ -183,7 +183,7 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
 
 #[test]
 fn local_rule_requires_exact_order_arity_and_nonunused_premises() {
-    let mut e = ExprDatatype::new("local_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("local_expr", 3);
     let p = ProofDatatype::new("local", &e);
     let a = p
         .established(&e.encode(&atom("p")).unwrap(), 0, &e)
@@ -231,7 +231,7 @@ fn local_rule_requires_exact_order_arity_and_nonunused_premises() {
 
 #[test]
 fn bfs_slot_layout_enforces_sentinels_distinctness_coverage_and_reachability() {
-    let mut e = ExprDatatype::new("layout_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("layout_expr", 3);
     let p = ProofDatatype::new("layout", &e);
     let a = p
         .established(&e.encode(&atom("p")).unwrap(), 0, &e)
@@ -308,7 +308,7 @@ fn bfs_slot_layout_enforces_sentinels_distinctness_coverage_and_reachability() {
 
 #[test]
 fn premise_capacity_is_caller_supplied_and_lists_must_terminate() {
-    let mut e = ExprDatatype::new("capacity_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("capacity_expr", 3);
     let p = ProofDatatype::new("capacity", &e);
     let leaves = [("p", 0), ("q", 1), ("r", 2)].map(|(s, index)| {
         p.established(&e.encode(&atom(s)).unwrap(), index, &e)
@@ -408,7 +408,7 @@ fn permutations(values: &[Datatype]) -> Vec<Vec<Datatype>> {
 
 #[test]
 fn bfs_has_exactly_one_slot_assignment_for_each_fixed_ordered_dag() {
-    let mut e = ExprDatatype::new("canonical_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("canonical_expr", 3);
     let p = ProofDatatype::new("canonical", &e);
     let a = p
         .established(&e.encode(&atom("p")).unwrap(), 0, &e)
@@ -474,7 +474,7 @@ fn bfs_has_exactly_one_slot_assignment_for_each_fixed_ordered_dag() {
 
 #[test]
 fn bfs_auxiliaries_are_fresh_for_each_fragment_and_absent_positions_are_guarded() {
-    let mut e = ExprDatatype::new("fragments_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("fragments_expr", 3);
     let p = ProofDatatype::new("fragments", &e);
     let a = p
         .established(&e.encode(&atom("p")).unwrap(), 0, &e)
@@ -551,7 +551,7 @@ fn boolean_cardinality_matches_exhaustive_small_vectors() {
 
 #[test]
 fn assumption_sources_and_established_sources_are_distinct_and_inspected() {
-    let mut e = ExprDatatype::new("identity_expr");
+    let mut e = ExprDatatype::with_max_finop_arity("identity_expr", 3);
     let p = ProofDatatype::new("identity", &e);
     let formula = e.encode(&atom("p")).unwrap();
     let ambient = p
@@ -605,4 +605,54 @@ fn assumption_sources_and_established_sources_are_distinct_and_inspected() {
             ..
         })
     ));
+}
+
+#[test]
+fn single_elimination_rule_selects_any_immediate_conjunct_and_nothing_else() {
+    let mut e = ExprDatatype::with_max_finop_arity("eliminate_expr", 5);
+    let p = ProofDatatype::new("eliminate", &e);
+    let values = ["p", "q", "r", "s", "t"].map(|name| e.encode(&atom(name)).unwrap());
+    let formula = e.finite(Finop::And, &values).unwrap();
+    let premise = p.established(&formula, 0, &e).unwrap();
+    for value in &values {
+        let root = p.constant("projection");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(p.and_elimination(&e, &premise, &root).unwrap());
+        solver.assert(p.conclusion(&root).unwrap().eq(value));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+        assert!(matches!(
+            p.inspect(&model.eval(&root, true).unwrap(), &e),
+            Ok(ProofNode::Inference {
+                rule: ProofRule::AndElimination,
+                ..
+            })
+        ));
+    }
+    for formula in [
+        e.finite(Finop::Or, &values[..2]).unwrap(),
+        e.finite(Finop::And, &[]).unwrap(),
+        values[0].clone(),
+    ] {
+        let premise = p.established(&formula, 1, &e).unwrap();
+        let root = p.constant("not_projection");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(p.and_elimination(&e, &premise, &root).unwrap());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+    let nested = e
+        .finite(
+            Finop::And,
+            &[
+                values[0].clone(),
+                e.finite(Finop::And, &values[1..3]).unwrap(),
+            ],
+        )
+        .unwrap();
+    let premise = p.established(&nested, 2, &e).unwrap();
+    let root = p.constant("nested_projection");
+    let solver = Solver::new_for_logic("QF_DT").unwrap();
+    solver.assert(p.and_elimination(&e, &premise, &root).unwrap());
+    solver.assert(p.conclusion(&root).unwrap().eq(&values[2]));
+    assert_eq!(solver.check(), SatResult::Unsat);
 }
