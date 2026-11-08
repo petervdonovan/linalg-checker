@@ -85,7 +85,7 @@ surface membership statement.
 ## Standalone SMT proof search
 
 `smt_backend::find_proof(context, conclusion, interpreter, limits, timings)` searches
-for conjunction introduction/elimination, disjunction introduction, and implication
+for conjunction and disjunction introduction/elimination, and implication
 introduction over visible
 contextual sources and temporary assumptions. It returns one checked conclusion and a `Derivation` for
 the caller to record explicitly. Every visible nondominated contextual derivation
@@ -139,10 +139,20 @@ but the complete conclusion must be well-typed. Empty disjunctions have no
 introduction applications; singleton and duplicate-operand disjunctions are kept
 structurally. The first matching index is retained for explanations, without
 separate left/right rules or positional choices in the SMT datatype. Nested
-disjunctions require separate introductions. There is no disjunction elimination.
+disjunctions require separate introductions.
+
+Disjunction elimination uses one source proof followed by one case proof per
+immediate disjunct, in operand order. Each case concludes the parent formula.
+Each branch independently discharges its used assumptions matching that disjunct;
+remaining dependencies are unioned with all source dependencies. Cases can be
+vacuous or share proof values. Empty disjunction elimination is not supported.
+A k-way elimination needs k+1 proof-premise capacity but only one inference slot
+beyond its non-leaf children. Temporary assumption capacity is the number of
+slots times max(1, min(finop arity, proof-premise capacity minus one)), with checked
+overflow. Rendering marks discharged assumptions only beneath the relevant case.
 
 The bounded, constructor-guarded `ExprDatatype::finop_choices` traversal is shared
-by conjunction elimination and disjunction introduction. Proofs decode to
+by conjunction elimination and both disjunction rules. Proofs decode to
 `NaturalDeductionProof::DisjunctionIntroduction` and render with display fractions
 and indexed `\lor I` labels. Source identity, scope, discharge, and root-bound
 handling are unchanged.

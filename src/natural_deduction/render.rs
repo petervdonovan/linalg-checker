@@ -19,6 +19,7 @@ impl NaturalDeductionProof {
             Self::ConjunctionIntroduction { .. } => "\\land I",
             Self::ConjunctionElimination { .. } => "\\land E",
             Self::DisjunctionIntroduction { .. } => "\\lor I",
+            Self::DisjunctionElimination { .. } => "\\lor E",
             Self::ExistentialIntroduction { .. } => "\\exists I",
             Self::ExistentialElimination { .. } => "\\text{witness opening}",
             Self::UniversalIntroduction { .. } => "\\forall I",
@@ -38,6 +39,10 @@ impl NaturalDeductionProof {
                 discharged_formulas,
                 ..
             } => discharged_formulas.iter().map(|(id, e)| (*id, e)).collect(),
+            Self::DisjunctionElimination { cases, .. } => cases
+                .iter()
+                .flat_map(|case| case.discharged_formulas.iter().map(|(id, e)| (*id, e)))
+                .collect(),
             _ => vec![],
         }
     }
@@ -72,9 +77,13 @@ impl NaturalDeductionProof {
         legend: &[(AssumptionId, &Expr<()>)],
         ancestors: &BTreeSet<AssumptionId>,
     ) -> String {
-        let own = self.discharged_formulas();
+        let mut own = self.discharged_formulas();
+        let mut seen = BTreeSet::new();
+        own.retain(|(id, _)| seen.insert(*id));
         let mut active = ancestors.clone();
-        active.extend(own.iter().map(|(id, _)| *id));
+        if !matches!(self, Self::DisjunctionElimination { .. }) {
+            active.extend(own.iter().map(|(id, _)| *id));
+        }
         let label = |id: AssumptionId| {
             legend
                 .iter()
@@ -96,21 +105,44 @@ impl NaturalDeductionProof {
             Self::External | Self::ScopedGoal { .. } => return conclusion.as_latex().to_string(),
             _ => (),
         }
-        let numerator = self
-            .inputs()
-            .iter()
-            .map(|input| match input {
-                ProofInput::Context(p) => leaf(&p.expression, p.assumption),
-                ProofInput::Local { conclusion, proof } => {
-                    proof.tree_tex(conclusion, legend, &active)
+        let render_input = |input: &ProofInput, branch_active: &BTreeSet<AssumptionId>| match input
+        {
+            ProofInput::Context(p) => {
+                if let Some(id) = p.assumption
+                    && branch_active.contains(&id)
+                    && let Some(label) = label(id)
+                {
+                    format!("\\left[{}\\right]^{{{label}}}", p.expression.as_latex())
+                } else {
+                    p.expression.as_latex().to_string()
                 }
-            })
-            .collect::<Vec<_>>()
-            .join(" \\qquad ");
+            }
+            ProofInput::Local { conclusion, proof } => {
+                proof.tree_tex(conclusion, legend, branch_active)
+            }
+        };
+        let numerator = if let Self::DisjunctionElimination { disjunction, cases } = self {
+            std::iter::once(render_input(disjunction, &active))
+                .chain(cases.iter().map(|case| {
+                    let mut branch_active = active.clone();
+                    branch_active.extend(&case.discharged);
+                    render_input(&case.premise, &branch_active)
+                }))
+                .collect::<Vec<_>>()
+                .join(" \\qquad ")
+        } else {
+            self.inputs()
+                .iter()
+                .map(|input| render_input(input, &active))
+                .collect::<Vec<_>>()
+                .join(" \\qquad ")
+        };
         let suffix = match self {
             Self::ConjunctionElimination { operand, .. }
             | Self::DisjunctionIntroduction { operand, .. } => format!("_{{{}}}", operand + 1),
-            Self::ImplicationIntroduction { .. } | Self::UniversalIntroduction { .. }
+            Self::ImplicationIntroduction { .. }
+            | Self::UniversalIntroduction { .. }
+            | Self::DisjunctionElimination { .. }
                 if !own.is_empty() =>
             {
                 format!(
@@ -208,6 +240,31 @@ impl NaturalDeductionProof {
                                 ""
                             }
                         )
+                    }
+                    Self::DisjunctionElimination { disjunction, cases } => {
+                        let RawExpr::Finop(Finop::Or, operands) = &disjunction.conclusion().raw
+                        else {
+                            unreachable!("checked disjunction elimination")
+                        };
+                        cases
+                            .iter()
+                            .zip(operands)
+                            .enumerate()
+                            .map(|(i, (case, operand))| {
+                                format!(
+                                    "- Case {} (${}$): discharged {} assumption(s){}.",
+                                    i + 1,
+                                    operand.as_latex(),
+                                    case.discharged.len(),
+                                    if case.discharged.is_empty() {
+                                        " (vacuous discharge)"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     }
                     Self::ConjunctionIntroduction { .. } => {
                         "Combined the established conjuncts.".to_owned()

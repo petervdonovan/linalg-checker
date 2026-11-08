@@ -742,3 +742,174 @@ Goal: $p$
 Limits: 2 rule slots, 1 premises per inference, finop arity 3, unbounded root dependencies.
 
 no proof within encoding and budget (2 rule slots, 1 premises, finop arity 3, root dependencies unbounded)
+
+# Binary disjunction case analysis
+
+Context:
+
+- $p \lor q$
+
+Goal: $q \lor p$
+
+Limits: 3 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \lor q$.
+
+- Case 1 ($p$): discharged 1 assumption(s).
+- Case 2 ($q$): discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+- $a_{2}$: $q$
+
+Supporting facts:
+
+- $p \lor q$
+
+Proof tree:
+
+$$
+\dfrac{p \lor q \qquad \dfrac{\left[p\right]^{a_{1}}}{q \lor p}\;(\lor I_{2}) \qquad \dfrac{\left[q\right]^{a_{2}}}{q \lor p}\;(\lor I_{1})}{q \lor p}\;(\lor E\,[a_{1},a_{2}])
+$$
+
+# Ternary disjunction case analysis
+
+Context:
+
+- $p \lor q \lor r$
+
+Goal: $r \lor q \lor p$
+
+Limits: 4 rule slots, 4 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \lor q \lor r$.
+
+- Case 1 ($p$): discharged 1 assumption(s).
+- Case 2 ($q$): discharged 1 assumption(s).
+- Case 3 ($r$): discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+- $a_{2}$: $q$
+- $a_{3}$: $r$
+
+Supporting facts:
+
+- $p \lor q \lor r$
+
+Proof tree:
+
+$$
+\dfrac{p \lor q \lor r \qquad \dfrac{\left[p\right]^{a_{1}}}{r \lor q \lor p}\;(\lor I_{3}) \qquad \dfrac{\left[q\right]^{a_{2}}}{r \lor q \lor p}\;(\lor I_{2}) \qquad \dfrac{\left[r\right]^{a_{3}}}{r \lor q \lor p}\;(\lor I_{1})}{r \lor q \lor p}\;(\lor E\,[a_{1},a_{2},a_{3}])
+$$
+
+# Nested case analysis
+
+Context:
+
+- $p \lor q \lor p$
+
+Goal: $p \lor q$
+
+Limits: 4 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \lor q \lor p$.
+
+- Case 1 ($p$): discharged 1 assumption(s).
+- Case 2 ($q \lor p$): discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+- $a_{2}$: $q \lor p$
+- $a_{3}$: $q$
+
+Supporting facts:
+
+- $p \lor q \lor p$
+
+Proof tree:
+
+$$
+\dfrac{p \lor q \lor p \qquad \dfrac{\left[p\right]^{a_{1}}}{p \lor q}\;(\lor I_{1}) \qquad \dfrac{\left[q \lor p\right]^{a_{2}} \qquad \dfrac{\left[q\right]^{a_{3}}}{p \lor q}\;(\lor I_{2}) \qquad \dfrac{\left[p\right]^{a_{1}}}{p \lor q}\;(\lor I_{1})}{p \lor q}\;(\lor E\,[a_{3},a_{1}])}{p \lor q}\;(\lor E\,[a_{1},a_{2}])
+$$
+
+# Shared case proof
+
+Context:
+
+- $p \lor p$
+
+Goal: $p$
+
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \lor p$.
+
+- Case 1 ($p$): discharged 1 assumption(s).
+- Case 2 ($p$): discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Supporting facts:
+
+- $p \lor p$
+
+Proof tree:
+
+$$
+\dfrac{p \lor p \qquad \left[p\right]^{a_{1}} \qquad \left[p\right]^{a_{1}}}{p}\;(\lor E\,[a_{1}])
+$$
+
+# Vacuous case discharge
+
+Context:
+
+- $p \lor q$
+- $r$
+
+Goal: $r$
+
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (2): $p \lor q$, $r$.
+
+- Case 1 ($p$): discharged 0 assumption(s) (vacuous discharge).
+- Case 2 ($q$): discharged 0 assumption(s) (vacuous discharge).
+
+Supporting facts:
+
+- $p \lor q$
+- $r$
+
+Proof tree:
+
+$$
+\dfrac{p \lor q \qquad r \qquad r}{r}\;(\lor E)
+$$
+
+# Case analysis retains source dependencies
+
+Context:
+
+- $p \lor p$
+
+Goal: $p$
+
+Limits: 1 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
+
+no proof within encoding and budget (1 rule slots, 3 premises, finop arity 3, root dependencies 0)

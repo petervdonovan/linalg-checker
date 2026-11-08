@@ -49,6 +49,14 @@ pub enum ReuseKind {
     Resolved,
     Elaborated,
 }
+/// One branch of disjunction elimination; discharge applies only to this branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisjunctionCase {
+    pub premise: ProofInput,
+    pub discharged: BTreeSet<AssumptionId>,
+    pub discharged_formulas: BTreeMap<AssumptionId, Expr<()>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NaturalDeductionProof {
     Assumption {
@@ -77,6 +85,10 @@ pub enum NaturalDeductionProof {
         premise: ProofInput,
         /// Zero-based first matching immediate disjunct, retained as evidence.
         operand: usize,
+    },
+    DisjunctionElimination {
+        disjunction: ProofInput,
+        cases: Vec<DisjunctionCase>,
     },
     ExistentialIntroduction {
         premises: Vec<ProofInput>,

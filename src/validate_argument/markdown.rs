@@ -468,6 +468,7 @@ fn validation_details(
             Proof::ConjunctionIntroduction { .. } => "✅ verified by conjunction introduction",
             Proof::ConjunctionElimination { .. } => "✅ verified by conjunction elimination",
             Proof::DisjunctionIntroduction { .. } => "✅ verified by disjunction introduction",
+            Proof::DisjunctionElimination { .. } => "✅ verified by disjunction elimination",
             Proof::UniversalElimination { .. } => "✅ verified by universal elimination",
             Proof::UniversalIntroduction { .. } => "✅ verified by universal introduction",
             Proof::ImplicationIntroduction { .. } => "✅ verified by implication introduction",

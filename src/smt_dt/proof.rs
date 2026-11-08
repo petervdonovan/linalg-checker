@@ -40,6 +40,7 @@ pub enum ProofRule {
     AndIntroduction,
     AndElimination,
     OrIntroduction,
+    OrElimination,
     ImplicationIntroduction,
 }
 
@@ -179,6 +180,7 @@ impl ProofDatatype {
                 .variant(&format!("{namespace}.AndIntroduction"), vec![])
                 .variant(&format!("{namespace}.AndElimination"), vec![])
                 .variant(&format!("{namespace}.OrIntroduction"), vec![])
+                .variant(&format!("{namespace}.OrElimination"), vec![])
                 .variant(&format!("{namespace}.ImplicationIntroduction"), vec![]),
             DatatypeBuilder::new(assumption_name)
                 .variant(
@@ -297,6 +299,7 @@ impl ProofDatatype {
             ProofRule::AndIntroduction => app(&self.rule, "AndIntroduction", &[]),
             ProofRule::AndElimination => app(&self.rule, "AndElimination", &[]),
             ProofRule::OrIntroduction => app(&self.rule, "OrIntroduction", &[]),
+            ProofRule::OrElimination => app(&self.rule, "OrElimination", &[]),
             ProofRule::ImplicationIntroduction => app(&self.rule, "ImplicationIntroduction", &[]),
         };
         Ok(app(
@@ -352,6 +355,7 @@ impl ProofDatatype {
                     "AndIntroduction" => ProofRule::AndIntroduction,
                     "AndElimination" => ProofRule::AndElimination,
                     "OrIntroduction" => ProofRule::OrIntroduction,
+                    "OrElimination" => ProofRule::OrElimination,
                     "ImplicationIntroduction" => ProofRule::ImplicationIntroduction,
                     _ => return Err(Error::Malformed("unknown proof rule")),
                 };
@@ -466,6 +470,44 @@ impl ProofDatatype {
                 std::slice::from_ref(premise),
             )?),
         ]))
+    }
+    /// Case analysis over every immediate disjunct, in operand order.
+    pub fn or_elimination(
+        &self,
+        expressions: &ExprDatatype,
+        disjunction: &Datatype,
+        cases: &[Datatype],
+        parent: &Datatype,
+    ) -> Result<Bool, Error> {
+        self.check(parent)?;
+        if cases.is_empty() {
+            return Err(Error::Malformed("disjunction elimination requires cases"));
+        }
+        if expressions
+            .max_finop_arity()
+            .is_some_and(|max| cases.len() > max)
+        {
+            return Ok(Bool::from_bool(false));
+        }
+        let conclusion = self.conclusion(parent)?;
+        let operands = expressions.finop_choices(&self.conclusion(disjunction)?, Finop::Or)?;
+        let mut guards = vec![self.is_unused(disjunction)?.not()];
+        for (index, (present, _)) in operands.iter().enumerate() {
+            guards.push(if index < cases.len() {
+                present.clone()
+            } else {
+                present.not()
+            });
+        }
+        for case in cases {
+            guards.push(self.is_unused(case)?.not());
+            guards.push(self.conclusion(case)?.eq(&conclusion));
+        }
+        let premises = std::iter::once(disjunction.clone())
+            .chain(cases.iter().cloned())
+            .collect::<Vec<_>>();
+        guards.push(parent.eq(self.inference(&conclusion, ProofRule::OrElimination, &premises)?));
+        Ok(Bool::and(&guards))
     }
     pub fn implication_introduction(
         &self,
@@ -659,6 +701,14 @@ impl ProofDatatype {
             let mut rules = Vec::new();
             for (shape, premises) in self.premise_cases(slot, max_premises)? {
                 let mut applications = vec![self.and_introduction(expressions, &premises, slot)?];
+                if premises.len() >= 2 {
+                    applications.push(self.or_elimination(
+                        expressions,
+                        &premises[0],
+                        &premises[1..],
+                        slot,
+                    )?);
+                }
                 if premises.len() == 1 {
                     applications.push(self.and_elimination(expressions, &premises[0], slot)?);
                     applications.push(self.or_introduction(expressions, &premises[0], slot)?);

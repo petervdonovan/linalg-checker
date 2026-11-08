@@ -41,6 +41,9 @@ impl NaturalDeductionProof {
             Self::ConjunctionIntroduction { premises }
             | Self::ExistentialIntroduction { premises, .. } => premises.iter().collect(),
             Self::ExistentialElimination { source, .. } => vec![source],
+            Self::DisjunctionElimination { disjunction, cases } => std::iter::once(disjunction)
+                .chain(cases.iter().map(|case| &case.premise))
+                .collect(),
             Self::UniversalElimination {
                 source, premises, ..
             } => std::iter::once(source).chain(premises).collect(),

@@ -735,3 +735,56 @@ fn single_disjunction_rule_uses_any_immediate_operand_with_one_proof_premise() {
         Err(Error::WrongSort)
     ));
 }
+
+#[test]
+fn disjunction_elimination_requires_exact_nonempty_cases_and_common_conclusion() {
+    let mut e = ExprDatatype::with_max_finop_arity("cases_expr", 3);
+    let p = ProofDatatype::new("cases", &e);
+    let values = ["p", "q", "r"].map(|name| e.encode(&atom(name)).unwrap());
+    let case = p.established(&values[2], 0, &e).unwrap();
+    for (operator, count, case_count, valid) in [
+        (Finop::Or, 1, 1, true),
+        (Finop::Or, 2, 2, true),
+        (Finop::Or, 3, 3, true),
+        (Finop::Or, 0, 1, false),
+        (Finop::Or, 2, 1, false),
+        (Finop::Or, 1, 2, false),
+        (Finop::And, 2, 2, false),
+    ] {
+        let formula = e.finite(operator, &values[..count]).unwrap();
+        let source = p.established(&formula, 1, &e).unwrap();
+        let root = p.constant("case_root");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(
+            p.or_elimination(&e, &source, &vec![case.clone(); case_count], &root)
+                .unwrap(),
+        );
+        assert_eq!(
+            solver.check(),
+            if valid {
+                SatResult::Sat
+            } else {
+                SatResult::Unsat
+            }
+        );
+    }
+    let source = p
+        .established(&e.finite(Finop::Or, &values[..2]).unwrap(), 1, &e)
+        .unwrap();
+    let root = p.constant("case_bad");
+    assert!(p.or_elimination(&e, &source, &[], &root).is_err());
+    for cases in [
+        vec![case.clone(), p.unused()],
+        vec![case.clone(), p.established(&values[0], 2, &e).unwrap()],
+    ] {
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(p.or_elimination(&e, &source, &cases, &root).unwrap());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+    let solver = Solver::new_for_logic("QF_DT").unwrap();
+    solver.assert(
+        p.or_elimination(&e, &p.unused(), &[case.clone(), case], &root)
+            .unwrap(),
+    );
+    assert_eq!(solver.check(), SatResult::Unsat);
+}

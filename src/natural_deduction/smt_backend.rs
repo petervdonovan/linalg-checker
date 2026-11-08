@@ -1,4 +1,4 @@
-//! Standalone bounded conjunction introduction/elimination, disjunction introduction,
+//! Standalone bounded conjunction and disjunction introduction/elimination,
 //! and implication introduction with exact
 //! assumption dependencies. The budget counts distinct
 //! reachable non-leaf proof values, numbered in canonical BFS order. Context facts
@@ -156,6 +156,17 @@ impl<'a> Query<'a> {
                 "zero timeout means unlimited in Z3; use None",
             ));
         }
+        let temporary_count = limits
+            .max_rule_slots
+            .checked_mul(
+                limits
+                    .max_finop_arity
+                    .min(limits.max_premises.saturating_sub(1))
+                    .max(1),
+            )
+            .ok_or(SearchError::InvalidOptions(
+                "temporary assumption capacity overflow",
+            ))?;
         let checked = interpreter
             .check(context, conclusion)
             .map_err(SearchError::InvalidConclusion)?;
@@ -228,7 +239,7 @@ impl<'a> Query<'a> {
                 });
             }
         }
-        for i in 0..limits.max_rule_slots {
+        for i in 0..temporary_count {
             let formula = expressions.constant(format!("{namespace}.temporary_formula_{i}"));
             assumption_formulas.push(formula.clone());
             let source = AssumptionRef::Temporary(i as u64);
@@ -329,6 +340,30 @@ impl<'a> Query<'a> {
                         .collect::<Result<Vec<_>, _>>()?;
                     constraints
                         .push(and_case.implies(self.dependencies[i][a].eq(Bool::or(&child_bits))));
+                }
+                if premises.len() >= 2 {
+                    let case = Bool::and(&[
+                        shape.clone(),
+                        self.proofs.or_elimination(
+                            &self.expressions,
+                            &premises[0],
+                            &premises[1..],
+                            slot,
+                        )?,
+                    ]);
+                    let operands = self
+                        .expressions
+                        .finop_choices(&self.proofs.conclusion(&premises[0])?, Finop::Or)?;
+                    for (a, formula) in self.assumption_formulas.iter().enumerate() {
+                        let mut bits = vec![self.dependency(&premises[0], a)?];
+                        for (premise, (_, operand)) in premises[1..].iter().zip(&operands) {
+                            bits.push(Bool::and(&[
+                                self.dependency(premise, a)?,
+                                formula.eq(operand).not(),
+                            ]));
+                        }
+                        constraints.push(case.implies(self.dependencies[i][a].eq(Bool::or(&bits))));
+                    }
                 }
                 if premises.len() == 1 {
                     let copy_case = Bool::and(&[
@@ -613,6 +648,52 @@ impl<'a, 'c> Decoder<'a, 'c> {
                             premise: inputs.remove(0),
                             operand,
                         }
+                    }
+                    ProofRule::OrElimination => {
+                        let disjunction = inputs.remove(0);
+                        let RawExpr::Finop(Finop::Or, operands) = &disjunction.conclusion().raw
+                        else {
+                            return Err(SearchError::InvalidModel(
+                                "disjunction premise expected".into(),
+                            ));
+                        };
+                        if operands.is_empty()
+                            || operands.len() != inputs.len()
+                            || inputs.iter().any(|p| p.conclusion() != &meaning)
+                        {
+                            return Err(SearchError::InvalidModel(
+                                "disjunction cases do not match operands and conclusion".into(),
+                            ));
+                        }
+                        dependencies = child_sets[0].clone();
+                        let mut cases = Vec::new();
+                        for ((premise, set), operand) in
+                            inputs.into_iter().zip(&child_sets[1..]).zip(operands)
+                        {
+                            let mut discharged = BTreeSet::new();
+                            let mut discharged_formulas = BTreeMap::new();
+                            for &a in set {
+                                let formula = self.evaluate(&self.query.assumption_formulas[a])?;
+                                let formula = self
+                                    .query
+                                    .expressions
+                                    .decode(&formula)
+                                    .map_err(model_error)?;
+                                if &formula == operand {
+                                    let id = self.assumption_id(a);
+                                    discharged.insert(id);
+                                    discharged_formulas.insert(id, formula);
+                                } else {
+                                    dependencies.insert(a);
+                                }
+                            }
+                            cases.push(DisjunctionCase {
+                                premise,
+                                discharged,
+                                discharged_formulas,
+                            });
+                        }
+                        NaturalDeductionProof::DisjunctionElimination { disjunction, cases }
                     }
                     ProofRule::ImplicationIntroduction => {
                         if inputs.len() != 1 {
