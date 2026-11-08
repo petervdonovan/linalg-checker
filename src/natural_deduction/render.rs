@@ -40,51 +40,81 @@ impl NaturalDeductionProof {
             _ => vec![],
         }
     }
+    /// Stable preorder labels for this local proof, never archived derivations.
+    fn all_discharged(&self) -> Vec<(AssumptionId, &Expr<()>)> {
+        fn visit<'a>(
+            proof: &'a NaturalDeductionProof,
+            result: &mut Vec<(AssumptionId, &'a Expr<()>)>,
+        ) {
+            for (id, formula) in proof.discharged_formulas() {
+                if !result.iter().any(|(old, _)| *old == id) {
+                    result.push((id, formula));
+                }
+            }
+            for input in proof.inputs() {
+                if let ProofInput::Local { proof, .. } = input {
+                    visit(proof, result);
+                }
+            }
+        }
+        let mut result = Vec::new();
+        visit(self, &mut result);
+        result
+    }
     /// A math-mode fragment showing this step only. Context facts are leaves.
     pub fn to_tex(&self, conclusion: &Expr<()>) -> String {
-        self.tree_tex(conclusion, &self.inference().discharged_formulas())
+        self.tree_tex(conclusion, &self.all_discharged(), &BTreeSet::new())
     }
-    fn tree_tex(&self, conclusion: &Expr<()>, discharge: &[(AssumptionId, &Expr<()>)]) -> String {
-        if matches!(
-            self,
-            Self::Assumption { .. } | Self::External | Self::ScopedGoal { .. }
-        ) {
-            return conclusion.as_latex().to_string();
+    fn tree_tex(
+        &self,
+        conclusion: &Expr<()>,
+        legend: &[(AssumptionId, &Expr<()>)],
+        ancestors: &BTreeSet<AssumptionId>,
+    ) -> String {
+        let own = self.discharged_formulas();
+        let mut active = ancestors.clone();
+        active.extend(own.iter().map(|(id, _)| *id));
+        let label = |id: AssumptionId| {
+            legend
+                .iter()
+                .position(|(a, _)| *a == id)
+                .map(|i| format!("a_{{{}}}", i + 1))
+        };
+        let leaf = |formula: &Expr<()>, id: Option<AssumptionId>| {
+            if let Some(id) = id
+                && active.contains(&id)
+                && let Some(label) = label(id)
+            {
+                format!("\\left[{}\\right]^{{{label}}}", formula.as_latex())
+            } else {
+                formula.as_latex().to_string()
+            }
+        };
+        match self {
+            Self::Assumption { assumption } => return leaf(conclusion, Some(*assumption)),
+            Self::External | Self::ScopedGoal { .. } => return conclusion.as_latex().to_string(),
+            _ => (),
         }
         let numerator = self
             .inputs()
             .iter()
             .map(|input| match input {
-                ProofInput::Context(p) => {
-                    let labels = discharge
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (id, _))| Some(*id) == p.assumption)
-                        .map(|(i, _)| format!("a_{{{}}}", i + 1))
-                        .collect::<Vec<_>>();
-                    if labels.is_empty() {
-                        p.expression.as_latex().to_string()
-                    } else {
-                        format!(
-                            "\\left[{}\\right]^{{{}}}",
-                            p.expression.as_latex(),
-                            labels.join(",")
-                        )
-                    }
+                ProofInput::Context(p) => leaf(&p.expression, p.assumption),
+                ProofInput::Local { conclusion, proof } => {
+                    proof.tree_tex(conclusion, legend, &active)
                 }
-                ProofInput::Local { conclusion, proof } => proof.tree_tex(conclusion, discharge),
             })
             .collect::<Vec<_>>()
             .join(" \\qquad ");
         let suffix = match self {
             Self::ConjunctionElimination { operand, .. } => format!("_{{{}}}", operand + 1),
             Self::ImplicationIntroduction { .. } | Self::UniversalIntroduction { .. }
-                if !discharge.is_empty() =>
+                if !own.is_empty() =>
             {
                 format!(
                     "\\,[{}]",
-                    (1..=discharge.len())
-                        .map(|i| format!("a_{{{i}}}"))
+                    own.iter()
+                        .filter_map(|(id, _)| label(*id))
                         .collect::<Vec<_>>()
                         .join(",")
                 )
@@ -167,7 +197,15 @@ impl NaturalDeductionProof {
                             .join("\n")
                     ),
                     Self::ImplicationIntroduction { discharged, .. } => {
-                        format!("Discharged {} assumption(s).", discharged.len())
+                        format!(
+                            "Discharged {} assumption(s){}.",
+                            discharged.len(),
+                            if self.all_discharged().len() > discharged.len() {
+                                " at the final inference"
+                            } else {
+                                ""
+                            }
+                        )
                     }
                     Self::ConjunctionIntroduction { .. } => {
                         "Combined the established conjuncts.".to_owned()
@@ -177,7 +215,7 @@ impl NaturalDeductionProof {
                     }
                     _ => String::new(),
                 };
-                let discharged = inference.discharged_formulas();
+                let discharged = self.all_discharged();
                 if !discharged.is_empty() {
                     text.push_str("\n\nDischarged assumptions:\n\n");
                     text.push_str(
@@ -189,7 +227,9 @@ impl NaturalDeductionProof {
                             .join("\n"),
                     );
                 }
-                text.push_str(&format!("\n\nSupporting facts:\n\n{}", bullets(&facts)));
+                if !facts.is_empty() {
+                    text.push_str(&format!("\n\nSupporting facts:\n\n{}", bullets(&facts)));
+                }
                 text
             }
         };

@@ -64,7 +64,10 @@ fn conjunction(
 fn proof_query_snapshot_is_datatype_only_and_recovers_nested_structure() {
     let mut e = ExprDatatype::new("tree_expr");
     let p = ProofDatatype::new("tree", &e);
-    let leaves = ["p", "q", "r"].map(|name| p.context(&e.encode(&atom(name)).unwrap()).unwrap());
+    let leaves = ["p", "q", "r"].map(|name| {
+        p.established(&e.encode(&atom(name)).unwrap(), 0, &e)
+            .unwrap()
+    });
     let goal = and(vec![atom("p"), and(vec![atom("q"), atom("r")])]);
     let capacity = 3;
     let (solver, root, _) = query(&mut e, &p, &leaves, &goal, 2, capacity);
@@ -89,7 +92,7 @@ fn proof_query_snapshot_is_datatype_only_and_recovers_nested_structure() {
         conclusion,
         premises,
         rule,
-    } = p.inspect(&value).unwrap()
+    } = p.inspect(&value, &e).unwrap()
     else {
         panic!()
     };
@@ -98,7 +101,7 @@ fn proof_query_snapshot_is_datatype_only_and_recovers_nested_structure() {
     let children = p.read_premises(&premises, capacity).unwrap();
     assert_eq!(children[0], leaves[0]);
     assert!(matches!(
-        p.inspect(&children[1]),
+        p.inspect(&children[1], &e),
         Ok(ProofNode::Inference { .. })
     ));
 }
@@ -109,7 +112,7 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
     let p = ProofDatatype::new("children", &e);
     let formula = e.encode(&atom("p")).unwrap();
     let other = e.encode(&atom("q")).unwrap();
-    let leaf = p.context(&formula).unwrap();
+    let leaf = p.established(&formula, 0, &e).unwrap();
     let literal = e
         .encode(&Expr::<()>::new(RawExpr::BoolLiteral(true)))
         .unwrap();
@@ -121,14 +124,14 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
     solver.push();
     // The selector of the wrong constructor may equal anything. It must not
     // manufacture a child edge from Context(p) to q.
-    let wrong_selector = p.sort().variants[2].accessors[0].apply(&[&leaf]);
+    let wrong_selector = p.sort().variants[3].accessors[0].apply(&[&leaf]);
     solver.assert(wrong_selector.eq(dt(&other)));
     assert_eq!(solver.check(), SatResult::Sat);
     solver.assert(selector_child(&registry, &dt(&leaf), &dt(&other)).unwrap());
     assert_eq!(solver.check(), SatResult::Unsat);
     solver.pop(1);
     let node = conjunction(&p, &e, &[leaf.clone(), leaf.clone()]);
-    let ProofNode::Inference { premises, .. } = p.inspect(&node).unwrap() else {
+    let ProofNode::Inference { premises, .. } = p.inspect(&node, &e).unwrap() else {
         panic!()
     };
     assert_eq!(
@@ -182,8 +185,12 @@ fn selector_children_are_guarded_immediate_and_sort_aware() {
 fn local_rule_requires_exact_order_arity_and_nonunused_premises() {
     let mut e = ExprDatatype::new("local_expr");
     let p = ProofDatatype::new("local", &e);
-    let a = p.context(&e.encode(&atom("p")).unwrap()).unwrap();
-    let b = p.context(&e.encode(&atom("q")).unwrap()).unwrap();
+    let a = p
+        .established(&e.encode(&atom("p")).unwrap(), 0, &e)
+        .unwrap();
+    let b = p
+        .established(&e.encode(&atom("q")).unwrap(), 1, &e)
+        .unwrap();
     let parent = conjunction(&p, &e, &[a.clone(), b.clone()]);
     let solver = Solver::new_for_logic("QF_DT").unwrap();
     solver.assert(
@@ -212,7 +219,10 @@ fn local_rule_requires_exact_order_arity_and_nonunused_premises() {
     let unary = conjunction(&p, &e, std::slice::from_ref(&a));
     solver.assert(p.and_introduction(&e, &[a], &unary).unwrap());
     assert_eq!(solver.check(), SatResult::Sat);
-    assert!(matches!(p.context(&parent), Err(Error::WrongSort)));
+    assert!(matches!(
+        p.established(&parent, 0, &e),
+        Err(Error::WrongSort)
+    ));
     assert!(matches!(
         p.and_introduction(&e, &[b], &e.constant("not_proof")),
         Err(Error::WrongSort)
@@ -223,8 +233,12 @@ fn local_rule_requires_exact_order_arity_and_nonunused_premises() {
 fn bfs_slot_layout_enforces_sentinels_distinctness_coverage_and_reachability() {
     let mut e = ExprDatatype::new("layout_expr");
     let p = ProofDatatype::new("layout", &e);
-    let a = p.context(&e.encode(&atom("p")).unwrap()).unwrap();
-    let b = p.context(&e.encode(&atom("q")).unwrap()).unwrap();
+    let a = p
+        .established(&e.encode(&atom("p")).unwrap(), 0, &e)
+        .unwrap();
+    let b = p
+        .established(&e.encode(&atom("q")).unwrap(), 1, &e)
+        .unwrap();
     let c = conjunction(&p, &e, &[a.clone(), b.clone()]);
     let d = conjunction(&p, &e, &[c.clone(), a.clone()]);
     let nonadjacent = conjunction(&p, &e, &[a.clone(), c.clone()]);
@@ -296,7 +310,10 @@ fn bfs_slot_layout_enforces_sentinels_distinctness_coverage_and_reachability() {
 fn premise_capacity_is_caller_supplied_and_lists_must_terminate() {
     let mut e = ExprDatatype::new("capacity_expr");
     let p = ProofDatatype::new("capacity", &e);
-    let leaves = ["p", "q", "r"].map(|s| p.context(&e.encode(&atom(s)).unwrap()).unwrap());
+    let leaves = [("p", 0), ("q", 1), ("r", 2)].map(|(s, index)| {
+        p.established(&e.encode(&atom(s)).unwrap(), index, &e)
+            .unwrap()
+    });
     let goal = and(vec![atom("p"), atom("q"), atom("r")]);
     for (capacity, expected) in [
         (0, SatResult::Unsat),
@@ -310,7 +327,7 @@ fn premise_capacity_is_caller_supplied_and_lists_must_terminate() {
     let (solver, _, _) = query(&mut e, &p, &leaves, &atom("p"), 4, 0);
     assert_eq!(solver.check(), SatResult::Sat);
     let node = conjunction(&p, &e, &leaves);
-    let ProofNode::Inference { premises, .. } = p.inspect(&node).unwrap() else {
+    let ProofNode::Inference { premises, .. } = p.inspect(&node, &e).unwrap() else {
         panic!()
     };
     assert!(matches!(
@@ -319,11 +336,11 @@ fn premise_capacity_is_caller_supplied_and_lists_must_terminate() {
     ));
     assert_eq!(p.read_premises(&premises, 3).unwrap(), leaves);
     assert!(matches!(
-        p.inspect(&p.constant("unevaluated")),
+        p.inspect(&p.constant("unevaluated"), &e),
         Err(Error::UnevaluatedTerm)
     ));
     assert!(matches!(
-        p.inspect(&e.constant("wrong_sort")),
+        p.inspect(&e.constant("wrong_sort"), &e),
         Err(Error::WrongSort)
     ));
     assert!(matches!(
@@ -343,18 +360,27 @@ fn premise_capacity_is_caller_supplied_and_lists_must_terminate() {
 }
 
 /// An independent concrete traversal, with no discovery predicates or SMT indices.
-fn reference_bfs(proofs: &ProofDatatype, root: &Datatype, capacity: usize) -> Vec<Datatype> {
-    if matches!(proofs.inspect(root).unwrap(), ProofNode::Context { .. }) {
+fn reference_bfs(
+    proofs: &ProofDatatype,
+    e: &ExprDatatype,
+    root: &Datatype,
+    capacity: usize,
+) -> Vec<Datatype> {
+    if matches!(
+        proofs.inspect(root, e).unwrap(),
+        ProofNode::Assumption { .. } | ProofNode::Established { .. }
+    ) {
         return vec![];
     }
     let mut queue = vec![root.clone()];
     let mut cursor = 0;
     while cursor < queue.len() {
-        let ProofNode::Inference { premises, .. } = proofs.inspect(&queue[cursor]).unwrap() else {
+        let ProofNode::Inference { premises, .. } = proofs.inspect(&queue[cursor], e).unwrap()
+        else {
             panic!()
         };
         for child in proofs.read_premises(&premises, capacity).unwrap() {
-            match proofs.inspect(&child).unwrap() {
+            match proofs.inspect(&child, e).unwrap() {
                 ProofNode::Inference { .. } if !queue.contains(&child) => queue.push(child),
                 ProofNode::Unused => panic!("invalid reference graph"),
                 _ => (),
@@ -384,8 +410,12 @@ fn permutations(values: &[Datatype]) -> Vec<Vec<Datatype>> {
 fn bfs_has_exactly_one_slot_assignment_for_each_fixed_ordered_dag() {
     let mut e = ExprDatatype::new("canonical_expr");
     let p = ProofDatatype::new("canonical", &e);
-    let a = p.context(&e.encode(&atom("p")).unwrap()).unwrap();
-    let b = p.context(&e.encode(&atom("q")).unwrap()).unwrap();
+    let a = p
+        .established(&e.encode(&atom("p")).unwrap(), 0, &e)
+        .unwrap();
+    let b = p
+        .established(&e.encode(&atom("q")).unwrap(), 1, &e)
+        .unwrap();
     let c = conjunction(&p, &e, &[a.clone(), b.clone()]);
     let other = conjunction(&p, &e, &[b.clone(), a.clone()]);
     let l = conjunction(&p, &e, &[c.clone(), a.clone()]);
@@ -404,7 +434,7 @@ fn bfs_has_exactly_one_slot_assignment_for_each_fixed_ordered_dag() {
         cross_edge,
         diamond,
     ] {
-        let canonical = reference_bfs(&p, &value, 3);
+        let canonical = reference_bfs(&p, &e, &value, 3);
         let solver = Solver::new_for_logic("QF_DT").unwrap();
         let root = p.constant("canonical_root");
         let slots = (0..=canonical.len())
@@ -446,8 +476,12 @@ fn bfs_has_exactly_one_slot_assignment_for_each_fixed_ordered_dag() {
 fn bfs_auxiliaries_are_fresh_for_each_fragment_and_absent_positions_are_guarded() {
     let mut e = ExprDatatype::new("fragments_expr");
     let p = ProofDatatype::new("fragments", &e);
-    let a = p.context(&e.encode(&atom("p")).unwrap()).unwrap();
-    let b = p.context(&e.encode(&atom("q")).unwrap()).unwrap();
+    let a = p
+        .established(&e.encode(&atom("p")).unwrap(), 0, &e)
+        .unwrap();
+    let b = p
+        .established(&e.encode(&atom("q")).unwrap(), 1, &e)
+        .unwrap();
     let c = conjunction(&p, &e, &[a.clone(), b.clone()]);
     let d = conjunction(&p, &e, &[c.clone(), a.clone()]);
     let solver = Solver::new_for_logic("QF_DT").unwrap();
@@ -478,11 +512,97 @@ fn bfs_auxiliaries_are_fresh_for_each_fragment_and_absent_positions_are_guarded(
         p.bounded_structure(&a, &padding, &[a.clone(), b], 3)
             .unwrap(),
     );
-    let ProofNode::Inference { premises, .. } = p.inspect(&conjunction(&p, &e, &[c])).unwrap()
+    let ProofNode::Inference { premises, .. } = p.inspect(&conjunction(&p, &e, &[c]), &e).unwrap()
     else {
         panic!()
     };
-    let inapplicable = p.sort().variants[2].accessors[2].apply(&[&unused]);
+    let inapplicable = p.sort().variants[3].accessors[2].apply(&[&unused]);
     solver.assert(inapplicable.eq(Dynamic::from_ast(&premises)));
     assert_eq!(solver.check(), SatResult::Sat);
+}
+
+#[test]
+fn boolean_cardinality_matches_exhaustive_small_vectors() {
+    for width in 0..=5 {
+        let bits = (0..width)
+            .map(|_| Bool::fresh_const("cardinality_bit"))
+            .collect::<Vec<_>>();
+        for bound in 0..=width + 1 {
+            let solver = Solver::new_for_logic("QF_DT").unwrap();
+            solver.assert(at_most(&bits, bound));
+            for mask in 0u32..(1 << width) {
+                solver.push();
+                for (i, bit) in bits.iter().enumerate() {
+                    solver.assert(bit.eq(Bool::from_bool(mask & (1 << i) != 0)));
+                }
+                assert_eq!(
+                    solver.check(),
+                    if mask.count_ones() as usize <= bound {
+                        SatResult::Sat
+                    } else {
+                        SatResult::Unsat
+                    }
+                );
+                solver.pop(1);
+            }
+        }
+    }
+}
+
+#[test]
+fn assumption_sources_and_established_sources_are_distinct_and_inspected() {
+    let mut e = ExprDatatype::new("identity_expr");
+    let p = ProofDatatype::new("identity", &e);
+    let formula = e.encode(&atom("p")).unwrap();
+    let ambient = p
+        .assumption(&formula, AssumptionRef::Ambient(0), &e)
+        .unwrap();
+    let other = p
+        .assumption(&formula, AssumptionRef::Ambient(1), &e)
+        .unwrap();
+    let temporary = p
+        .assumption(&formula, AssumptionRef::Temporary(0), &e)
+        .unwrap();
+    let established = p.established(&formula, 0, &e).unwrap();
+    let solver = Solver::new_for_logic("QF_DT").unwrap();
+    for (i, a) in [&ambient, &other, &temporary, &established]
+        .iter()
+        .enumerate()
+    {
+        for b in [&ambient, &other, &temporary, &established].iter().take(i) {
+            solver.assert((*a).eq(*b).not());
+        }
+    }
+    assert_eq!(solver.check(), SatResult::Sat);
+    assert!(matches!(
+        p.inspect(&temporary, &e),
+        Ok(ProofNode::Assumption {
+            source: AssumptionRef::Temporary(0),
+            ..
+        })
+    ));
+    assert!(matches!(
+        p.inspect(&other, &e),
+        Ok(ProofNode::Assumption {
+            source: AssumptionRef::Ambient(1),
+            ..
+        })
+    ));
+    assert!(matches!(
+        p.inspect(&established, &e),
+        Ok(ProofNode::Established { source: 0, .. })
+    ));
+    let parent = p.constant("implication_parent");
+    let implication = e.implication(&formula, &formula).unwrap();
+    solver.assert(p.implication_introduction(&e, &temporary, &parent).unwrap());
+    solver.assert(p.conclusion(&parent).unwrap().eq(implication));
+    assert_eq!(solver.check(), SatResult::Sat);
+    let model = solver.get_model().unwrap();
+    assert!(matches!(
+        p.inspect(&model.eval(&parent, true).unwrap(), &e),
+        Ok(ProofNode::Inference {
+            rule: ProofRule::ImplicationIntroduction,
+            ..
+        })
+    ));
 }

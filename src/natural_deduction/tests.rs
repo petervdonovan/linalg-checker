@@ -905,55 +905,85 @@ fn local_rendering_distinguishes_reuse_kinds_and_never_expands_context_proofs() 
 
 #[test]
 fn local_rule_tex_and_details_snapshots() {
+    fn details(
+        context: &ProofContext,
+        conclusion: &Expr<()>,
+        name: &str,
+        records: &mut Vec<crate::timing::Timings>,
+    ) -> String {
+        // Measure deduction only, excluding context setup and rendering.
+        let timing = crate::timing::Timings::new(name, 0);
+        let derivations = {
+            let _total = timing.scope("total_ms");
+            prove(context, conclusion)
+        };
+        records.push(timing);
+        derivations[0].proof.details(conclusion)
+    }
     let mut cases = Vec::new();
+    let mut records = Vec::new();
     let mut c = typed(&[]);
     test_assume(&mut c, expression("1>0"), vec![]);
     test_assume(&mut c, expression("1<2"), vec![]);
-    for tex in [
-        "1>0",
-        r"1>0 \land 1<2",
-        r"\exists x>0, x<2",
-        r"1>0 \implies 1>0",
+    for (name, tex) in [
+        ("Literal reuse", "1>0"),
+        ("Conjunction introduction", r"1>0 \land 1<2"),
+        ("Existential introduction", r"\exists x>0, x<2"),
+        ("Implication introduction", r"1>0 \implies 1>0"),
     ] {
         let conclusion = expression(tex);
-        let proof = &prove(&c, &conclusion)[0].proof;
-        cases.push(proof.details(&conclusion));
+        cases.push(details(&c, &conclusion, name, &mut records));
     }
     let mut c = typed(&[]);
     test_assume(&mut c, expression(r"1>0 \land 1<2"), vec![]);
-    cases.push(
-        prove(&c, &expression("1<2"))[0]
-            .proof
-            .details(&expression("1<2")),
-    );
+    cases.push(details(
+        &c,
+        &expression("1<2"),
+        "Conjunction elimination",
+        &mut records,
+    ));
     let mut c = typed(&["a"]);
     test_assume(&mut c, expression(r"a \in \mathbb{R}"), vec![]);
     test_record_external(&mut c, expression("a=a"), vec![]);
     let conclusion = expression(r"\forall t \in \mathbb{R}, t=t");
-    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    cases.push(details(
+        &c,
+        &conclusion,
+        "Universal introduction",
+        &mut records,
+    ));
     let mut c = typed(&[]);
     test_assume(&mut c, expression(r"\forall t \in \mathbb{R}, t=t"), vec![]);
-    cases.push(
-        prove(&c, &expression("1=1"))[0]
-            .proof
-            .details(&expression("1=1")),
-    );
+    cases.push(details(
+        &c,
+        &expression("1=1"),
+        "Universal elimination",
+        &mut records,
+    ));
     let mut c = typed(&[]);
     test_assume(&mut c, expression(r"\exists t \in \mathbb{R}, t>0"), vec![]);
-    cases.push(
-        prove(&c, &expression("a>0"))[0]
-            .proof
-            .details(&expression("a>0")),
-    );
+    cases.push(details(
+        &c,
+        &expression("a>0"),
+        "Witness opening",
+        &mut records,
+    ));
     let mut c = typed(&["x"]);
     let written = expression("x+0>0");
     let conclusion = expression("x>0");
     let checked = CheckedFormula::from_interpreted(&c, &written, conclusion.clone()).unwrap();
     c.assume(checked, vec![]).unwrap();
-    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    cases.push(details(&c, &conclusion, "Resolved reuse", &mut records));
     let mut c = typed(&["x"]);
     test_assume(&mut c, expression("0<x"), vec![conclusion.clone()]);
-    cases.push(prove(&c, &conclusion)[0].proof.details(&conclusion));
+    cases.push(details(&c, &conclusion, "Elaborated reuse", &mut records));
+    let csv = crate::timing::to_csv(records).expect("failed to serialize local proof timings");
+    std::fs::write(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/natural_deduction/snapshots/local_proofs.timing.csv"),
+        csv,
+    )
+    .expect("failed to write local proof timings");
     expect_test::expect_file!["snapshots/local_proofs.md"].assert_eq(&cases.join("\n\n---\n\n"));
 }
 

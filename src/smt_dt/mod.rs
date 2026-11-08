@@ -27,7 +27,7 @@
 
 mod proof;
 mod schema;
-pub use proof::{ProofDatatype, ProofNode, ProofRule, selector_child};
+pub use proof::{AssumptionRef, ProofDatatype, ProofNode, ProofRule, at_most, selector_child};
 #[cfg(test)]
 mod proof_tests;
 #[cfg(test)]
@@ -152,6 +152,42 @@ impl ExprDatatype {
             "Finite",
             &[self.schema.finop.encode(op)?, self.list(arguments.to_vec())],
         ))
+    }
+    /// Datatype naturals shared by expression atoms and proof source indices.
+    pub fn natural(&self, n: u64) -> Datatype {
+        self.schema.natural(n)
+    }
+    pub fn read_natural(&self, value: &Datatype) -> Result<u64, Error> {
+        self.schema.read_natural(value)
+    }
+    pub fn implication(
+        &self,
+        antecedent: &Datatype,
+        consequent: &Datatype,
+    ) -> Result<Datatype, Error> {
+        if antecedent.get_sort() != self.schema.expr.sort
+            || consequent.get_sort() != self.schema.expr.sort
+        {
+            return Err(Error::WrongSort);
+        }
+        Ok(self.node("Implies", &[antecedent.clone(), consequent.clone()]))
+    }
+    /// Meaningful under a matching implication-constructor constraint.
+    pub fn antecedent(&self, expression: &Datatype) -> Result<Datatype, Error> {
+        if expression.get_sort() != self.schema.expr.sort {
+            return Err(Error::WrongSort);
+        }
+        let constructor = self
+            .schema
+            .expr
+            .variants
+            .iter()
+            .find(|v| v.constructor.name().ends_with(".Implies"))
+            .unwrap();
+        Ok(constructor.accessors[0]
+            .apply(&[expression])
+            .as_datatype()
+            .unwrap())
     }
     pub fn constant(&self, name: impl Into<Symbol>) -> Datatype {
         Datatype::new_const(name, &self.schema.expr.sort)

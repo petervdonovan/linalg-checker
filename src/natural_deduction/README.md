@@ -84,12 +84,21 @@ surface membership statement.
 
 ## Standalone SMT proof search
 
-`smt_backend::find_proof(context, conclusion, interpreter, limits)` searches for
-n-ary conjunction introductions over whole visible contextual facts. It returns
-one checked conclusion and a `Derivation` for the caller to record explicitly.
-Assumptions and accepted external facts (including likely facts) are ordinary
-leaves. The backend does not project conjuncts, consult elaborated alternatives,
-expand archived proofs, or change ordinary argument validation.
+`smt_backend::find_proof(context, conclusion, interpreter, limits, timings)` searches
+for conjunction and implication introductions over visible contextual sources and
+temporary assumptions. It returns one checked conclusion and a `Derivation` for
+the caller to record explicitly. Every visible nondominated contextual derivation
+has its own source identity; equal formulas do not erase assumption identities or
+dependency alternatives. Accepted external facts, including likely facts, remain
+available without propagating verification qualifications.
+
+Ambient assumption leaves carry existing assumption identities; established leaves
+carry contextual derivation references and their recorded dependencies. Temporary
+leaves have query-local identities with symbolic formulas. There are at most as
+many temporary identities as inference slots, each reusable at several leaves.
+Assumptions and established facts consume no slots. The backend does not project
+conjuncts, consult elaborated alternatives, expand archived proofs, or change
+ordinary argument validation.
 
 `SearchLimits` supplies a bound on distinct reachable non-leaf proof values, a
 premise-list capacity, and an optional timeout. Active slots form a distinct
@@ -101,15 +110,45 @@ O(a n²) constraints for n slots and premise capacity a. No node IDs are added.
 Contextual reuse needs zero slots, even at zero premise capacity. Empty
 introductions are not supported, and conjunction order/nesting are preserved.
 
+Each slot and the root have exact Boolean dependency vectors over ambient and
+temporary assumption identities. Conjunction introduction unions premise sets;
+implication introduction removes the used assumptions whose encoded formula
+matches its whole antecedent. Discharge is local to the resulting node, and
+vacuous discharge is permitted. Conjunction antecedents do not implicitly project
+their components. Temporary formulas used by a proof are checked as Boolean in
+the existing typing context; no parameters or context facts are created.
+
+`SearchLimits::max_root_dependencies` bounds the number of true ambient root bits,
+not vector width. `None` is unrestricted, and `Some(0)` requires no remaining open
+assumptions. All temporary root bits are always false. A pure Boolean sequential
+counter implements the bound, retaining QF_DT. The selected root set is read from
+the model, not prescribed or minimized automatically. A caller can repeat searches
+with smaller bounds while retaining the same proof-size and premise limits.
+
 The query uses `smt_dt::ProofDatatype` fragments for bounded structure and local
-rule constraints. Models are evaluated and checked against the query before
-being converted directly into existing local proof evidence. Selected leaf
-references supply dependencies through the same constructor as ordinary rule
-checking, followed by existing scope and witness-discharge bookkeeping. Failure
-within the bounds, timeout, unknown, unsupported syntax, invalid analysis, and
-inconsistent models have distinct errors. No proof is silently admitted.
+rule constraints. Models are checked against the assertions, and dependencies are
+independently replayed while decoding the local proof. Source references and scope
+requirements remain explicit. The returned dependency set exactly matches the
+model: `find_proof` does not apply post-solve witness discharge. Explicit context
+recording retains its existing witness-discharge alternatives. Failure within the
+bounds, timeout, unknown, unsupported syntax, invalid analysis, and inconsistent
+models have distinct errors. No proof is silently admitted.
+
+Nested proof rendering assigns stable local discharge labels, scoped to ancestor
+introductions; sibling branches cannot discharge each other's uses. It continues
+to use display fractions and to omit trivial contextual-reuse trees.
 
 See `snapshots/smt_backend.md` for found proofs and bounded failures, and
-`../smt_dt/snapshots/proof_tree.smt2` for an actual datatype-only query. The generic
+`../smt_dt/snapshots/proof_tree.smt2` for an actual datatype-only query.
+`snapshots/implication_query.smt2` also shows the dependency vectors and root bound. The generic
 `smt_dt::selector_child` helper describes guarded immediate selector edges;
 semantic proof-premise edges additionally traverse the bounded premise list.
+
+Both snapshot tests write an adjacent ignored `.timing.csv` on every run, using
+the existing timing collector and CSV format. `local_proofs.timing.csv` measures
+only deduction checks. `smt_backend.timing.csv` separates total search time,
+analysis/query construction (`query_ms`), solver checks (`z3_dt_ms`), and model
+extraction/validation/decoding (`decode_ms`). Context setup, replay, and rendering
+are excluded. These checks do not enumerate dimensions, so `max_dimension` is 0;
+proof bounds remain documented in the Markdown cases. Pass a default disabled
+`Timings` collector when measurements are not needed.

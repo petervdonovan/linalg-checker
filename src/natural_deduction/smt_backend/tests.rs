@@ -22,6 +22,7 @@ fn limits(n: usize, capacity: usize) -> SearchLimits {
     SearchLimits {
         max_rule_slots: n,
         max_premises: capacity,
+        max_root_dependencies: None,
         timeout_ms: None,
     }
 }
@@ -31,39 +32,78 @@ fn search(
     n: usize,
     capacity: usize,
 ) -> Result<(CheckedFormula, Derivation), SearchError> {
-    find_proof(c, goal, &SurfaceInterpreter, limits(n, capacity))
+    find_proof(
+        c,
+        goal,
+        &SurfaceInterpreter,
+        limits(n, capacity),
+        &Timings::default(),
+    )
 }
-fn replay_input(c: &ProofContext, input: &ProofInput) -> Expr<()> {
+fn replay_input(c: &ProofContext, input: &ProofInput) -> (Expr<()>, BTreeSet<AssumptionId>) {
     match input {
         ProofInput::Context(p) => {
             let fact = c
                 .facts()
                 .iter()
                 .find(|f| f.id() == p.fact)
-                .expect("contextual leaf is visible");
-            assert!(fact.derivations().any(|d| d.id == p.derivation));
+                .expect("visible source");
+            let d = fact
+                .derivations()
+                .find(|d| d.id == p.derivation)
+                .expect("visible derivation");
             assert_eq!(p.expression, *fact.formula().written());
             assert_eq!(p.conjunct, 0);
             assert_eq!(p.alternative, None);
-            fact.formula().meaning()
+            (fact.formula().meaning(), d.assumptions.clone())
         }
         ProofInput::Local { conclusion, proof } => {
-            replay(c, proof, conclusion);
-            conclusion.clone()
+            (conclusion.clone(), replay(c, proof, conclusion))
         }
     }
 }
-fn replay(c: &ProofContext, proof: &NaturalDeductionProof, conclusion: &Expr<()>) {
+fn replay(
+    c: &ProofContext,
+    proof: &NaturalDeductionProof,
+    conclusion: &Expr<()>,
+) -> BTreeSet<AssumptionId> {
     match proof {
+        NaturalDeductionProof::Assumption { assumption } => BTreeSet::from([*assumption]),
         NaturalDeductionProof::Reuse { premise, .. } => {
-            assert_eq!(replay_input(c, premise), *conclusion)
+            let (p, set) = replay_input(c, premise);
+            assert_eq!(p, *conclusion);
+            set
         }
         NaturalDeductionProof::ConjunctionIntroduction { premises } => {
             assert!(!premises.is_empty());
-            assert_eq!(
-                and(premises.iter().map(|p| replay_input(c, p)).collect()),
-                *conclusion
-            );
+            let mut formulas = Vec::new();
+            let mut all = BTreeSet::new();
+            for p in premises {
+                let (formula, set) = replay_input(c, p);
+                formulas.push(formula);
+                all.extend(set);
+            }
+            assert_eq!(and(formulas), *conclusion);
+            all
+        }
+        NaturalDeductionProof::ImplicationIntroduction {
+            premise,
+            discharged,
+            discharged_formulas,
+        } => {
+            let RawExpr::LogicChain(chain) = &conclusion.raw else {
+                panic!()
+            };
+            let [(Logic::Imp, body)] = chain.assertions.as_slice() else {
+                panic!()
+            };
+            let (formula, mut set) = replay_input(c, premise);
+            assert_eq!(formula, *body);
+            for a in discharged {
+                assert_eq!(discharged_formulas[a], chain.start);
+                assert!(set.remove(a));
+            }
+            set
         }
         other => panic!("unexpected rule: {other:?}"),
     }
@@ -101,12 +141,11 @@ fn search_returns_local_existing_evidence_and_does_not_commit_it() {
 }
 
 #[test]
-fn source_selection_is_first_visible_whole_fact_and_keeps_bindings() {
+fn source_selection_preserves_whole_fact_identity_and_bindings() {
     let c = context(&[atom("p"), atom("p")]);
-    let first = c.facts()[0].derivations().next().unwrap();
     let (_, d) = search(&c, &atom("p"), 0, 3).unwrap();
-    assert_eq!(d.proof.leaves()[0].derivation, first.id);
-    assert_eq!(d.assumptions, first.assumptions);
+    let selected = c.derivation(d.proof.leaves()[0].derivation).unwrap();
+    assert_eq!(d.assumptions, selected.assumptions);
     let mut c = context(&[]);
     let written = atom("q");
     let checked = CheckedFormula::from_interpreted(&c, &written, atom("p")).unwrap();
@@ -193,6 +232,7 @@ fn bounds_preserve_nary_structure_and_do_not_add_elimination() {
 #[test]
 fn options_analysis_encoding_and_solver_failures_are_distinct() {
     let c = context(&[]);
+    let timings = Timings::new("Invalid options", 0);
     assert!(matches!(
         find_proof(
             &c,
@@ -201,10 +241,16 @@ fn options_analysis_encoding_and_solver_failures_are_distinct() {
             SearchLimits {
                 timeout_ms: Some(0),
                 ..limits(1, 3)
-            }
+            },
+            &timings,
         ),
         Err(SearchError::InvalidOptions(_))
     ));
+    let measured = timings.times();
+    assert!(measured.contains_key("total_ms"));
+    assert!(measured.contains_key("query_ms"));
+    assert!(!measured.contains_key("z3_dt_ms"));
+    assert!(!measured.contains_key("decode_ms"));
     assert!(matches!(
         search(&c, &atom("undefined"), 1, 3),
         Err(SearchError::InvalidConclusion(_))
@@ -256,31 +302,46 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
     let c = context(&[atom("p"), atom("q")]);
     let goal = and(vec![atom("p"), atom("q")]);
     let mut query = Query::new(&c, &goal, &SurfaceInterpreter, limits(1, 3)).unwrap();
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let valid_model = query.solver.get_model().unwrap();
     assert!(matches!(
-        query.decode_value(&query.proofs.unused(), 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&query.proofs.unused(), 1),
         Err(SearchError::InvalidModel(_))
     ));
     assert!(matches!(
-        query.decode_value(&query.proofs.constant("unassigned"), 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&query.proofs.constant("unassigned"), 1),
         Err(SearchError::InvalidModel(_))
     ));
     assert!(matches!(
-        query.decode_value(&query.expressions.constant("not_a_proof"), 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&query.expressions.constant("not_a_proof"), 1),
         Err(SearchError::InvalidModel(_))
     ));
     let mut other = ExprDatatype::new("decode_foreign_expr");
     let other_proof = ProofDatatype::new("decode_foreign_proof", &other);
     let foreign = other_proof
-        .context(&other.encode(&atom("p")).unwrap())
+        .established(&other.encode(&atom("p")).unwrap(), 0, &other)
         .unwrap();
     assert!(matches!(
-        query.decode_value(&foreign, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&foreign, 1),
         Err(SearchError::InvalidModel(_))
     ));
     let r = query.expressions.encode(&atom("r")).unwrap();
-    let unknown = query.proofs.context(&r).unwrap();
+    let unknown = query
+        .proofs
+        .established(&r, 999, &query.expressions)
+        .unwrap();
     assert!(matches!(
-        query.decode_value(&unknown, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&unknown, 1),
         Err(SearchError::InvalidModel(_))
     ));
     let conclusion_p = query
@@ -289,7 +350,7 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
         .unwrap()
         .simplify();
     assert!(matches!(
-        query.decode_value(
+        Decoder::new(&query, &valid_model).unwrap().decode_value(
             &query
                 .proofs
                 .inference(
@@ -311,7 +372,9 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
         )
         .unwrap();
     assert!(matches!(
-        query.decode_value(&invalid, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&invalid, 1),
         Err(SearchError::InvalidModel(_))
     ));
     let empty = query
@@ -319,7 +382,9 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
         .inference(&query.target, ProofRule::AndIntroduction, &[])
         .unwrap();
     assert!(matches!(
-        query.decode_value(&empty, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&empty, 1),
         Err(SearchError::InvalidModel(_))
     ));
     let unused = query
@@ -331,7 +396,9 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
         )
         .unwrap();
     assert!(matches!(
-        query.decode_value(&unused, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&unused, 1),
         Err(SearchError::InvalidModel(_))
     ));
     let oversized = query
@@ -343,7 +410,9 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
         )
         .unwrap();
     assert!(matches!(
-        query.decode_value(&oversized, 1),
+        Decoder::new(&query, &valid_model)
+            .unwrap()
+            .decode_value(&oversized, 1),
         Err(SearchError::InvalidModel(_))
     ));
     assert_eq!(query.solver.check(), SatResult::Sat);
@@ -360,21 +429,37 @@ fn decoding_rejects_malformed_and_inconsistent_models() {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReferenceProof {
-    Context(Expr<()>),
+    Leaf {
+        formula: Expr<()>,
+        source: usize,
+    },
     And(Vec<ReferenceProof>),
+    Imp {
+        antecedent: Expr<()>,
+        body: Box<ReferenceProof>,
+    },
 }
-fn reference_proofs(goal: &Expr<()>, facts: &[Expr<()>], capacity: usize) -> Vec<ReferenceProof> {
-    let mut result = Vec::new();
-    if facts.contains(goal) {
-        result.push(ReferenceProof::Context(goal.clone()));
-    }
+fn reference_proofs(
+    goal: &Expr<()>,
+    assumptions: &[Expr<()>],
+    capacity: usize,
+) -> Vec<ReferenceProof> {
+    let mut result = assumptions
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == goal)
+        .map(|(source, formula)| ReferenceProof::Leaf {
+            formula: formula.clone(),
+            source,
+        })
+        .collect::<Vec<_>>();
     if let RawExpr::Finop(Finop::And, operands) = &goal.raw
         && !operands.is_empty()
         && operands.len() <= capacity
     {
         let mut products = vec![vec![]];
         for operand in operands {
-            let choices = reference_proofs(operand, facts, capacity);
+            let choices = reference_proofs(operand, assumptions, capacity);
             products = products
                 .into_iter()
                 .flat_map(|prefix| {
@@ -388,23 +473,91 @@ fn reference_proofs(goal: &Expr<()>, facts: &[Expr<()>], capacity: usize) -> Vec
         }
         result.extend(products.into_iter().map(ReferenceProof::And));
     }
+    if capacity > 0
+        && let RawExpr::LogicChain(chain) = &goal.raw
+        && let [(Logic::Imp, body)] = chain.assertions.as_slice()
+    {
+        result.extend(
+            reference_proofs(body, assumptions, capacity)
+                .into_iter()
+                .map(|p| ReferenceProof::Imp {
+                    antecedent: chain.start.clone(),
+                    body: Box::new(p),
+                }),
+        );
+    }
     result
 }
-fn reference_search(goal: &Expr<()>, facts: &[Expr<()>], n: usize, capacity: usize) -> bool {
-    reference_proofs(goal, facts, capacity)
+fn reference_search(
+    goal: &Expr<()>,
+    facts: &[Expr<()>],
+    n: usize,
+    capacity: usize,
+    bound: Option<usize>,
+) -> bool {
+    // Conjunction and implication introduction have the subformula property.
+    // One temporary identity per distinct antecedent is enough: merging equal
+    // temporary formulas cannot increase proof size or change ambient support.
+    fn antecedents(goal: &Expr<()>, output: &mut Vec<Expr<()>>) {
+        match &goal.raw {
+            RawExpr::Finop(Finop::And, values) => {
+                for v in values {
+                    antecedents(v, output)
+                }
+            }
+            RawExpr::LogicChain(chain) => {
+                if let [(Logic::Imp, body)] = chain.assertions.as_slice() {
+                    if !output.contains(&chain.start) {
+                        output.push(chain.start.clone());
+                    }
+                    antecedents(body, output);
+                }
+            }
+            _ => (),
+        }
+    }
+    fn dependencies(proof: &ReferenceProof, assumptions: &[Expr<()>]) -> BTreeSet<usize> {
+        match proof {
+            ReferenceProof::Leaf { source, .. } => BTreeSet::from([*source]),
+            ReferenceProof::And(children) => children
+                .iter()
+                .flat_map(|c| dependencies(c, assumptions))
+                .collect(),
+            ReferenceProof::Imp { antecedent, body } => dependencies(body, assumptions)
+                .into_iter()
+                .filter(|a| assumptions[*a] != *antecedent)
+                .collect(),
+        }
+    }
+    fn children(proof: &ReferenceProof) -> Vec<&ReferenceProof> {
+        match proof {
+            ReferenceProof::Leaf { .. } => vec![],
+            ReferenceProof::And(c) => c.iter().collect(),
+            ReferenceProof::Imp { body, .. } => vec![body],
+        }
+    }
+    let mut temporary = Vec::new();
+    antecedents(goal, &mut temporary);
+    let all = facts.iter().chain(&temporary).cloned().collect::<Vec<_>>();
+    reference_proofs(goal, &all, capacity)
         .into_iter()
         .any(|root| {
+            let deps = dependencies(&root, &all);
+            if deps.iter().any(|a| *a >= facts.len()) || bound.is_some_and(|b| deps.len() > b) {
+                return false;
+            }
             let mut queue = Vec::new();
-            if matches!(root, ReferenceProof::And(_)) {
+            if !matches!(root, ReferenceProof::Leaf { .. }) {
                 queue.push(root);
             }
             let mut cursor = 0;
             while cursor < queue.len() {
-                let ReferenceProof::And(children) = queue[cursor].clone() else {
-                    unreachable!()
-                };
-                for child in children {
-                    if matches!(child, ReferenceProof::And(_)) && !queue.contains(&child) {
+                let next = children(&queue[cursor])
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for child in next {
+                    if !matches!(child, ReferenceProof::Leaf { .. }) && !queue.contains(&child) {
                         queue.push(child);
                     }
                 }
@@ -415,7 +568,7 @@ fn reference_search(goal: &Expr<()>, facts: &[Expr<()>], n: usize, capacity: usi
 }
 
 #[test]
-fn small_generated_queries_match_independent_bfs_and_replay() {
+fn small_generated_queries_match_independent_bfs_dependencies_and_replay() {
     let pair = and(vec![atom("p"), atom("q")]);
     let contexts = [
         vec![],
@@ -433,6 +586,11 @@ fn small_generated_queries_match_independent_bfs_and_replay() {
         and(vec![atom("p"), atom("p")]),
         and(vec![atom("p"), pair]),
         and(vec![atom("p"), atom("q"), atom("p")]),
+        implication(atom("p"), atom("p")),
+        implication(atom("p"), atom("q")),
+        implication(atom("p"), and(vec![atom("p"), atom("p")])),
+        implication(atom("p"), implication(atom("q"), atom("p"))),
+        and(vec![implication(atom("p"), atom("p")), atom("p")]),
     ];
     let mut successes = 0;
     let mut failures = 0;
@@ -441,25 +599,37 @@ fn small_generated_queries_match_independent_bfs_and_replay() {
         let before = c.store_counts();
         for goal in &goals {
             for n in 0..=2 {
-                for capacity in 1..=3 {
-                    let expected = reference_search(goal, &facts, n, capacity);
-                    match search(&c, goal, n, capacity) {
-                        Ok((_, d)) => {
-                            assert!(
-                                expected,
-                                "unexpected proof for {facts:?}, {goal:?}, {n}, {capacity}"
-                            );
-                            replay(&c, &d.proof, goal);
-                            successes += 1;
+                for capacity in [1, 3] {
+                    for bound in [None, Some(0), Some(1)] {
+                        let expected = reference_search(goal, &facts, n, capacity, bound);
+                        match find_proof(
+                            &c,
+                            goal,
+                            &SurfaceInterpreter,
+                            SearchLimits {
+                                max_root_dependencies: bound,
+                                ..limits(n, capacity)
+                            },
+                            &Timings::default(),
+                        ) {
+                            Ok((_, d)) => {
+                                assert!(
+                                    expected,
+                                    "unexpected proof for {facts:?}, {goal:?}, {n}, {capacity}, {bound:?}"
+                                );
+                                assert_eq!(replay(&c, &d.proof, goal), d.assumptions);
+                                assert!(bound.is_none_or(|b| d.assumptions.len() <= b));
+                                successes += 1;
+                            }
+                            Err(SearchError::NoProofWithinBounds(_)) => {
+                                assert!(
+                                    !expected,
+                                    "missing proof for {facts:?}, {goal:?}, {n}, {capacity}, {bound:?}"
+                                );
+                                failures += 1;
+                            }
+                            Err(e) => panic!("unexpected search error: {e}"),
                         }
-                        Err(SearchError::NoProofWithinBounds(_)) => {
-                            assert!(
-                                !expected,
-                                "missing proof for {facts:?}, {goal:?}, {n}, {capacity}"
-                            );
-                            failures += 1;
-                        }
-                        Err(e) => panic!("unexpected search error: {e}"),
                     }
                 }
             }
@@ -482,13 +652,14 @@ fn backend_proof_snapshots() {
         and(vec![pair.clone(), atom("s")]),
     ]);
     let cases = [
-        ("Contextual reuse", vec![p.clone()], p.clone(), 0, 3),
+        ("Contextual reuse", vec![p.clone()], p.clone(), 0, 3, None),
         (
             "Binary introduction",
             vec![p.clone(), q.clone()],
             pair.clone(),
             1,
             3,
+            None,
         ),
         (
             "Three-premise introduction",
@@ -496,6 +667,7 @@ fn backend_proof_snapshots() {
             flat.clone(),
             1,
             3,
+            None,
         ),
         (
             "Nested introduction: insufficient slots",
@@ -503,6 +675,7 @@ fn backend_proof_snapshots() {
             nested.clone(),
             1,
             3,
+            None,
         ),
         (
             "Nested introduction: sufficient slots",
@@ -510,6 +683,7 @@ fn backend_proof_snapshots() {
             nested,
             2,
             3,
+            None,
         ),
         (
             "Flat conjunction: capacity two",
@@ -517,6 +691,7 @@ fn backend_proof_snapshots() {
             flat.clone(),
             4,
             2,
+            None,
         ),
         (
             "Flat conjunction: capacity three",
@@ -524,6 +699,7 @@ fn backend_proof_snapshots() {
             flat,
             1,
             3,
+            None,
         ),
         (
             "Repeated subproof",
@@ -531,6 +707,7 @@ fn backend_proof_snapshots() {
             and(vec![pair.clone(), pair.clone()]),
             2,
             3,
+            None,
         ),
         (
             "Shared descendant: insufficient distinct-node budget",
@@ -538,13 +715,15 @@ fn backend_proof_snapshots() {
             diamond.clone(),
             3,
             3,
+            None,
         ),
         (
             "Shared descendant: four distinct nodes",
-            vec![p.clone(), q, r, atom("s")],
+            vec![p.clone(), q.clone(), r, atom("s")],
             diamond,
             4,
             3,
+            None,
         ),
         (
             "Missing contextual premise",
@@ -552,22 +731,144 @@ fn backend_proof_snapshots() {
             pair.clone(),
             2,
             3,
+            None,
         ),
-        ("Elimination is not an available rule", vec![pair], p, 2, 3),
+        (
+            "Elimination is not an available rule",
+            vec![pair],
+            p.clone(),
+            2,
+            3,
+            None,
+        ),
+        (
+            "Temporary assumption identity",
+            vec![],
+            implication(p.clone(), p.clone()),
+            1,
+            3,
+            Some(0),
+        ),
+        (
+            "One temporary assumption used twice",
+            vec![],
+            implication(p.clone(), and(vec![p.clone(), p.clone()])),
+            2,
+            3,
+            Some(0),
+        ),
+        (
+            "Vacuous inner discharge",
+            vec![],
+            implication(p.clone(), implication(q.clone(), p.clone())),
+            2,
+            3,
+            Some(0),
+        ),
+        (
+            "Nested discharges",
+            vec![],
+            implication(
+                p.clone(),
+                implication(q.clone(), and(vec![p.clone(), q.clone()])),
+            ),
+            3,
+            3,
+            Some(0),
+        ),
+        (
+            "Independent closed branches",
+            vec![],
+            and(vec![
+                implication(p.clone(), p.clone()),
+                implication(q.clone(), q.clone()),
+            ]),
+            3,
+            3,
+            Some(0),
+        ),
+        (
+            "Temporary assumption cannot escape a sibling",
+            vec![],
+            and(vec![implication(p.clone(), p.clone()), p.clone()]),
+            3,
+            3,
+            None,
+        ),
+        (
+            "Remaining ambient dependency",
+            vec![q.clone()],
+            implication(p.clone(), and(vec![p.clone(), q.clone()])),
+            2,
+            3,
+            Some(1),
+        ),
+        (
+            "Root dependency bound zero",
+            vec![q.clone()],
+            implication(p.clone(), and(vec![p.clone(), q])),
+            2,
+            3,
+            Some(0),
+        ),
+        (
+            "One ambient assumption used twice",
+            vec![p.clone()],
+            and(vec![p.clone(), p]),
+            1,
+            3,
+            Some(1),
+        ),
     ];
     let mut sections = Vec::new();
-    for (name, facts, goal, n, capacity) in cases {
+    let mut records = Vec::new();
+    for (name, facts, goal, n, capacity, bound) in cases {
         let c = context(&facts);
-        let outcome = match search(&c, &goal, n, capacity) {
+        let timing = Timings::new(name, 0);
+        let result = find_proof(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            SearchLimits {
+                max_root_dependencies: bound,
+                ..limits(n, capacity)
+            },
+            &timing,
+        );
+        records.push(timing);
+        let outcome = match result {
             Ok((_, d)) => {
-                replay(&c, &d.proof, &goal);
-                format!("Found proof.\n\n{}", d.proof.details(&goal))
+                assert_eq!(replay(&c, &d.proof, &goal), d.assumptions);
+                let open = if d.assumptions.is_empty() {
+                    "none".to_owned()
+                } else {
+                    d.assumptions
+                        .iter()
+                        .map(|a| format!("${}$", c.assumptions[a].expression.as_latex()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                format!(
+                    "Found proof.\n\nRemaining assumptions ({}): {open}.\n\n{}",
+                    d.assumptions.len(),
+                    d.proof.details(&goal)
+                )
             }
             Err(e @ SearchError::NoProofWithinBounds(_)) => e.to_string(),
             Err(e) => panic!("{e}"),
         };
-        sections.push(format!("# {name}\n\nContext:\n\n{}\n\nGoal: ${}$\n\nLimits: {n} rule slots, {capacity} premises per inference.\n\n{outcome}", facts.iter().map(|e|format!("- ${}$",e.as_latex())).collect::<Vec<_>>().join("\n"),goal.as_latex()));
+        let bound = bound
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "unbounded".into());
+        sections.push(format!("# {name}\n\nContext:\n\n{}\n\nGoal: ${}$\n\nLimits: {n} rule slots, {capacity} premises per inference, {bound} root dependencies.\n\n{outcome}",if facts.is_empty(){"(empty)".to_owned()}else{facts.iter().map(|e|format!("- ${}$",e.as_latex())).collect::<Vec<_>>().join("\n")},goal.as_latex()));
     }
+    let csv = crate::timing::to_csv(records).expect("failed to serialize SMT backend timings");
+    std::fs::write(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/natural_deduction/snapshots/smt_backend.timing.csv"),
+        csv,
+    )
+    .expect("failed to write SMT backend timings");
     expect_test::expect_file!["../snapshots/smt_backend.md"]
         .assert_eq(&(sections.join("\n\n") + "\n"));
 }
@@ -691,4 +992,433 @@ fn saved_binder_scopes_survive_later_same_named_parameter_declarations() {
     ));
     assert!(!d.required_variables.contains(&Variable::new("i")));
     assert_eq!(d.proof.supporting_facts(), vec![formula]);
+}
+
+fn implication(p: Expr<()>, q: Expr<()>) -> Expr<()> {
+    Expr::new(RawExpr::LogicChain(crate::LogicChain {
+        start: p,
+        assertions: vec![(Logic::Imp, q)],
+    }))
+}
+fn bounded(
+    c: &ProofContext,
+    goal: &Expr<()>,
+    slots: usize,
+    bound: Option<usize>,
+) -> Result<(CheckedFormula, Derivation), SearchError> {
+    find_proof(
+        c,
+        goal,
+        &SurfaceInterpreter,
+        SearchLimits {
+            max_root_dependencies: bound,
+            ..limits(slots, 3)
+        },
+        &Timings::default(),
+    )
+}
+
+#[test]
+fn implication_introduction_closes_temporary_assumptions_and_records_without_mutation() {
+    let mut c = context(&[]);
+    for (goal, slots) in [
+        (implication(atom("p"), atom("p")), 1),
+        (implication(atom("p"), and(vec![atom("p"), atom("p")])), 2),
+        (implication(atom("p"), implication(atom("q"), atom("p"))), 2),
+        (
+            implication(
+                atom("p"),
+                implication(atom("q"), and(vec![atom("p"), atom("q")])),
+            ),
+            3,
+        ),
+        (
+            and(vec![
+                implication(atom("p"), atom("p")),
+                implication(atom("q"), atom("q")),
+            ]),
+            3,
+        ),
+    ] {
+        let before = c.store_counts();
+        let (checked, d) = bounded(&c, &goal, slots, Some(0)).unwrap();
+        assert!(d.assumptions.is_empty());
+        replay(&c, &d.proof, &goal);
+        assert_eq!(c.store_counts(), before);
+        let mut accepting = c.clone();
+        accepting.record(checked, vec![], vec![d]).unwrap();
+    }
+    let goal = implication(atom("p"), atom("p"));
+    assert!(matches!(
+        bounded(&c, &goal, 0, Some(0)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let (checked, d) = bounded(&c, &goal, 1, Some(0)).unwrap();
+    c.record(checked, vec![], vec![d]).unwrap();
+    assert!(bounded(&c, &goal, 0, Some(0)).is_ok());
+}
+
+#[test]
+fn temporary_dependencies_cannot_escape_through_a_sibling_or_be_assumed_at_root() {
+    let c = context(&[]);
+    for goal in [
+        atom("p"),
+        and(vec![implication(atom("p"), atom("p")), atom("p")]),
+    ] {
+        assert!(matches!(
+            bounded(&c, &goal, 4, None),
+            Err(SearchError::NoProofWithinBounds(_))
+        ));
+    }
+    // Implication introduction does not implicitly project a conjunction assumption.
+    let goal = implication(and(vec![atom("p"), atom("q")]), atom("p"));
+    assert!(matches!(
+        bounded(&c, &goal, 3, Some(0)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+}
+
+#[test]
+fn root_cardinality_counts_identities_not_uses_and_enables_source_selection() {
+    let c = context(&[atom("p"), atom("q")]);
+    let repeated = and(vec![atom("p"), atom("p")]);
+    let (_, d) = bounded(&c, &repeated, 1, Some(1)).unwrap();
+    assert_eq!(d.assumptions.len(), 1);
+    assert!(matches!(
+        bounded(&c, &repeated, 1, Some(0)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let pair = and(vec![atom("p"), atom("q")]);
+    assert!(matches!(
+        bounded(&c, &pair, 1, Some(1)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    for bound in [None, Some(2), Some(99)] {
+        assert_eq!(bounded(&c, &pair, 1, bound).unwrap().1.assumptions.len(), 2);
+    }
+    let mut c = context(&[atom("p"), atom("r")]);
+    let p = *c.assumptions.keys().next().unwrap();
+    let r = *c.assumptions.keys().next_back().unwrap();
+    let q = c.check(&atom("q")).unwrap();
+    let mut first = Derivation::new(NaturalDeductionProof::External);
+    first.assumptions.insert(r);
+    let mut second = Derivation::new(NaturalDeductionProof::External);
+    second.assumptions.insert(p);
+    c.record(q, vec![], vec![first, second]).unwrap();
+    let fact = c
+        .facts()
+        .iter()
+        .find(|f| f.formula().meaning() == atom("q"))
+        .unwrap();
+    let alternatives = fact.derivations().collect::<Vec<_>>();
+    assert_eq!(alternatives.len(), 2);
+    let expected = alternatives[1].id;
+    let (_, d) = bounded(&c, &implication(atom("p"), atom("q")), 1, Some(0)).unwrap();
+    assert!(d.assumptions.is_empty());
+    assert_eq!(d.proof.leaves()[0].derivation, expected);
+}
+
+#[test]
+fn shared_premises_keep_dependencies_on_each_path() {
+    let c = context(&[atom("p"), atom("q")]);
+    let body = and(vec![atom("p"), atom("q")]);
+    let goal = and(vec![
+        implication(atom("p"), body.clone()),
+        implication(atom("q"), body),
+    ]);
+    assert!(matches!(
+        bounded(&c, &goal, 4, Some(1)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    let (_, d) = bounded(&c, &goal, 4, Some(2)).unwrap();
+    assert_eq!(d.assumptions.len(), 2);
+    replay(&c, &d.proof, &goal);
+}
+
+#[test]
+fn root_and_slot_bits_are_exact_and_decoder_replays_them() {
+    let c = context(&[atom("p"), atom("q"), atom("r")]);
+    let goal = and(vec![atom("p"), atom("q")]);
+    let query = Query::new(&c, &goal, &SurfaceInterpreter, limits(1, 3)).unwrap();
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    for constraint in [
+        query.root_dependencies[0].not(),
+        query.root_dependencies[2].clone(),
+        query.dependencies[0][1].not(),
+        query.root_dependencies[3].clone(),
+    ] {
+        query.solver.push();
+        query.solver.assert(constraint);
+        assert_eq!(query.solver.check(), SatResult::Unsat);
+        query.solver.pop(1);
+    }
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let model = query.solver.get_model().unwrap();
+    let root = model.eval(&query.root, true).unwrap();
+    for extra in [false, true] {
+        let tampered = Solver::new_for_logic("QF_DT").unwrap();
+        tampered.assert(query.root.eq(&root));
+        tampered.assert(query.slots[0].eq(&root));
+        for (a, bit) in query.dependencies[0].iter().enumerate() {
+            // One case omits p; the other fabricates a dependency on r.
+            tampered.assert(bit.eq(Bool::from_bool(if extra { a < 3 } else { a == 1 })));
+        }
+        assert_eq!(tampered.check(), SatResult::Sat);
+        let bad = tampered.get_model().unwrap();
+        assert!(matches!(
+            Decoder::new(&query, &bad).unwrap().decode_value(&root, 1),
+            Err(SearchError::InvalidModel(_))
+        ));
+        assert!(matches!(
+            query.decode(&bad),
+            Err(SearchError::InvalidModel(_))
+        ));
+    }
+}
+
+#[test]
+fn temporary_formulas_and_contextual_identities_are_checked() {
+    let c = context(&[]);
+    let goal = implication(atom("p"), atom("p"));
+    let mut query = Query::new(&c, &goal, &SurfaceInterpreter, limits(1, 3)).unwrap();
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let model = query.solver.get_model().unwrap();
+    let q = query.expressions.encode(&atom("q")).unwrap();
+    let inconsistent = query
+        .proofs
+        .assumption(&q, AssumptionRef::Temporary(0), &query.expressions)
+        .unwrap();
+    assert!(matches!(
+        Decoder::new(&query, &model)
+            .unwrap()
+            .decode_value(&inconsistent, 1),
+        Err(SearchError::InvalidModel(_))
+    ));
+    let c = context(&[atom("p"), atom("p")]);
+    let query = Query::new(&c, &atom("p"), &SurfaceInterpreter, limits(0, 3)).unwrap();
+    assert_eq!(query.leaves.len(), 2);
+    assert_ne!(query.leaves[0].value, query.leaves[1].value);
+    for source in &query.leaves {
+        query.solver.push();
+        query.solver.assert(query.root.eq(&source.value));
+        assert_eq!(query.solver.check(), SatResult::Sat);
+        let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
+        assert_eq!(
+            d.proof.leaves()[0].derivation,
+            source.premise.as_ref().unwrap().derivation
+        );
+        assert_eq!(
+            d.assumptions,
+            c.derivation(d.proof.leaves()[0].derivation)
+                .unwrap()
+                .assumptions
+        );
+        query.solver.pop(1);
+    }
+}
+
+#[test]
+fn established_independent_facts_support_zero_dependency_and_vacuous_discharge() {
+    let mut c = context(&[]);
+    let checked = c.check(&atom("q")).unwrap();
+    c.record_external(checked, vec![]).unwrap();
+    assert!(
+        bounded(&c, &atom("q"), 0, Some(0))
+            .unwrap()
+            .1
+            .assumptions
+            .is_empty()
+    );
+    let (_, d) = bounded(&c, &implication(atom("p"), atom("q")), 1, Some(0)).unwrap();
+    assert!(
+        matches!(&d.proof,NaturalDeductionProof::ImplicationIntroduction {discharged,..} if discharged.is_empty())
+    );
+    let query = Query::new(&c, &atom("q"), &SurfaceInterpreter, limits(3, 3)).unwrap();
+    for bits in &query.dependencies {
+        for bit in bits {
+            query.solver.push();
+            query.solver.assert(bit);
+            assert_eq!(query.solver.check(), SatResult::Unsat);
+            query.solver.pop(1);
+        }
+    }
+}
+
+#[test]
+fn nested_and_sibling_discharge_labels_follow_the_ancestor_path() {
+    let c = context(&[]);
+    let goal = implication(atom("p"), implication(atom("q"), atom("p")));
+    let (_, d) = bounded(&c, &goal, 2, Some(0)).unwrap();
+    let tex = d.proof.to_tex(&goal);
+    assert_eq!(tex.matches(r"\Rightarrow I\,[a_{1}]").count(), 1);
+    assert!(tex.contains(r"\left[p\right]^{a_{1}}"));
+    assert!(tex.contains(r"\Rightarrow I)"));
+    let goal = and(vec![
+        implication(atom("p"), atom("p")),
+        implication(atom("q"), atom("q")),
+    ]);
+    let (_, d) = bounded(&c, &goal, 3, Some(0)).unwrap();
+    let tex = d.proof.to_tex(&goal);
+    assert!(tex.contains(r"\left[p\right]^{a_{1}}"));
+    assert!(tex.contains(r"\left[q\right]^{a_{2}}"));
+    let c = context(&[atom("p"), atom("q")]);
+    let body = and(vec![atom("p"), atom("q")]);
+    let goal = and(vec![
+        implication(atom("p"), body.clone()),
+        implication(atom("q"), body),
+    ]);
+    let (_, d) = bounded(&c, &goal, 4, Some(2)).unwrap();
+    let tex = d.proof.to_tex(&goal);
+    assert!(tex.contains(r"\left[p\right]^{a_{1}} \qquad q"));
+    assert!(tex.contains(r"p \qquad \left[q\right]^{a_{2}}"));
+    assert!(!tex.contains(r"\Rightarrow I\,[a_{1},a_{2}]"));
+}
+
+#[test]
+fn root_bound_applies_before_recording_witness_discharge_alternatives() {
+    let mut c = context(&[atom("r"), atom("r")]);
+    let original = c.assumptions.keys().copied().collect::<BTreeSet<_>>();
+    let parse = |tex| crate::from_tex::expr(&ratex_parser::parse(tex).unwrap()).unwrap();
+    let source = c
+        .check(&parse(r"\exists x \in \mathbb{R}, x=x \land p"))
+        .unwrap();
+    c.record_external(source, vec![]).unwrap();
+    struct Checks;
+    impl SideConditionChecker for Checks {
+        fn check_instantiation(
+            &mut self,
+            _: &QuantifierSpec,
+            _: &BTreeMap<Variable, Expr<()>>,
+            _: &BTreeSet<(ImplicitDimension, ImplicitDimension)>,
+            _: &[Expr<()>],
+        ) -> SideConditionResult {
+            SideConditionResult::Valid
+        }
+    }
+    let NaturalDeductionResult::Established {
+        conclusion,
+        mut derivations,
+    } = follows_from_natural_deduction(
+        &c,
+        &parse(r"a=a \land p"),
+        &SurfaceInterpreter,
+        &mut Checks,
+    )
+    else {
+        panic!()
+    };
+    c.open_witness(conclusion, vec![], derivations.remove(0))
+        .unwrap();
+    let witness = c.witnesses[0].assumption;
+    let goal = implication(atom("r"), atom("p"));
+    // Existing accepted local evidence can have incomparable witness-local and
+    // discharged supports. Recording retains both alternatives.
+    let checked = c.check(&goal).unwrap();
+    let mut local = Derivation::new(NaturalDeductionProof::External);
+    local.assumptions.insert(witness);
+    c.record(checked, vec![], vec![local]).unwrap();
+    let before = c.store_counts();
+    let (checked, d) = bounded(&c, &goal, 0, Some(1)).unwrap();
+    assert_eq!(d.assumptions, BTreeSet::from([witness]));
+    assert!(d.witness_discharges.is_empty());
+    assert_eq!(c.store_counts(), before);
+    assert!(matches!(
+        bounded(&c, &goal, 0, Some(0)),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
+    c.record(checked, vec![], vec![d]).unwrap();
+    let fact = c
+        .facts()
+        .iter()
+        .find(|f| f.formula().meaning() == goal)
+        .unwrap();
+    assert!(
+        fact.derivations()
+            .any(|d| d.assumptions == original && !d.witness_discharges.is_empty())
+    );
+}
+
+#[test]
+fn implication_query_snapshot_includes_exact_dependencies_and_boolean_bound() {
+    let c = context(&[atom("q"), atom("r")]);
+    let goal = implication(atom("p"), and(vec![atom("p"), atom("q")]));
+    let query = Query::build(
+        &c,
+        &goal,
+        &SurfaceInterpreter,
+        SearchLimits {
+            max_root_dependencies: Some(1),
+            ..limits(2, 3)
+        },
+        "implication_query",
+    )
+    .unwrap();
+    let text = query.solver.to_smt2();
+    assert!(!text.contains("(forall"));
+    assert!(!text.contains("(exists"));
+    assert!(!text.contains("(_ BitVec"));
+    assert!(text.contains("dependency_threshold"));
+    assert!(text.contains("root_depends"));
+    expect_test::expect_file!["../snapshots/implication_query.smt2"].assert_eq(&text);
+    let replayed = Solver::new_for_logic("QF_DT").unwrap();
+    replayed.from_string(text.as_str());
+    assert_eq!(replayed.check(), SatResult::Sat);
+    assert_eq!(query.solver.check(), SatResult::Sat);
+    let d = query.decode(&query.solver.get_model().unwrap()).unwrap();
+    assert_eq!(d.assumptions.len(), 1);
+    assert_eq!(replay(&c, &d.proof, &goal), d.assumptions);
+}
+
+#[test]
+fn identical_ambient_formulas_still_have_distinct_dependency_bits() {
+    let c = context(&[atom("p"), atom("p")]);
+    let goal = and(vec![atom("p"), atom("p")]);
+    for (bound, result) in [(1, SatResult::Unsat), (2, SatResult::Sat)] {
+        let query = Query::new(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            SearchLimits {
+                max_root_dependencies: Some(bound),
+                ..limits(1, 3)
+            },
+        )
+        .unwrap();
+        let forced = query
+            .proofs
+            .inference(
+                &query.target,
+                ProofRule::AndIntroduction,
+                &[query.leaves[0].value.clone(), query.leaves[1].value.clone()],
+            )
+            .unwrap();
+        query.solver.assert(query.root.eq(forced));
+        assert_eq!(query.solver.check(), result);
+        if result == SatResult::Sat {
+            assert_eq!(
+                query
+                    .decode(&query.solver.get_model().unwrap())
+                    .unwrap()
+                    .assumptions
+                    .len(),
+                2
+            );
+        }
+    }
+    let c = context(&[]);
+    let goal = implication(atom("p"), atom("p"));
+    assert!(matches!(
+        find_proof(
+            &c,
+            &goal,
+            &SurfaceInterpreter,
+            SearchLimits {
+                max_premises: 0,
+                max_root_dependencies: Some(0),
+                ..limits(1, 3)
+            },
+            &Timings::default()
+        ),
+        Err(SearchError::NoProofWithinBounds(_))
+    ));
 }

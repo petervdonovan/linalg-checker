@@ -38,21 +38,59 @@ pub fn selector_child(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofRule {
     AndIntroduction,
+    ImplicationIntroduction,
 }
 
-/// One evaluated constructor layer. Premises remain SMT values, rather than a
-/// second recursive Rust proof representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssumptionRef {
+    Ambient(u64),
+    Temporary(u64),
+}
+
+/// One evaluated constructor layer; children remain SMT values.
 #[derive(Clone, Debug)]
 pub enum ProofNode {
     Unused,
-    Context {
+    Assumption {
         conclusion: Datatype,
+        source: AssumptionRef,
+    },
+    Established {
+        conclusion: Datatype,
+        source: u64,
     },
     Inference {
         conclusion: Datatype,
         rule: ProofRule,
         premises: Datatype,
     },
+}
+
+/// Pure Boolean sequential threshold counter, retaining QF_DT.
+pub fn at_most(bits: &[Bool], bound: usize) -> Bool {
+    if bound >= bits.len() {
+        return Bool::from_bool(true);
+    }
+    if bound == 0 {
+        return Bool::and(&bits.iter().map(Bool::not).collect::<Vec<_>>());
+    }
+    let mut thresholds = vec![Bool::from_bool(false); bound + 2];
+    thresholds[0] = Bool::from_bool(true);
+    let mut constraints = Vec::new();
+    for bit in bits {
+        let mut next = vec![Bool::from_bool(true)];
+        for k in 1..thresholds.len() {
+            let value = Bool::fresh_const("dependency_threshold");
+            constraints.push(value.eq(Bool::or(&[
+                thresholds[k].clone(),
+                Bool::and(&[bit.clone(), thresholds[k - 1].clone()]),
+            ])));
+            next.push(value);
+        }
+        thresholds = next;
+    }
+    constraints.push(thresholds[bound + 1].not());
+    Bool::and(&constraints)
 }
 
 struct PremisePosition {
@@ -66,21 +104,42 @@ pub struct ProofDatatype {
     list: DatatypeSort,
     rule: DatatypeSort,
     expression: z3::Sort,
+    assumption: DatatypeSort,
 }
 impl ProofDatatype {
     pub fn new(namespace: &str, expressions: &ExprDatatype) -> Self {
         let proof_name = format!("{namespace}.Proof");
         let list_name = format!("{namespace}.ProofList");
         let rule_name = format!("{namespace}.ProofRule");
+        let assumption_name = format!("{namespace}.AssumptionRef");
         let mut sorts = create_datatypes(vec![
             DatatypeBuilder::new(proof_name.clone())
                 .variant(&format!("{namespace}.Unused"), vec![])
                 .variant(
-                    &format!("{namespace}.Context"),
-                    vec![(
-                        &format!("{namespace}.Context_conclusion"),
-                        DatatypeAccessor::sort(expressions.sort().sort.clone()),
-                    )],
+                    &format!("{namespace}.Assumption"),
+                    vec![
+                        (
+                            &format!("{namespace}.Assumption_conclusion"),
+                            DatatypeAccessor::sort(expressions.sort().sort.clone()),
+                        ),
+                        (
+                            &format!("{namespace}.Assumption_source"),
+                            DatatypeAccessor::datatype(assumption_name.clone()),
+                        ),
+                    ],
+                )
+                .variant(
+                    &format!("{namespace}.Established"),
+                    vec![
+                        (
+                            &format!("{namespace}.Established_conclusion"),
+                            DatatypeAccessor::sort(expressions.sort().sort.clone()),
+                        ),
+                        (
+                            &format!("{namespace}.Established_source"),
+                            DatatypeAccessor::sort(expressions.schema.natural.sort.clone()),
+                        ),
+                    ],
                 )
                 .variant(
                     &format!("{namespace}.Inference"),
@@ -115,21 +174,38 @@ impl ProofDatatype {
                     ],
                 ),
             DatatypeBuilder::new(rule_name)
-                .variant(&format!("{namespace}.AndIntroduction"), vec![]),
+                .variant(&format!("{namespace}.AndIntroduction"), vec![])
+                .variant(&format!("{namespace}.ImplicationIntroduction"), vec![]),
+            DatatypeBuilder::new(assumption_name)
+                .variant(
+                    &format!("{namespace}.Ambient"),
+                    vec![(
+                        &format!("{namespace}.Ambient_index"),
+                        DatatypeAccessor::sort(expressions.schema.natural.sort.clone()),
+                    )],
+                )
+                .variant(
+                    &format!("{namespace}.Temporary"),
+                    vec![(
+                        &format!("{namespace}.Temporary_index"),
+                        DatatypeAccessor::sort(expressions.schema.natural.sort.clone()),
+                    )],
+                ),
         ])
         .into_iter();
         Self {
             proof: sorts.next().unwrap(),
             list: sorts.next().unwrap(),
             rule: sorts.next().unwrap(),
+            assumption: sorts.next().unwrap(),
             expression: expressions.sort().sort.clone(),
         }
     }
     pub fn sort(&self) -> &DatatypeSort {
         &self.proof
     }
-    pub fn datatypes(&self) -> [&DatatypeSort; 3] {
-        [&self.proof, &self.list, &self.rule]
+    pub fn datatypes(&self) -> [&DatatypeSort; 4] {
+        [&self.proof, &self.list, &self.rule, &self.assumption]
     }
     pub fn constant(&self, name: impl Into<Symbol>) -> Datatype {
         Datatype::new_const(name, &self.proof.sort)
@@ -152,24 +228,52 @@ impl ProofDatatype {
     pub fn is_unused(&self, node: &Datatype) -> Result<Bool, Error> {
         self.tester(node, 0)
     }
-    pub fn is_context(&self, node: &Datatype) -> Result<Bool, Error> {
-        self.tester(node, 1)
+    pub fn is_leaf(&self, node: &Datatype) -> Result<Bool, Error> {
+        Ok(Bool::or(&[self.tester(node, 1)?, self.tester(node, 2)?]))
     }
     pub fn is_inference(&self, node: &Datatype) -> Result<Bool, Error> {
-        self.tester(node, 2)
+        self.tester(node, 3)
     }
     pub fn unused(&self) -> Datatype {
         app(&self.proof, "Unused", &[])
     }
-    pub fn context(&self, conclusion: &Datatype) -> Result<Datatype, Error> {
-        if conclusion.get_sort() != self.expression {
-            return Err(Error::WrongSort);
-        }
+    pub fn assumption(
+        &self,
+        conclusion: &Datatype,
+        source: AssumptionRef,
+        expressions: &ExprDatatype,
+    ) -> Result<Datatype, Error> {
+        self.check_expression(conclusion, expressions)?;
+        let (name, index) = match source {
+            AssumptionRef::Ambient(i) => ("Ambient", i),
+            AssumptionRef::Temporary(i) => ("Temporary", i),
+        };
+        let reference = app(&self.assumption, name, &[expressions.natural(index)]);
         Ok(app(
             &self.proof,
-            "Context",
-            std::slice::from_ref(conclusion),
+            "Assumption",
+            &[conclusion.clone(), reference],
         ))
+    }
+    pub fn established(
+        &self,
+        conclusion: &Datatype,
+        source: u64,
+        expressions: &ExprDatatype,
+    ) -> Result<Datatype, Error> {
+        self.check_expression(conclusion, expressions)?;
+        Ok(app(
+            &self.proof,
+            "Established",
+            &[conclusion.clone(), expressions.natural(source)],
+        ))
+    }
+    fn check_expression(&self, value: &Datatype, expressions: &ExprDatatype) -> Result<(), Error> {
+        if value.get_sort() == self.expression && expressions.sort().sort == self.expression {
+            Ok(())
+        } else {
+            Err(Error::WrongSort)
+        }
     }
     pub fn inference(
         &self,
@@ -187,6 +291,7 @@ impl ProofDatatype {
         }
         let rule = match rule {
             ProofRule::AndIntroduction => app(&self.rule, "AndIntroduction", &[]),
+            ProofRule::ImplicationIntroduction => app(&self.rule, "ImplicationIntroduction", &[]),
         };
         Ok(app(
             &self.proof,
@@ -197,26 +302,49 @@ impl ProofDatatype {
     /// Symbolic conclusion selector. Callers must constrain the node not to be
     /// Unused; selectors on inapplicable constructors otherwise have no meaning.
     pub fn conclusion(&self, node: &Datatype) -> Result<Datatype, Error> {
-        let context = self.is_context(node)?;
-        let leaf = self.proof.variants[1].accessors[0]
-            .apply(&[node])
-            .as_datatype()
-            .unwrap();
-        let step = self.proof.variants[2].accessors[0]
-            .apply(&[node])
-            .as_datatype()
-            .unwrap();
-        Ok(context.ite(&leaf, &step))
+        self.check(node)?;
+        let select = |variant: usize| {
+            self.proof.variants[variant].accessors[0]
+                .apply(&[node])
+                .as_datatype()
+                .unwrap()
+        };
+        Ok(self.tester(node, 1)?.ite(
+            &select(1),
+            &self.tester(node, 2)?.ite(&select(2), &select(3)),
+        ))
     }
-    pub fn inspect(&self, value: &Datatype) -> Result<ProofNode, Error> {
+    pub fn inspect(
+        &self,
+        value: &Datatype,
+        expressions: &ExprDatatype,
+    ) -> Result<ProofNode, Error> {
+        if expressions.sort().sort != self.expression {
+            return Err(Error::WrongSort);
+        }
         match tag(value, &self.proof)?.as_str() {
             "Unused" => Ok(ProofNode::Unused),
-            "Context" => Ok(ProofNode::Context {
+            "Assumption" => {
+                let reference = field(value, 1)?;
+                let index = expressions.read_natural(&field(&reference, 0)?)?;
+                let source = match tag(&reference, &self.assumption)?.as_str() {
+                    "Ambient" => AssumptionRef::Ambient(index),
+                    "Temporary" => AssumptionRef::Temporary(index),
+                    _ => return Err(Error::Malformed("unknown assumption reference")),
+                };
+                Ok(ProofNode::Assumption {
+                    conclusion: field(value, 0)?,
+                    source,
+                })
+            }
+            "Established" => Ok(ProofNode::Established {
                 conclusion: field(value, 0)?,
+                source: expressions.read_natural(&field(value, 1)?)?,
             }),
             "Inference" => {
                 let rule = match tag(&field(value, 1)?, &self.rule)?.as_str() {
                     "AndIntroduction" => ProofRule::AndIntroduction,
+                    "ImplicationIntroduction" => ProofRule::ImplicationIntroduction,
                     _ => return Err(Error::Malformed("unknown proof rule")),
                 };
                 Ok(ProofNode::Inference {
@@ -274,6 +402,24 @@ impl ProofDatatype {
         )?));
         Ok(Bool::and(&guards))
     }
+    pub fn implication_introduction(
+        &self,
+        expressions: &ExprDatatype,
+        premise: &Datatype,
+        parent: &Datatype,
+    ) -> Result<Bool, Error> {
+        self.check(parent)?;
+        let antecedent = expressions.antecedent(&self.conclusion(parent)?)?;
+        let formula = expressions.implication(&antecedent, &self.conclusion(premise)?)?;
+        Ok(Bool::and(&[
+            self.is_unused(premise)?.not(),
+            parent.eq(self.inference(
+                &formula,
+                ProofRule::ImplicationIntroduction,
+                std::slice::from_ref(premise),
+            )?),
+        ]))
+    }
     /// Unroll semantic proof-premise positions once, guarding every list selector.
     /// `last` also checks termination, so a tail cannot hide additional children.
     fn premise_positions(
@@ -282,7 +428,7 @@ impl ProofDatatype {
         capacity: usize,
     ) -> Result<Vec<PremisePosition>, Error> {
         self.check(node)?;
-        let mut tail = self.proof.variants[2].accessors[2]
+        let mut tail = self.proof.variants[3].accessors[2]
             .apply(&[node])
             .as_datatype()
             .unwrap();
@@ -322,7 +468,7 @@ impl ProofDatatype {
         Ok(positions)
     }
     /// Guarded, exactly terminated list cases of lengths 1..=capacity.
-    fn premise_cases(
+    pub(crate) fn premise_cases(
         &self,
         node: &Datatype,
         capacity: usize,
@@ -350,7 +496,7 @@ impl ProofDatatype {
         self.check(root)?;
         let mut constraints = contextual_leaves
             .iter()
-            .map(|p| self.is_context(p))
+            .map(|p| self.is_leaf(p))
             .collect::<Result<Vec<_>, _>>()?;
         let leaf_member = |p: &Datatype| {
             Bool::or(
@@ -442,10 +588,15 @@ impl ProofDatatype {
         for slot in slots {
             let mut rules = Vec::new();
             for (shape, premises) in self.premise_cases(slot, max_premises)? {
-                rules.push(Bool::and(&[
-                    shape,
-                    self.and_introduction(expressions, &premises, slot)?,
-                ]));
+                let mut applications = vec![self.and_introduction(expressions, &premises, slot)?];
+                if premises.len() == 1 {
+                    applications.push(self.implication_introduction(
+                        expressions,
+                        &premises[0],
+                        slot,
+                    )?);
+                }
+                rules.push(Bool::and(&[shape, Bool::or(&applications)]));
             }
             constraints.push(self.is_inference(slot)?.implies(Bool::or(&rules)));
         }

@@ -6,9 +6,11 @@ Context:
 
 Goal: $p$
 
-Limits: 0 rule slots, 3 premises per inference.
+Limits: 0 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (1): $p$.
 
 This statement is already established in the current context.
 
@@ -21,9 +23,11 @@ Context:
 
 Goal: $p \land q$
 
-Limits: 1 rule slots, 3 premises per inference.
+Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (2): $p$, $q$.
 
 Combined the established conjuncts.
 
@@ -48,9 +52,11 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference.
+Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (3): $p$, $q$, $r$.
 
 Combined the established conjuncts.
 
@@ -76,9 +82,9 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference.
+Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
 
-no proof within encoding and budget (1 rule slots, 3 premises)
+no proof within encoding and budget (1 rule slots, 3 premises, root dependencies unbounded)
 
 # Nested introduction: sufficient slots
 
@@ -90,9 +96,11 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 2 rule slots, 3 premises per inference.
+Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (3): $p$, $q$, $r$.
 
 Combined the established conjuncts.
 
@@ -118,9 +126,9 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 4 rule slots, 2 premises per inference.
+Limits: 4 rule slots, 2 premises per inference, unbounded root dependencies.
 
-no proof within encoding and budget (4 rule slots, 2 premises)
+no proof within encoding and budget (4 rule slots, 2 premises, root dependencies unbounded)
 
 # Flat conjunction: capacity three
 
@@ -132,9 +140,11 @@ Context:
 
 Goal: $p \land q \land r$
 
-Limits: 1 rule slots, 3 premises per inference.
+Limits: 1 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (3): $p$, $q$, $r$.
 
 Combined the established conjuncts.
 
@@ -159,9 +169,11 @@ Context:
 
 Goal: $p \land q \land p \land q$
 
-Limits: 2 rule slots, 3 premises per inference.
+Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (2): $p$, $q$.
 
 Combined the established conjuncts.
 
@@ -187,9 +199,9 @@ Context:
 
 Goal: $p \land q \land r \land p \land q \land s$
 
-Limits: 3 rule slots, 3 premises per inference.
+Limits: 3 rule slots, 3 premises per inference, unbounded root dependencies.
 
-no proof within encoding and budget (3 rule slots, 3 premises)
+no proof within encoding and budget (3 rule slots, 3 premises, root dependencies unbounded)
 
 # Shared descendant: four distinct nodes
 
@@ -202,9 +214,11 @@ Context:
 
 Goal: $p \land q \land r \land p \land q \land s$
 
-Limits: 4 rule slots, 3 premises per inference.
+Limits: 4 rule slots, 3 premises per inference, unbounded root dependencies.
 
 Found proof.
+
+Remaining assumptions (4): $p$, $q$, $r$, $s$.
 
 Combined the established conjuncts.
 
@@ -229,9 +243,9 @@ Context:
 
 Goal: $p \land q$
 
-Limits: 2 rule slots, 3 premises per inference.
+Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
 
-no proof within encoding and budget (2 rule slots, 3 premises)
+no proof within encoding and budget (2 rule slots, 3 premises, root dependencies unbounded)
 
 # Elimination is not an available rule
 
@@ -241,6 +255,218 @@ Context:
 
 Goal: $p$
 
-Limits: 2 rule slots, 3 premises per inference.
+Limits: 2 rule slots, 3 premises per inference, unbounded root dependencies.
 
-no proof within encoding and budget (2 rule slots, 3 premises)
+no proof within encoding and budget (2 rule slots, 3 premises, root dependencies unbounded)
+
+# Temporary assumption identity
+
+Context:
+
+(empty)
+
+Goal: $p \implies p$
+
+Limits: 1 rule slots, 3 premises per inference, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Proof tree:
+
+$$
+\dfrac{\left[p\right]^{a_{1}}}{p \implies p}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# One temporary assumption used twice
+
+Context:
+
+(empty)
+
+Goal: $p \implies p \land p$
+
+Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}} \qquad \left[p\right]^{a_{1}}}{p \land p}\;(\land I)}{p \implies p \land p}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Vacuous inner discharge
+
+Context:
+
+(empty)
+
+Goal: $p \implies \left(q \implies p\right)$
+
+Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}}}{q \implies p}\;(\Rightarrow I)}{p \implies \left(q \implies p\right)}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Nested discharges
+
+Context:
+
+(empty)
+
+Goal: $p \implies \left(q \implies p \land q\right)$
+
+Limits: 3 rule slots, 3 premises per inference, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 1 assumption(s) at the final inference.
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+- $a_{2}$: $q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\dfrac{\left[p\right]^{a_{1}} \qquad \left[q\right]^{a_{2}}}{p \land q}\;(\land I)}{q \implies p \land q}\;(\Rightarrow I\,[a_{2}])}{p \implies \left(q \implies p \land q\right)}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Independent closed branches
+
+Context:
+
+(empty)
+
+Goal: $\left(p \implies p\right) \land \left(q \implies q\right)$
+
+Limits: 3 rule slots, 3 premises per inference, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Combined the established conjuncts.
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+- $a_{2}$: $q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}}}{p \implies p}\;(\Rightarrow I\,[a_{1}]) \qquad \dfrac{\left[q\right]^{a_{2}}}{q \implies q}\;(\Rightarrow I\,[a_{2}])}{\left(p \implies p\right) \land \left(q \implies q\right)}\;(\land I)
+$$
+
+# Temporary assumption cannot escape a sibling
+
+Context:
+
+(empty)
+
+Goal: $\left(p \implies p\right) \land p$
+
+Limits: 3 rule slots, 3 premises per inference, unbounded root dependencies.
+
+no proof within encoding and budget (3 rule slots, 3 premises, root dependencies unbounded)
+
+# Remaining ambient dependency
+
+Context:
+
+- $q$
+
+Goal: $p \implies p \land q$
+
+Limits: 2 rule slots, 3 premises per inference, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $q$.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p$
+
+Supporting facts:
+
+- $q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\left[p\right]^{a_{1}} \qquad q}{p \land q}\;(\land I)}{p \implies p \land q}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Root dependency bound zero
+
+Context:
+
+- $q$
+
+Goal: $p \implies p \land q$
+
+Limits: 2 rule slots, 3 premises per inference, 0 root dependencies.
+
+no proof within encoding and budget (2 rule slots, 3 premises, root dependencies 0)
+
+# One ambient assumption used twice
+
+Context:
+
+- $p$
+
+Goal: $p \land p$
+
+Limits: 1 rule slots, 3 premises per inference, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p$.
+
+Combined the established conjuncts.
+
+Supporting facts:
+
+- $p$
+
+Proof tree:
+
+$$
+\dfrac{p \qquad p}{p \land p}\;(\land I)
+$$
