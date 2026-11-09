@@ -1,5 +1,5 @@
 //! Standalone bounded conjunction and disjunction introduction/elimination,
-//! and implication introduction with exact
+//! and implication introduction/elimination with exact
 //! assumption dependencies. The budget counts distinct
 //! reachable non-leaf proof values, numbered in canonical BFS order. Context facts
 //! stay leaves, and finding a proof never commits it to the context.
@@ -328,18 +328,28 @@ impl<'a> Query<'a> {
                 constraints.push(self.proofs.is_unused(slot)?.implies(bit.not()));
             }
             for (shape, premises) in self.proofs.premise_cases(slot, self.limits.max_premises)? {
-                let and_case = Bool::and(&[
-                    shape.clone(),
-                    self.proofs
-                        .and_introduction(&self.expressions, &premises, slot)?,
-                ]);
+                let mut union_rules =
+                    vec![
+                        self.proofs
+                            .and_introduction(&self.expressions, &premises, slot)?,
+                    ];
+                if premises.len() == 2 {
+                    union_rules.push(self.proofs.implication_elimination(
+                        &self.expressions,
+                        &premises[0],
+                        &premises[1],
+                        slot,
+                    )?);
+                }
+                let union_case = Bool::and(&[shape.clone(), Bool::or(&union_rules)]);
                 for a in 0..self.assumption_formulas.len() {
                     let child_bits = premises
                         .iter()
                         .map(|p| self.dependency(p, a))
                         .collect::<Result<Vec<_>, _>>()?;
-                    constraints
-                        .push(and_case.implies(self.dependencies[i][a].eq(Bool::or(&child_bits))));
+                    constraints.push(
+                        union_case.implies(self.dependencies[i][a].eq(Bool::or(&child_bits))),
+                    );
                 }
                 if premises.len() >= 2 {
                     let case = Bool::and(&[
@@ -694,6 +704,32 @@ impl<'a, 'c> Decoder<'a, 'c> {
                             });
                         }
                         NaturalDeductionProof::DisjunctionElimination { disjunction, cases }
+                    }
+                    ProofRule::ImplicationElimination => {
+                        if inputs.len() != 2 {
+                            return Err(SearchError::InvalidModel(
+                                "implication elimination requires two premises".into(),
+                            ));
+                        }
+                        let RawExpr::LogicChain(chain) = &inputs[0].conclusion().raw else {
+                            return Err(SearchError::InvalidModel(
+                                "implication premise expected".into(),
+                            ));
+                        };
+                        let [(Logic::Imp, body)] = chain.assertions.as_slice() else {
+                            return Err(SearchError::InvalidModel(
+                                "single implication expected".into(),
+                            ));
+                        };
+                        if &chain.start != inputs[1].conclusion() || body != &meaning {
+                            return Err(SearchError::InvalidModel(
+                                "implication elimination formulas do not match".into(),
+                            ));
+                        }
+                        NaturalDeductionProof::ImplicationElimination {
+                            implication: inputs.remove(0),
+                            antecedent: inputs.remove(0),
+                        }
                     }
                     ProofRule::ImplicationIntroduction => {
                         if inputs.len() != 1 {

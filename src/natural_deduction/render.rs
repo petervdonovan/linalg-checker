@@ -25,6 +25,7 @@ impl NaturalDeductionProof {
             Self::UniversalIntroduction { .. } => "\\forall I",
             Self::UniversalElimination { .. } => "\\forall E",
             Self::ImplicationIntroduction { .. } => "\\Rightarrow I",
+            Self::ImplicationElimination { .. } => "\\Rightarrow E",
             Self::Assumption { .. } => "assumption",
             Self::External | Self::ScopedGoal { .. } => "established",
         }
@@ -265,6 +266,10 @@ impl NaturalDeductionProof {
                             })
                             .collect::<Vec<_>>()
                             .join("\n")
+                    }
+                    Self::ImplicationElimination { .. } => {
+                        "Applied the established implication to its established antecedent."
+                            .to_owned()
                     }
                     Self::ConjunctionIntroduction { .. } => {
                         "Combined the established conjuncts.".to_owned()

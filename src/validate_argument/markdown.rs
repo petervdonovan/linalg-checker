@@ -472,6 +472,7 @@ fn validation_details(
             Proof::UniversalElimination { .. } => "✅ verified by universal elimination",
             Proof::UniversalIntroduction { .. } => "✅ verified by universal introduction",
             Proof::ImplicationIntroduction { .. } => "✅ verified by implication introduction",
+            Proof::ImplicationElimination { .. } => "✅ verified by implication elimination",
             _ => "✅ verified",
         };
         let warning = validation.checks.iter().find_map(|check| match check {

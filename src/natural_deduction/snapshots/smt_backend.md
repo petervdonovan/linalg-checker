@@ -913,3 +913,131 @@ Goal: $p$
 Limits: 1 rule slots, 3 premises per inference, finop arity 3, 0 root dependencies.
 
 no proof within encoding and budget (1 rule slots, 3 premises, finop arity 3, root dependencies 0)
+
+# Implication elimination
+
+Context:
+
+- $p \implies q$
+- $p$
+
+Goal: $q$
+
+Limits: 1 rule slots, 2 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (2): $p \implies q$, $p$.
+
+Applied the established implication to its established antecedent.
+
+Supporting facts:
+
+- $p \implies q$
+- $p$
+
+Proof tree:
+
+$$
+\dfrac{p \implies q \qquad p}{q}\;(\Rightarrow E)
+$$
+
+# Chained implication elimination
+
+Context:
+
+- $p \implies q$
+- $q \implies r$
+- $p$
+
+Goal: $r$
+
+Limits: 2 rule slots, 2 premises per inference, finop arity 3, unbounded root dependencies.
+
+Found proof.
+
+Remaining assumptions (3): $p \implies q$, $q \implies r$, $p$.
+
+Applied the established implication to its established antecedent.
+
+Supporting facts:
+
+- $q \implies r$
+- $p \implies q$
+- $p$
+
+Proof tree:
+
+$$
+\dfrac{q \implies r \qquad \dfrac{p \implies q \qquad p}{q}\;(\Rightarrow E)}{r}\;(\Rightarrow E)
+$$
+
+# Implication elimination under introduction
+
+Context:
+
+- $p \implies q$
+
+Goal: $p \land r \implies q$
+
+Limits: 3 rule slots, 2 premises per inference, finop arity 3, 1 root dependencies.
+
+Found proof.
+
+Remaining assumptions (1): $p \implies q$.
+
+Discharged 1 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $p \land r$
+
+Supporting facts:
+
+- $p \implies q$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{p \implies q \qquad \dfrac{\left[p \land r\right]^{a_{1}}}{p}\;(\land E_{1})}{q}\;(\Rightarrow E)}{p \land r \implies q}\;(\Rightarrow I\,[a_{1}])
+$$
+
+# Closed modus ponens
+
+Context:
+
+(empty)
+
+Goal: $\left(p \implies q\right) \land p \implies q$
+
+Limits: 4 rule slots, 2 premises per inference, finop arity 3, 0 root dependencies.
+
+Found proof.
+
+Remaining assumptions (0): none.
+
+Discharged 2 assumption(s).
+
+Discharged assumptions:
+
+- $a_{1}$: $\left(p \implies q\right) \land p$
+- $a_{2}$: $\left(p \implies q\right) \land p$
+
+Proof tree:
+
+$$
+\dfrac{\dfrac{\dfrac{\left[\left(p \implies q\right) \land p\right]^{a_{1}}}{p \implies q}\;(\land E_{1}) \qquad \dfrac{\left[\left(p \implies q\right) \land p\right]^{a_{2}}}{p}\;(\land E_{2})}{q}\;(\Rightarrow E)}{\left(p \implies q\right) \land p \implies q}\;(\Rightarrow I\,[a_{1},a_{2}])
+$$
+
+# Implication elimination blocked by dependency bound
+
+Context:
+
+- $p \implies q$
+- $p$
+
+Goal: $q$
+
+Limits: 1 rule slots, 2 premises per inference, finop arity 3, 1 root dependencies.
+
+no proof within encoding and budget (1 rule slots, 2 premises, finop arity 3, root dependencies 1)

@@ -111,6 +111,10 @@ pub enum NaturalDeductionProof {
         discharged: BTreeSet<AssumptionId>,
         discharged_formulas: BTreeMap<AssumptionId, Expr<()>>,
     },
+    ImplicationElimination {
+        implication: ProofInput,
+        antecedent: ProofInput,
+    },
     ImplicationIntroduction {
         premise: ProofInput,
         discharged: BTreeSet<AssumptionId>,

@@ -85,8 +85,7 @@ surface membership statement.
 ## Standalone SMT proof search
 
 `smt_backend::find_proof(context, conclusion, interpreter, limits, timings)` searches
-for conjunction and disjunction introduction/elimination, and implication
-introduction over visible
+for conjunction, disjunction, and implication introduction/elimination over visible
 contextual sources and temporary assumptions. It returns one checked conclusion and a `Derivation` for
 the caller to record explicitly. Every visible nondominated contextual derivation
 has its own source identity; equal formulas do not erase assumption identities or
@@ -111,7 +110,8 @@ Contextual reuse needs zero slots, even at zero premise capacity. Empty
 introductions are not supported, and conjunction order/nesting are preserved.
 
 Each slot and the root have exact Boolean dependency vectors over ambient and
-temporary assumption identities. Conjunction introduction unions premise sets;
+temporary assumption identities. Conjunction introduction and implication elimination
+union premise sets;
 conjunction elimination and disjunction introduction copy their whole premise
 dependency sets unchanged;
 implication introduction removes the used assumptions whose encoded formula
@@ -132,6 +132,14 @@ consumes one proof premise even when the conjunction contains many operands. A
 single elimination rule selects any immediate operand; nested projection needs
 multiple steps. Empty conjunctions have no eliminations. Decoding retains the
 first matching operand index as evidence, without separate left/right rules.
+
+Implication elimination (modus ponens) has exactly two ordered premises: a single
+implication P⇒Q and a proof of P, concluding Q. It preserves the union of both
+premise dependency sets and discharges nothing. It needs proof-premise capacity
+two and one inference slot beyond any internal premise proofs; no new temporary
+assumptions are allocated. Matching is structural, and multi-link implication
+chains must undergo existing logic lowering first. Evidence renders with a
+`\Rightarrow E` label, keeping contextual premises as leaves.
 
 Disjunction introduction is also unary. Its conclusion must be an Or whose
 immediate operand equals the premise conclusion. Other disjuncts need no proofs,

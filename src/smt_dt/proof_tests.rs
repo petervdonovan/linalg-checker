@@ -788,3 +788,62 @@ fn disjunction_elimination_requires_exact_nonempty_cases_and_common_conclusion()
     );
     assert_eq!(solver.check(), SatResult::Unsat);
 }
+
+#[test]
+fn implication_elimination_requires_ordered_matching_premises_and_conclusion() {
+    let mut e = ExprDatatype::with_max_finop_arity("apply_expr", 3);
+    let proofs = ProofDatatype::new("apply", &e);
+    let values = ["p", "q", "r"].map(|name| e.encode(&atom(name)).unwrap());
+    let implication = proofs
+        .established(&e.implication(&values[0], &values[1]).unwrap(), 0, &e)
+        .unwrap();
+    let p = proofs.established(&values[0], 1, &e).unwrap();
+    let q = proofs.established(&values[1], 2, &e).unwrap();
+    for (source, argument, conclusion, valid) in [
+        (implication.clone(), p.clone(), values[1].clone(), true),
+        (implication.clone(), q.clone(), values[1].clone(), false),
+        (p.clone(), implication.clone(), values[1].clone(), false),
+        (p.clone(), p.clone(), values[1].clone(), false),
+        (implication.clone(), p.clone(), values[2].clone(), false),
+        (proofs.unused(), p.clone(), values[1].clone(), false),
+        (
+            implication.clone(),
+            proofs.unused(),
+            values[1].clone(),
+            false,
+        ),
+    ] {
+        let root = proofs.constant("apply_root");
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(
+            proofs
+                .implication_elimination(&e, &source, &argument, &root)
+                .unwrap(),
+        );
+        solver.assert(proofs.conclusion(&root).unwrap().eq(conclusion));
+        assert_eq!(
+            solver.check(),
+            if valid {
+                SatResult::Sat
+            } else {
+                SatResult::Unsat
+            }
+        );
+    }
+    for children in [
+        vec![],
+        vec![implication.clone()],
+        vec![implication.clone(), p.clone(), q.clone()],
+    ] {
+        let invalid = proofs
+            .inference(&values[1], ProofRule::ImplicationElimination, &children)
+            .unwrap();
+        let solver = Solver::new_for_logic("QF_DT").unwrap();
+        solver.assert(
+            proofs
+                .implication_elimination(&e, &implication, &p, &invalid)
+                .unwrap(),
+        );
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+}

@@ -42,6 +42,7 @@ pub enum ProofRule {
     OrIntroduction,
     OrElimination,
     ImplicationIntroduction,
+    ImplicationElimination,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,7 +182,8 @@ impl ProofDatatype {
                 .variant(&format!("{namespace}.AndElimination"), vec![])
                 .variant(&format!("{namespace}.OrIntroduction"), vec![])
                 .variant(&format!("{namespace}.OrElimination"), vec![])
-                .variant(&format!("{namespace}.ImplicationIntroduction"), vec![]),
+                .variant(&format!("{namespace}.ImplicationIntroduction"), vec![])
+                .variant(&format!("{namespace}.ImplicationElimination"), vec![]),
             DatatypeBuilder::new(assumption_name)
                 .variant(
                     &format!("{namespace}.Ambient"),
@@ -301,6 +303,7 @@ impl ProofDatatype {
             ProofRule::OrIntroduction => app(&self.rule, "OrIntroduction", &[]),
             ProofRule::OrElimination => app(&self.rule, "OrElimination", &[]),
             ProofRule::ImplicationIntroduction => app(&self.rule, "ImplicationIntroduction", &[]),
+            ProofRule::ImplicationElimination => app(&self.rule, "ImplicationElimination", &[]),
         };
         Ok(app(
             &self.proof,
@@ -357,6 +360,7 @@ impl ProofDatatype {
                     "OrIntroduction" => ProofRule::OrIntroduction,
                     "OrElimination" => ProofRule::OrElimination,
                     "ImplicationIntroduction" => ProofRule::ImplicationIntroduction,
+                    "ImplicationElimination" => ProofRule::ImplicationElimination,
                     _ => return Err(Error::Malformed("unknown proof rule")),
                 };
                 Ok(ProofNode::Inference {
@@ -524,6 +528,27 @@ impl ProofDatatype {
                 &formula,
                 ProofRule::ImplicationIntroduction,
                 std::slice::from_ref(premise),
+            )?),
+        ]))
+    }
+    /// Modus ponens, with the implication first and its antecedent second.
+    pub fn implication_elimination(
+        &self,
+        expressions: &ExprDatatype,
+        implication: &Datatype,
+        antecedent: &Datatype,
+        parent: &Datatype,
+    ) -> Result<Bool, Error> {
+        let conclusion = self.conclusion(parent)?;
+        let formula = expressions.implication(&self.conclusion(antecedent)?, &conclusion)?;
+        Ok(Bool::and(&[
+            self.is_unused(implication)?.not(),
+            self.is_unused(antecedent)?.not(),
+            self.conclusion(implication)?.eq(formula),
+            parent.eq(self.inference(
+                &conclusion,
+                ProofRule::ImplicationElimination,
+                &[implication.clone(), antecedent.clone()],
             )?),
         ]))
     }
@@ -701,6 +726,14 @@ impl ProofDatatype {
             let mut rules = Vec::new();
             for (shape, premises) in self.premise_cases(slot, max_premises)? {
                 let mut applications = vec![self.and_introduction(expressions, &premises, slot)?];
+                if premises.len() == 2 {
+                    applications.push(self.implication_elimination(
+                        expressions,
+                        &premises[0],
+                        &premises[1],
+                        slot,
+                    )?);
+                }
                 if premises.len() >= 2 {
                     applications.push(self.or_elimination(
                         expressions,
