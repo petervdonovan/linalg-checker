@@ -936,8 +936,8 @@ It eliminates slot-permutation symmetry without comparing arbitrary node content
 ### 16.1 Objective and challenges
 
 Quantifier introduction and elimination require constraints that inspect the
-interior of formulas and terms: substitution, variable occurrence, binder scope,
-and typing. Constraining only proof nodes and their immediate conclusions is
+interior of formulas and terms: substitution, variable occurrence, and binder
+scope. Constraining only proof nodes and their immediate conclusions is
 insufficient. Every relevant expression descendant must be covered, including
 descendants whose structure is chosen by the solver.
 
@@ -969,8 +969,8 @@ groups are permitted.
 
 Each group represents the DAG of distinct non-leaf subexpression values reachable
 from its root. Consequently, \(m\) bounds this DAG, not the number of occurrences
-in the expanded syntax tree. Expression leaves consume no expression slots, but their validity and any
-semantic base cases must still be constrained at roots and present child
+in the expanded syntax tree. Expression leaves consume no expression slots, but
+their scope conditions and semantic base cases must still be constrained at roots and present child
 positions. Inapplicable datatype selectors must remain guarded.
 
 For \(n\) proof slots, this allocates \(nm\) expression slots. For fixed maximum
@@ -1011,7 +1011,7 @@ proof-node slot-eligibility predicate with
 \lor \operatorname{ExistentialAssumptionDeclaration}(v).
 \]
 
-Apply active-slot typing, root assignment, and child coverage using this predicate,
+Apply active-slot constructor restrictions, root assignment, and child coverage using this predicate,
 while separately excluding declarations as query roots. A declaration is
 discovered through its owner's dedicated child position and has zero outgoing
 positions. Reachability must be checked at the start of each slot's processing,
@@ -1049,32 +1049,139 @@ the conclusion of any inference.
 
 Concrete contextual leaves have no proof slots; their formulas can be traversed
 in the host language. Any such handling must preserve the declared size bounds
-and semantic checks. Instantiation terms still need explicit typing and scope
-constraints and a bound or coverage justification where their structure is not
-already covered by the represented formulas; the conclusion-group layout does not by
-itself specify a separate term-synthesis encoding.
+and semantic checks. Instantiation terms still need scope and quantifier-domain
+constraints, and a bound or coverage justification where their structure is not
+already covered by the represented formulas; the conclusion-group layout does
+not itself specify a separate term-synthesis encoding.
 
-### 16.3 Equality propagation across groups
+### 16.3 Substitution as a bounded dynamic-programming computation
 
-Independent slot groups do not imply independent choices for every expression
-constructor. Rule constraints directly equate whole formulas or subexpressions:
-implication introduction relates a child conclusion to a consequent, conjunction
-introduction relates child conclusions to operands, and implication elimination
-relates its premises and conclusion through the implication formula.
+Use direct datatype equality for rule relationships that preserve expressions,
+such as identifying a conjunct with a premise conclusion. Quantifier rules
+instead relate a quantified body to an instance. Encode that transformation by
+unrolling a substitution computation over the covered source structure, then
+equate its output with the required result formula.
 
-Preserve these structural equalities so that datatype reasoning can propagate
-known constructors and children. Once a rule and its premise connections are
-selected, assumptions and the target can determine large parts of intermediate
-formulas. Equal symbolic subexpressions also share constraints on their values,
-even when represented in separate groups.
+#### 16.3.1 State and binder depth
 
-This semantic sharing does not eliminate all duplicated representation overhead.
-Coverage, discovery, and semantic summaries may still be instantiated separately
-for each group. Furthermore, many useful equalities are conditional on proof
-choices, and intermediate formulas or witness terms can remain underdetermined.
-The expected benefit of propagation therefore requires measurement; neither the
-raw slot count nor the number of possible expression trees predicts solving time
-by itself.
+For one substitution operation with replacement term \(t\), introduce an
+expression-valued constant
+
+\[
+u_{i,d}=\operatorname{open}_d(s_i,t)
+\]
+
+for each relevant source slot \(s_i\) and traversal depth \(d\). Each substitution
+operation has its own state family. Depth counts binders crossed inside the body
+being opened, not expression-tree depth or the choice of variable to replace.
+Traversal starts at depth zero and increments when entering a nested binder.
+
+For example, the body of \(\forall x.(P(x)\land\forall y.R(x,y))\) is
+
+```text
+And(P(#0), Forall(R(#1, #0)))
+```
+
+Opening the outer binder replaces `#0` in `P` at depth zero and `#1` in `R` at
+depth one. The inner `#0` denotes `y` and remains unchanged.
+
+For removal of one binder, the bound-variable leaf equation is
+
+\[
+\operatorname{open}_d(\#k,t)=
+\begin{cases}
+\#k & k<d,\\
+\operatorname{shift}_d(t) & k=d,\\
+\#(k-1) & k>d.
+\end{cases}
+\]
+
+Here \(\operatorname{shift}_d\) raises the replacement's externally bound indices
+by \(d\), respecting binders internal to the replacement. It is the identity on
+nonce variables and terms with no externally bound indices. Non-variable leaves
+are preserved unless their constructor has another explicitly specified role in
+substitution.
+
+The depth dimension is necessary because structural DAG sharing is independent
+of binder context. In `And(P(#0), Forall(P(#0)))`, both occurrences of `P(#0)`
+have the same datatype value, but opening the outer binder transforms them
+differently. Conversely, substitution can merge different source values or
+replace a leaf with a compound term. Therefore source and result BFS indices
+must not be assumed to correspond, even for opening with a fresh nonce. A body
+that is a subtree of a larger formula group also does not start with its own
+independent BFS numbering.
+
+#### 16.3.2 Constructor equations and child routing
+
+The constants \(u_{i,d}\) are computed expression values, not another formula-slot
+group. They have no BFS numbering, distinctness, or independent structural budget.
+Different states may have equal outputs.
+
+For each relevant state, guard on the source constructor and reconstruct that
+constructor with transformed children and preserved non-child payloads. For
+example, a binary source node gives
+
+\[
+u_{i,d}=\operatorname{Binary}(op,v_L,v_R).
+\]
+
+For each present non-leaf source child \(c\), route its transformed value \(v\)
+through the source group's coverage:
+
+\[
+c=s_k\implies v=u_{k,d'}.
+\]
+
+Here \(d'=d\) for ordinary children and is increased by the number of binders
+introduced along that child edge. Guard these implications by state relevance,
+constructor, and child presence. For leaf children, constrain \(v\) directly by
+the leaf equations, allowing a replacement leaf to produce a compound result.
+Handle leaf source roots directly as well.
+
+Seed relevance at the body root at depth zero and propagate it through every
+recursive obligation. Every relevant non-leaf child must resolve to a covered
+source slot and a defined state. Inactive or unreachable states need not impose
+scope restrictions. The finite depth range must cover every possible reachable
+binder depth under the structural bounds; it must not silently truncate an
+obligation. A bound on binder increments and source paths gives such a range.
+If an additional traversal bound is used, expose it as a search bound.
+
+Finally, equate the transformed body root with the result formula. Constructor
+equalities connect transformed descendants to that result without enumerating
+target-slot choices. The result's existing formula group supplies its structural
+bound and coverage. This handles merging, splitting by binder context, and
+leaf-to-compound replacement without a binary source/result correspondence table.
+The source datatype's acyclicity and complete child equations justify the
+computation by structural induction; these are finite constraints, not recursive
+SMT function definitions.
+
+Replacement shifting also needs a correct bounded implementation when \(t\)
+contains externally bound indices. It may use a similar computation over the
+replacement structure. This cost is separate from routing source children.
+Concrete source expressions can instead be traversed in the host language while
+preserving the same equations and bounds.
+
+#### 16.3.3 Size and propagation
+
+For source capacity \(m\), fixed child arity, and \(D\) depth states, one
+substitution operation uses \(O(mD)\) transformed-value constants and
+\(O(Dm^2)\) child-routing constraints. Constructor equations add \(O(mD)\) size
+for a fixed schema. These estimates exclude replacement shifting, variable-length
+list handling, and selecting the source group when proof connections are
+symbolic. Total query cost also depends on the number of substitution operations
+and candidate source groups; the per-operation estimate is not a total bound.
+
+A general binary correspondence encoding has \(m^2\) possible parent pairs;
+expanding both child-slot choices for each pair can cost \(O(m^4)\). Factoring
+shared child lookups can reduce this to \(O(m^3)\) per context. The functional
+encoding avoids that target lookup by storing the transformed expression value
+itself. No runtime advantage is guaranteed solely by these size estimates.
+
+Datatype equality can propagate constructor information through the computation
+in either direction, even though the equations describe forward substitution.
+Independent formula groups still carry their own coverage and discovery costs.
+Benchmark both propagation and total solving time rather than treating semantic
+sharing as elimination of all duplicated bookkeeping.
 
 ### 16.4 Variable representation, scope, and substitution
 
@@ -1103,30 +1210,18 @@ Properties determined by a node and its children can be encoded as local
 summaries with explicit leaf cases. Occurrence or dependency summaries, where
 needed for scope checking, must account for binder context.
 
-Substitution requires a richer relation. Its inputs include the source
-expression, replacement term or assignment, and binder context; its output is
-the resulting expression. A single substituted-result field per source slot is
-insufficient because the same source value can participate in different
-substitutions or occur under different binder contexts.
+Apply the computation in Section 16.3 to relate the quantified body and the
+already represented instance. For universal introduction, opening is interpreted
+under the extended premise context; the equations must agree with that context's
+index convention. Universal elimination and existential introduction use the
+chosen instantiation term. Existential elimination uses the owner's nonce and
+the declaration child's conclusion as the result. No additional independently
+synthesized formula group is required for substitution outputs.
 
-The substitution encoding must therefore index its obligations by the relevant
-substitution and context. Relate source and result expressions in the existing
-conclusion groups; for existential elimination, the result is the declaration
-child's conclusion. Enforce constructor correspondence, variable replacement,
-and index shifting under binders. Formula coverage alone does not establish
-correct substitution.
-
-The precise traversal bookkeeping remains to be specified. It may require
-auxiliary relations or traversal states carrying source, result, and binder
-information, but does not require another independently synthesized formula
-group beyond the source and result representations. An instantiated assumption
-is represented explicitly as the declaration node's conclusion, rather
-than hidden behind an unevaluated view whose correctness still needs encoding.
-
-When a substitution source is statically known, constructing its traversal
-constraints in the host language is a possible optimization. This specializes a
-known operation without restricting the allowed replacement terms or introducing
-a menu of permitted intermediate formulas.
+The equations describe opening one binder. Quantifiers introducing multiple
+variables, restrictions, or expression-bearing types require explicit binder
+transitions for each affected child; they must not be treated as ordinary
+children merely because they use the same expression datatype.
 
 ### 16.5 Complete coverage of the expression schema
 
@@ -1139,7 +1234,51 @@ relevant constructors, lists, and expression-bearing type fields. Lists must hav
 bounded, guarded traversal with explicit termination, or their own covered
 representation. Leaf payloads, including variable identifiers and bound-variable
 indices, need the appropriate domain and scope constraints. A non-leaf expression
-budget alone does not bound every payload or make every datatype value valid.
+budget alone does not bound every payload or establish scope validity.
+
+Do not impose a blanket well-typedness constraint on every generated intermediate
+expression. Instead, make type judgments explicit premises of inference rules
+whose validity depends on domain membership. In particular, universal elimination
+and existential introduction have the forms
+
+\[
+\frac{\forall x:T.\,P(x)\qquad t:T}{P(t)}
+\qquad
+\frac{t:T\qquad P(t)}{\exists x:T.\,P(x)}.
+\]
+
+Additional quantifier restrictions likewise require their instantiated premises.
+The solver cannot instantiate a restricted quantifier at an arbitrary term
+merely because both expressions can be represented by the datatype.
+
+Initially, seed the proof context with a type judgment for each subterm of the
+input premises and overall conclusion that does not occur within a binder,
+using its externally calculated symbolic type. Do not descend into binding
+scopes when collecting these subterms, even for a subterm that does not itself
+mention the bound variable.
+These are certified contextual facts supplied by the external type analysis, not
+unconstrained assumptions the solver may invent. Preserve symbolic type
+expressions, including dimensions and other term-dependent components, and
+substitute into them when their parameters are instantiated.
+
+Supplied judgments retain any ambient hypotheses or declarations on which their
+external type analysis depends. Seeding judgments for occurrences within binders
+is deferred: it requires a representation of their local binding contexts and
+how those judgments are instantiated when binders are opened. The initial policy
+does not export judgments about bound subterms into the ambient proof context.
+
+Initially, these seeded judgments determine which instantiation terms have
+available domain evidence. Later, type-deduction rules can derive judgments for
+new terms, including terms that are not subterms of the inputs or target. Until
+those rules are present, a proof may be unavailable because its required type
+judgment is not derivable, even if the term is externally well-typed.
+
+The interpretation of intermediate expressions must still extend the semantics
+of well-typed inputs and preserve every encoded rule. Align the decoder's
+existing typing checks with this explicit-judgment policy rather than rejecting
+intermediates solely for lacking a blanket typing derivation. Structural
+constructor checks, binder-scope checks, and validation of required type-judgment
+premises remain necessary.
 
 ### 16.6 Implementation and validation plan
 
@@ -1151,19 +1290,28 @@ budget alone does not bound every payload or make every datatype value valid.
 3. Measure the representation on existing propositional cases before adding
    quantifier rules, separating query-construction time from solver time and
    including both satisfiable and insufficient-budget cases.
-4. Specify and validate de Bruijn context handling, slot-owned existential
-   nonces, substitution, and scope constraints; then add quantifier rules with
-   explicit instantiation-term and traversal budgets as needed.
+4. Implement transformed-value states, relevance propagation, constructor
+   equations, and leaf substitution with a justified binder-depth bound. Specify
+   replacement shifting and the cost of symbolic source-group selection.
+5. Validate de Bruijn context handling, slot-owned existential nonces, and scope
+   constraints; then add quantifier rules with explicit instantiation-term and
+   traversal budgets as needed. Establish the interpretation of intermediate
+   expressions and align decoder validation with it.
 
 Validation should cover equal subexpressions within and across groups, leaf
 roots, exact size boundaries, hidden descendants through lists and types, and
 the same substitution source under different replacements and binder contexts.
+Substitution tests should specifically cover a shared source subtree that splits
+at different depths, distinct subtrees that merge, leaf-to-compound replacement,
+shifting of open replacement terms, decrementation beyond the removed binder,
+leaf bodies, and completeness at the maximum reachable depth. Compare evaluated
+outputs with an independent host-language substitution implementation. Measure
+substitution overhead separately from formula-group and proof-search overhead.
 Also validate declaration slot accounting, discovery of zero-child declarations,
 unique ownership, rejection of declarations as roots or ordinary premises,
 repeated assumption-use references, unused-slot formula groups, multiple
 disjunction case assumptions without declaration slots, nested quantifiers with
-index shifting, rejection of
-escaping existential nonces, and rejection of universal generalization over a
+index shifting, rejection of escaping existential nonces, and rejection of universal generalization over a
 variable used by an undischarged assumption. Decoded proofs must continue to
 undergo independent semantic checks.
 
@@ -1173,3 +1321,31 @@ small-query solving times justify measuring this interaction early, but do not
 identify BFS or expression-slot count as the bottleneck. The initial design
 prioritizes general structural bounds and equality propagation; further
 representation optimizations should be driven by these measurements.
+
+### 16.7 Possible direction: occurrence-based expression tree slots
+
+A future alternative is to assign expression slots to non-leaf occurrences in a
+tree rather than distinct subexpression values in a DAG. Equal subexpressions at
+different positions would occupy separate slots, so active-slot value
+distinctness would no longer apply. Slot identity and child references would
+need an occurrence-based representation rather than identification by datatype
+equality. This change concerns expression groups; proof slots could remain
+DAG-based.
+
+For leaf-to-leaf substitution, the expanded tree retains its non-leaf shape even
+when nested binders cause identical source subexpressions to transform
+differently. If source and result slots are canonically numbered from
+corresponding roots, their indices can then correspond directly: constrain
+matching constructors and child positions, and apply the appropriate
+depth-dependent substitution at leaves. Binder depth still matters, but each
+occurrence has a unique path and context. If the source is a subtree of a larger
+group, its correspondence needs an explicit mapping or separate traversal
+numbering; the enclosing group's indices do not automatically align with the
+result's indices. Leaf-to-compound substitution does not preserve this shape.
+
+Such direct constraints may propagate more efficiently than the general
+transformed-value computation, which should be tested rather than assumed.
+The tradeoff is loss of structural sharing: the bound counts non-leaf
+occurrences, and an expanded tree can be exponentially larger than its DAG.
+This direction is therefore most attractive where formulas have modest sharing
+and shape-preserving substitutions dominate.
