@@ -930,3 +930,196 @@ The result is a quantifier-free SMT encoding of size
 for maximum child arity three.
 
 It eliminates slot-permutation symmetry without comparing arbitrary node contents, enumerating DAG topologies, or introducing a theory of ordered node identifiers.
+
+## 16. Bounded expression structure for quantifier rules
+
+### 16.1 Objective and challenges
+
+Quantifier introduction and elimination require constraints that inspect the
+interior of formulas and terms: substitution, variable occurrence, binder scope,
+and typing. Constraining only proof nodes and their immediate conclusions is
+insufficient. Every relevant expression descendant must be covered, including
+descendants whose structure is chosen by the solver.
+
+Explicitly expanding every possible selector path to a depth bound can produce
+exponentially many paths. The plan is instead to expose expression structure
+through bounded slot groups, applying local constraints at each represented node
+and using child coverage to ensure that no descendants escape those constraints.
+The encoding remains a general bounded structural search; it does not restrict
+intermediate formulas to a curated collection of templates.
+
+### 16.2 Formula groups attached to proof slots
+
+Keep the proof-slot encoding separate. Each inference slot owns two fixed-role
+groups, each containing at most \(m\) non-leaf expression slots:
+
+- A conclusion group, rooted at that inference's conclusion.
+- An auxiliary assumption-formula group, enabled only for existential
+  elimination and rooted at its instantiated case assumption.
+
+Group ownership is fixed by the proof-slot index; there is no pool of formula
+roots to assign to proof nodes. An unused proof slot has both groups disabled.
+For other inference rules, the auxiliary group is disabled. Disabling a group
+forces all its slots inactive and guards its semantic constraints. A disabled
+group still contributes encoding and preprocessing overhead, but requires no
+search over expression structure.
+
+Within each enabled group, adapt the root, active-prefix, distinctness,
+child-coverage, and canonical BFS constraints specified above. Distinctness and
+discovery order are local to the group: equal expression values in different
+groups are permitted.
+
+Each group represents the DAG of distinct non-leaf subexpression values reachable
+from its root. Consequently, \(m\) bounds this DAG, not the number of occurrences
+in the expanded syntax tree. Leaves consume no slots, but their validity and any
+semantic base cases must still be constrained at roots and present child
+positions. Inapplicable datatype selectors must remain guarded.
+
+For \(n\) proof slots, this allocates \(2nm\) expression slots. For fixed maximum
+expression child arity, the structural constraints occupy \(O(nm^2)\), not
+\(O(n^2m^2)\), in addition to the proof encoding. There is no BFS traversal or
+pairwise distinctness requirement across all expression groups. These estimates
+exclude substitution and other semantic constraints.
+
+Temporary assumptions reference formulas according to the owning inference's
+rule and, where applicable, ordered branch position:
+
+| Rule | Temporary assumption formula |
+|---|---|
+| Implication introduction | Antecedent of the owner's conclusion |
+| Disjunction elimination | Corresponding disjunct of the major premise's conclusion |
+| Existential elimination | Instantiated existential body in the owner's auxiliary group |
+
+Implication and disjunction assumptions are existing subformulas and need no
+separate expression groups. Disjunction elimination can provide multiple case
+assumptions, distinguished by branch position. Assumption identity and dependency
+bookkeeping remain separate from formula structure.
+
+Universal introduction proves an opened body in its premise; that body is not a
+temporary assumption and is already represented by the premise's conclusion.
+Universal elimination and existential introduction also relate premise and
+conclusion formulas already represented. Only existential elimination needs the
+auxiliary group: its opened case assumption may occur solely as an assumption
+leaf, with no inference conclusion representing it.
+
+Concrete contextual leaves have no proof slots; their formulas can be traversed
+in the host language. Any such handling must preserve the declared size bounds
+and semantic checks. Instantiation terms still need explicit typing and scope
+constraints and a bound or coverage justification where their structure is not
+already covered by the represented formulas; the two-group layout does not by
+itself specify a separate term-synthesis encoding.
+
+### 16.3 Equality propagation across groups
+
+Independent slot groups do not imply independent choices for every expression
+constructor. Rule constraints directly equate whole formulas or subexpressions:
+implication introduction relates a child conclusion to a consequent, conjunction
+introduction relates child conclusions to operands, and implication elimination
+relates its premises and conclusion through the implication formula.
+
+Preserve these structural equalities so that datatype reasoning can propagate
+known constructors and children. Once a rule and its premise connections are
+selected, assumptions and the target can determine large parts of intermediate
+formulas. Equal symbolic subexpressions also share constraints on their values,
+even when represented in separate groups.
+
+This semantic sharing does not eliminate all duplicated representation overhead.
+Coverage, discovery, and semantic summaries may still be instantiated separately
+for each group. Furthermore, many useful equalities are conditional on proof
+choices, and intermediate formulas or witness terms can remain underdetermined.
+The expected benefit of propagation therefore requires measurement; neither the
+raw slot count nor the number of possible expression trees predicts solving time
+by itself.
+
+### 16.4 Variable representation, scope, and substitution
+
+Represent bound variables with de Bruijn indices. Universal introduction checks
+its premise under an extended variable context and relates that premise's
+conclusion to the quantified body. Context extension and substitution must shift
+indices correctly under nested binders and preserve the interpretation of outer
+assumptions. No generated variable names or name-collision tests are needed.
+
+For existential elimination at proof slot \(i\), use a nonce variable \(\nu_i\)
+whose identity is determined by that slot. Nonces occupy a namespace disjoint
+from ambient variables and are distinct across slots. The auxiliary group
+represents the existential body instantiated with \(\nu_i\).
+
+Uniqueness of these identities is guaranteed by construction. Scope validity is
+a separate invariant: the existential witness must not escape into the
+elimination conclusion or its remaining assumption dependencies, and universal
+introduction must not generalize a variable on which an undischarged assumption
+depends. Enforce these requirements through variable contexts or scope/dependency
+constraints, not through searches for fresh names. References to shared proof
+nodes must respect their variable contexts. De Bruijn indices must be interpreted
+relative to those contexts rather than treated as globally meaningful variables.
+
+Properties determined by a node and its children can be encoded as local
+summaries with explicit leaf cases. Occurrence or dependency summaries, where
+needed for scope checking, must account for binder context.
+
+Substitution requires a richer relation. Its inputs include the source
+expression, replacement term or assignment, and binder context; its output is
+the resulting expression. A single substituted-result field per source slot is
+insufficient because the same source value can participate in different
+substitutions or occur under different binder contexts.
+
+The substitution encoding must therefore index its obligations by the relevant
+substitution and context. Relate source and result expressions in the existing
+conclusion groups wherever possible; for existential elimination, the result is
+in the auxiliary group. Enforce constructor correspondence, variable replacement,
+and index shifting under binders. Formula coverage alone does not establish
+correct substitution.
+
+The precise traversal bookkeeping remains to be specified. It may require
+auxiliary relations or traversal states carrying source, result, and binder
+information, but does not require another independently synthesized formula
+group beyond the source and result representations. An instantiated assumption
+is represented explicitly in the existential-elimination auxiliary group, rather
+than hidden behind an unevaluated view whose correctness still needs encoding.
+
+When a substitution source is statically known, constructing its traversal
+constraints in the host language is a possible optimization. This specializes a
+known operation without restricting the allowed replacement terms or introducing
+a menu of permitted intermediate formulas.
+
+### 16.5 Complete coverage of the expression schema
+
+The expression schema includes expressions nested in types and several list
+fields, including quantifier premises. The existing finite-operator arity bound
+does not bound every such list or every recursive expression path.
+
+Before implementation, specify the child relation, ordering, and bounds for all
+relevant constructors, lists, and expression-bearing type fields. Lists must have
+bounded, guarded traversal with explicit termination, or their own covered
+representation. Leaf payloads, including variable identifiers and bound-variable
+indices, need the appropriate domain and scope constraints. A non-leaf expression
+budget alone does not bound every payload or make every datatype value valid.
+
+### 16.6 Implementation and validation plan
+
+1. Specify the child relation and size-budget semantics for the fixed conclusion
+   and existential-elimination auxiliary groups.
+2. Add these groups and rule-directed assumption references while retaining the
+   existing proof BFS and direct structural equalities between formulas.
+3. Measure the representation on existing propositional cases before adding
+   quantifier rules, separating query-construction time from solver time and
+   including both satisfiable and insufficient-budget cases.
+4. Specify and validate de Bruijn context handling, slot-owned existential
+   nonces, substitution, and scope constraints; then add quantifier rules with
+   explicit instantiation-term and traversal budgets as needed.
+
+Validation should cover equal subexpressions within and across groups, leaf
+roots, exact size boundaries, hidden descendants through lists and types, and
+the same substitution source under different replacements and binder contexts.
+Also validate disabled auxiliary groups, multiple disjunction case assumptions
+without auxiliary groups, nested quantifiers with index shifting, rejection of
+escaping existential nonces, and rejection of universal generalization over a
+variable used by an undischarged assumption. Decoded proofs must continue to
+undergo independent semantic checks.
+
+The principal performance risk is the interaction between conditional proof
+choices, unknown expression structure, and substitution obligations. Existing
+small-query solving times justify measuring this interaction early, but do not
+identify BFS or expression-slot count as the bottleneck. The initial design
+prioritizes general structural bounds and equality propagation; further
+representation optimizations should be driven by these measurements.
